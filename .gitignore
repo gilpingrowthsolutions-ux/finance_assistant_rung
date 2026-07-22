@@ -1,0 +1,21 @@
+# Python / Virtual Environment
+__pycache__/
+*.py[cod]
+venv/
+.venv/
+env/
+
+# Databases & Local Logs
+*.db
+*.sqlite
+*.sqlite3
+
+# Environment Variables & API Keys
+.env
+.env.local
+secrets.json
+
+# IDE / OS junk
+.DS_Store
+.vscode/
+.idea/

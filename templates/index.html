@@ -1,0 +1,1518 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Rung · Personal Finance Assistant</title>
+
+  <!-- Pre-render theme restore. Runs synchronously in <head> BEFORE
+       the <style> block so the user's stored preference is applied
+       before first paint — prevents a brief dark-flash for users who
+       picked light (and vice versa). Mirrors the localStorage logic
+       in initTheme() below. Marking data-theme-source="user" excludes
+       this user from the @media (prefers-color-scheme) overrides so
+       OS preference no longer overwrites their choice. Tolerates
+       private-mode / quota failures silently. -->
+  <script>
+    (function () {
+      try {
+        var p = localStorage.getItem('rung:theme-pref');
+        if (p === 'dark' || p === 'light') {
+          document.documentElement.setAttribute('data-theme', p);
+          document.documentElement.setAttribute('data-theme-source', 'user');
+        }
+      } catch (_) {}
+    })();
+  </script>
+
+  <!-- Plaid Link SDK (existing integration, preserved) -->
+  <script src="https://cdn.plaid.com/link/v2/stable/link-initialize.js"></script>
+
+  <!-- Prepare-Mode Storage Helpers (standalone, testable) -->
+  <script src="/static/js/prepare-storage.js"></script>
+
+    <!-- Recipes module (standalone, testable) -->
+  <script src="/static/js/recipes.js"></script>
+
+    <!-- Grocery module (standalone, testable) -->
+  <script src="/static/js/grocery.js"></script>
+
+    <!-- Transactions + recurring-bills module (standalone, testable) -->
+  <script src="/static/js/transactions.js"></script>
+
+  
+  <style>
+    /* =============================================================
+       THEME VARIABLES — dark default, light override via [data-theme]
+    ============================================================= */
+    :root {
+      /* OS-level color-scheme hint — scrollbars, native form-control
+         backgrounds (checkbox / radio / range rendered with
+         accent-color), and other UA-drawn chrome follow our declared
+         palette so the accent stays vivid even when the browser
+         draws chrome itself. Declaring both "dark light" lets the UA
+         pick the closest match to the user's OS preference. */
+      color-scheme: dark light;
+      --radius-sm: 6px;
+      --radius-md: 10px;
+      --radius-lg: 14px;
+      --shadow-sm: 0 1px 2px rgba(0,0,0,.04), 0 2px 6px rgba(0,0,0,.04);
+      --shadow-md: 0 4px 14px rgba(0,0,0,.06);
+      --transition: 160ms cubic-bezier(.2,.7,.3,1);
+      --sidebar-w: 240px;
+
+      --bg: #0f1115;
+      --bg-elev: #161a22;
+      --bg-sunken: #0a0c10;
+      --border: #232934;
+      --border-strong: #2e3543;
+      --text: #e6e8ec;
+      --text-dim: #a0a6b2;
+      --text-mute: #6b7280;
+      --accent: #2dbf6e;
+      --accent-dim: #1f8c50;
+      --accent-soft: rgba(45,191,110,.14);
+      --danger: #f43f5e;
+      --warn: #f59e0b;
+      --positive: #2dbf6e;
+    }
+    [data-theme="light"] {
+      --bg: #f6f7f9;
+      --bg-elev: #ffffff;
+      --bg-sunken: #eef0f4;
+      --border: #e3e6ec;
+      --border-strong: #cdd2db;
+      --text: #1a1d23;
+      --text-dim: #4b5260;
+      --text-mute: #8a91a0;
+      --accent-dim: #1f8c50;
+      --accent-soft: rgba(31,140,80,.10);
+      --shadow-sm: 0 1px 2px rgba(15,17,21,.04), 0 2px 6px rgba(15,17,21,.05);
+      --shadow-md: 0 4px 14px rgba(15,17,21,.06);
+    }
+
+    /* OS-level color-scheme overrides — AUTO-HONOR OS PREFERENCE ON FIRST LOAD.
+       The :not([data-theme-source="user"]) guard fires when the user
+       has NOT yet toggled the theme (default markup carries no
+       data-theme-source). Once the user clicks the theme toggle, JS
+       sets data-theme-source="user" and persists to localStorage so
+       the explicit choice wins on subsequent reloads — the :not()
+       excludes that user and the explicit [data-theme=...] block
+       takes over. The inline <head> boot script prevents a
+       dark-flash for returning users. This makes the user's literal
+       intent ("Auto-honor the OS preference on first load") work
+       while preserving explicit-choice-wins-on-reload semantics. */
+    @media (prefers-color-scheme: dark) {
+      :root:not([data-theme-source="user"]) {
+        /* Bump accent brightness + softness so checkbox dots / radio
+           fills / focus rings / Range thumbs stay vivid against the
+           OS-dark native chrome (scrollbars, default form-control
+           backgrounds). */
+        --accent: #34d57a;
+        --accent-dim: #26a86a;
+      }
+    }
+    @media (prefers-color-scheme: light) {
+      :root:not([data-theme-source="user"]) {
+        /* Brand-new users on a light OS get the FULL light palette
+           on first load so the page looks at home instead of forcing
+           them to discover the theme toggle. Mirrors the variables
+           [data-theme="light"] below; the cascade is structured so an
+           explicit user choice wins afterwards because the
+           :not([data-theme-source="user"]) guard excludes them and
+           the explicit [data-theme=...] rule applies instead. */
+        --bg: #f6f7f9;
+        --bg-elev: #ffffff;
+        --bg-sunken: #eef0f4;
+        --border: #e3e6ec;
+        --border-strong: #cdd2db;
+        --text: #1a1d23;
+        --text-dim: #4b5260;
+        --text-mute: #8a91a0;
+        --accent: #1f8c50;
+        --accent-dim: #156b3c;
+        --accent-soft: rgba(31,140,80,.10);
+        --shadow-sm: 0 1px 2px rgba(15,17,21,.04), 0 2px 6px rgba(15,17,21,.05);
+        --shadow-md: 0 4px 14px rgba(15,17,21,.06);
+      }
+    }
+
+    /* RESET / BASE */
+    *, *::before, *::after { box-sizing: border-box; }
+    html, body { height: 100%; }
+    body {
+      margin: 0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+        "Helvetica Neue", Arial, "Noto Sans", sans-serif;
+      background: var(--bg); color: var(--text);
+      display: grid;
+      grid-template-columns: var(--sidebar-w) 1fr;
+      grid-template-rows: 100vh;
+      overflow: hidden;
+      -webkit-font-smoothing: antialiased;
+      text-rendering: optimizeLegibility;
+    }
+    h1, h2, h3, h4 { margin: 0; font-weight: 700; letter-spacing: -0.01em; }
+    button { font-family: inherit; cursor: pointer; }
+    a { color: inherit; text-decoration: none; }
+
+    /* SIDEBAR */
+    .sidebar {
+      background: var(--bg-elev);
+      border-right: 1px solid var(--border);
+      display: grid;
+      grid-template-rows: auto 1fr auto;
+      padding: 22px 14px 16px;
+      gap: 18px;
+      position: sticky; top: 0; align-self: stretch;
+    }
+    .brand {
+      display: flex; align-items: center; gap: 12px;
+      padding: 4px 10px 18px;
+      border-bottom: 1px solid var(--border);
+    }
+    .brand-mark {
+      width: 36px; height: 36px;
+      display: grid; place-items: center;
+      border-radius: 10px;
+      background: linear-gradient(135deg, var(--accent), var(--accent-dim));
+      color: #fff; font-weight: 800; font-size: 1.15rem;
+      letter-spacing: -0.02em;
+      box-shadow: var(--shadow-sm);
+    }
+    .brand-text { display: flex; flex-direction: column; line-height: 1.1; }
+    .brand-text strong { font-size: 1.15rem; letter-spacing: -0.02em; }
+    .brand-text small {
+      font-size: 0.72rem; color: var(--text-mute);
+      letter-spacing: 0.08em; text-transform: uppercase; margin-top: 2px;
+    }
+
+    .nav { display: flex; flex-direction: column; gap: 2px; padding: 4px 0; overflow-y: auto; }
+    .nav-link {
+      position: relative;
+      display: flex; align-items: center; gap: 10px;
+      padding: 10px 12px;
+      border-radius: var(--radius-md);
+      color: var(--text-dim); font-size: 0.92rem; font-weight: 600;
+      transition: background var(--transition), color var(--transition), transform var(--transition);
+    }
+    .nav-link:hover { background: var(--bg-sunken); color: var(--text); }
+    /* Keyboard focus ring on sidebar nav: uses negative outline-offset
+       so the ring follows the rounded nav-link border-radius; full-
+       saturation accent so it's visible against the soft hover/accent
+       backgrounds. */
+    .nav-link:focus-visible {
+      outline: 2px solid var(--accent);
+      outline-offset: -2px;
+      border-radius: var(--radius-md);
+    }
+    .nav-link.is-active { color: var(--accent); background: var(--accent-soft); }
+    .nav-link.is-active::before {
+      content: "";
+      position: absolute;
+      left: -14px; top: 8px; bottom: 8px;
+      width: 3px; background: var(--accent); border-radius: 0 3px 3px 0;
+    }
+    .nav-link .nav-ico { width: 18px; height: 18px; display: inline-grid; place-items: center; font-size: 0.85rem; opacity: .9; }
+
+    .sidebar-foot {
+      display: flex; flex-direction: column; gap: 8px;
+      padding: 6px 4px 2px; border-top: 1px solid var(--border);
+    }
+    .theme-toggle {
+      width: 100%; display: flex; align-items: center; justify-content: space-between;
+      background: transparent; color: var(--text-dim);
+      border: 1px solid var(--border); border-radius: var(--radius-md);
+      padding: 9px 12px; font-size: 0.85rem;
+      transition: background var(--transition), color var(--transition), border-color var(--transition);
+    }
+    .theme-toggle:hover { color: var(--text); border-color: var(--border-strong); }
+
+    /* MAIN CONTENT */
+    .content { overflow-y: auto; padding: 32px 40px 60px; background: var(--bg); }
+    .page { display: none; animation: fade-in 220ms ease both; }
+    .page.is-active { display: block; }
+    @keyframes fade-in { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: translateY(0); } }
+
+    .page-head { display: flex; align-items: flex-end; justify-content: space-between; gap: 24px; margin-bottom: 24px; }
+    .page-head h1 { font-size: 1.6rem; }
+    .page-head .subtitle { color: var(--text-mute); font-size: 0.88rem; margin-top: 4px; }
+    .page-head .head-actions { display: flex; gap: 8px; }
+
+    /* KPI / PANELS */
+    .kpi-row {
+      display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 14px; margin-bottom: 22px;
+    }
+    @media (max-width: 980px) { .kpi-row { grid-template-columns: repeat(2, 1fr); } }
+    .card {
+      background: var(--bg-elev); border: 1px solid var(--border);
+      border-radius: var(--radius-lg); padding: 16px 18px; box-shadow: var(--shadow-sm);
+      transition: border-color var(--transition), transform var(--transition);
+    }
+    .card:hover { border-color: var(--border-strong); }
+    .card .card-label {
+      font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.08em;
+      color: var(--text-mute); font-weight: 700; margin-bottom: 8px;
+    }
+    .card .card-value { font-size: 1.85rem; font-weight: 800; letter-spacing: -0.02em; }
+    .card.is-positive .card-value { color: var(--positive); }
+    .card.is-danger  .card-value  { color: var(--danger); }
+    .card .card-foot { margin-top: 6px; font-size: 0.78rem; color: var(--text-mute); }
+
+    .panel {
+      background: var(--bg-elev); border: 1px solid var(--border);
+      border-radius: var(--radius-lg); padding: 22px; box-shadow: var(--shadow-sm);
+      margin-bottom: 18px;
+    }
+    .panel h2 { font-size: 1.05rem; margin-bottom: 4px; }
+    .panel .panel-sub { color: var(--text-mute); font-size: 0.85rem; margin-bottom: 16px; }
+    .split { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+    @media (max-width: 1100px) { .split { grid-template-columns: 1fr; } }
+    .three { display: grid; grid-template-columns: repeat(3, minmax(0,1fr)); gap: 16px; }
+    @media (max-width: 1100px) { .three { grid-template-columns: 1fr; } }
+
+    /* FORMS */
+    .field { display: flex; flex-direction: column; gap: 6px; margin-bottom: 12px; }
+    .field label { font-size: 0.78rem; font-weight: 600; color: var(--text-dim); letter-spacing: 0.02em; }
+    .field input, .field select, .field textarea {
+      background: var(--bg-sunken); border: 1px solid var(--border); color: var(--text);
+      border-radius: var(--radius-md); padding: 10px 12px;
+      font-size: 0.92rem; font-family: inherit;
+      transition: border-color var(--transition), box-shadow var(--transition);
+    }
+    .field input:focus, .field select:focus, .field textarea:focus {
+      outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft);
+    }
+    /* Keyboard-only focus ring on form controls. The .field input:focus
+       rule above already tints the border on mouse focus; these rules
+       ONLY fire when the user navigates via keyboard (Tab) so the cue
+       is sharp — and not noisy on every click. Same outline pattern
+       as .btn:focus-visible / .nav-link:focus-visible so the entire
+       app reads consistently. */
+    .field input:focus-visible,
+    .field select:focus-visible,
+    .field textarea:focus-visible {
+      outline: 2px solid var(--accent);
+      outline-offset: 2px;
+      border-color: var(--accent);
+    }
+    /* Recipe-selection checkboxes (Recipes tab) + any future checkbox
+       / radio: native browser checkboxes get a 2px accent ring on
+       keyboard focus (otherwise they have only a thin browser-default
+       outline that varies between engines), and accent-color tints
+       both the unchecked focus dot and the checked fill to brand
+       green so the control reads visually connected to the rest of
+       the form without rewriting it as a custom widget. */
+    input[type="checkbox"]:focus-visible,
+    input[type="radio"]:focus-visible {
+      outline: 2px solid var(--accent);
+      outline-offset: 2px;
+      border-radius: 3px;
+    }
+    input[type="checkbox"],
+    input[type="radio"] {
+      accent-color: var(--accent);
+    }
+    .btn {
+      border: 1px solid transparent; border-radius: var(--radius-md);
+      padding: 9px 16px; font-size: 0.88rem; font-weight: 700;
+      background: var(--bg-sunken); color: var(--text);
+      transition: background var(--transition), transform var(--transition),
+        border-color var(--transition), color var(--transition);
+    }
+    .btn:hover { border-color: var(--border-strong); transform: translateY(-1px); }
+    .btn.is-primary { background: var(--accent); color: #fff; border-color: var(--accent); }
+    .btn.is-primary:hover { background: var(--accent-dim); border-color: var(--accent-dim); }
+    .btn.is-ghost { background: transparent; color: var(--text-dim); border-color: var(--border); }
+    .btn.is-ghost:hover { color: var(--text); border-color: var(--border-strong); }
+    .btn.is-danger { color: var(--danger); border-color: transparent; background: transparent; }
+    .btn.is-danger:hover { background: rgba(244,63,94,.10); }
+    /* Consistent focus + click feedback across all .btn variants.
+       The .btn:hover rule above already provides the 1px lift; mirror
+       the same affordance as .prepare-resume-chip: :focus-visible
+       gets a soft accent ring (keyboard users get the same visual
+       cue) and :active presses the lift back to 0 so click feels
+       tactile. */
+    .btn:focus-visible {
+      outline: 2px solid var(--accent-soft);
+      outline-offset: 2px;
+    }
+    .btn.is-primary:focus-visible {
+      outline-color: var(--accent);
+    }
+    .btn:active { transform: translateY(0); }
+
+    /* Keyboard focus ring on <details><summary> disclosure rows.
+       Used by the recipe card's Instructions disclosure; soft accent
+       tint so it reads as informational, slightly inset via
+       border-radius for the small disclosure hit target. */
+    summary:focus-visible {
+      outline: 2px solid var(--accent-soft);
+      outline-offset: 2px;
+      border-radius: 4px;
+    }
+    .row { display: flex; gap: 8px; align-items: center; }
+    .row-end { justify-content: flex-end; }
+
+    /* LIST ITEMS */
+    .list { display: flex; flex-direction: column; gap: 8px; }
+    .list-item {
+      display: grid;
+      grid-template-columns: minmax(0,1.7fr) auto auto auto auto;
+      align-items: center; gap: 12px;
+      padding: 12px 14px;
+      background: var(--bg-elev); border: 1px solid var(--border);
+      border-radius: var(--radius-md);
+      transition: border-color var(--transition);
+    }
+    .list-item:hover { border-color: var(--border-strong); }
+    .list-item .li-title { font-weight: 600; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+    .list-item .li-meta { color: var(--text-mute); font-size: 0.82rem; }
+    .list-item .li-amount { font-variant-numeric: tabular-nums; font-weight: 700; }
+    .list-item .badge {
+      font-size: 0.72rem; padding: 3px 8px; border-radius: 999px;
+      background: var(--bg-sunken); color: var(--text-dim); border: 1px solid var(--border);
+    }
+    .list-item .badge.is-paid { color: var(--positive); border-color: rgba(45,191,110,.4); }
+    .empty {
+      padding: 22px; text-align: center; color: var(--text-mute);
+      border: 1px dashed var(--border); border-radius: var(--radius-md); background: var(--bg-elev);
+    }
+
+    /* CAN-I-BUY (centered card) */
+    .canibuy-wrap { display: grid; place-items: center; padding: 24px 0; }
+    .canibuy-card {
+      width: 100%; max-width: 540px;
+      background: var(--bg-elev); border: 1px solid var(--border);
+      border-radius: var(--radius-lg); padding: 28px; box-shadow: var(--shadow-md);
+    }
+    .budget-line {
+      display: flex; justify-content: space-between;
+      font-size: 0.85rem; color: var(--text-dim);
+      padding: 8px 12px; background: var(--bg-sunken);
+      border-radius: var(--radius-md); margin: 8px 0 18px;
+    }
+    .verdict {
+      margin-top: 18px; padding: 14px 16px;
+      border-radius: var(--radius-md); border: 1px solid var(--border);
+      background: var(--bg-sunken); color: var(--text); font-size: 0.92rem;
+      display: flex; align-items: flex-start; gap: 10px;
+    }
+    .verdict.is-approved  { border-color: rgba(45,191,110,.4); background: var(--accent-soft); }
+    .verdict.is-approved .v-ico  { color: #fff; background: var(--accent); }
+    .verdict.is-warning   { border-color: rgba(245,158,11,.4); background: rgba(245,158,11,.10); }
+    .verdict.is-warning .v-ico   { color: #fff; background: var(--warn); }
+    .verdict.is-denied    { border-color: rgba(244,63,94,.4); background: rgba(244,63,94,.10); }
+    .verdict.is-denied .v-ico    { color: #fff; background: var(--danger); }
+    .verdict .v-ico {
+      display: inline-grid; place-items: center;
+      width: 26px; height: 26px; border-radius: 6px;
+      font-weight: 800; font-size: 0.72rem; letter-spacing: 0.05em;
+    }
+
+    /* SETTINGS cards */
+    .settings-grid { display: grid; grid-template-columns: repeat(3, minmax(0,1fr)); gap: 16px; }
+    @media (max-width: 1000px) { .settings-grid { grid-template-columns: 1fr; } }
+
+    .plaid-status {
+      display: flex; align-items: center; gap: 10px;
+      padding: 10px 14px; border-radius: var(--radius-md);
+      background: var(--bg-sunken); border: 1px solid var(--border);
+      font-size: 0.86rem; color: var(--text-dim);
+    }
+    .plaid-status .dot {
+      width: 10px; height: 10px; border-radius: 50%;
+      background: var(--text-mute); flex: 0 0 auto;
+    }
+    .plaid-status.is-linked .dot { background: var(--accent); box-shadow: 0 0 0 4px var(--accent-soft); }
+
+    /* PLAID LINK BUTTON */
+    .plaid-btn {
+      display: inline-flex; align-items: center; gap: 8px;
+      background: var(--accent); color: #fff;
+      border-radius: var(--radius-md); padding: 10px 16px;
+      font-weight: 700; font-size: 0.9rem; border: none;
+      transition: background var(--transition), transform var(--transition);
+    }
+    .plaid-btn:hover { background: var(--accent-dim); transform: translateY(-1px); }
+
+    /* FLASH (toast) */
+    .flash {
+      position: fixed; right: 24px; bottom: 24px; max-width: 360px;
+      padding: 12px 16px; border-radius: var(--radius-md);
+      background: var(--bg-elev); border: 1px solid var(--border);
+      box-shadow: var(--shadow-md); color: var(--text); font-size: 0.88rem;
+      transform: translateY(8px); opacity: 0; pointer-events: none;
+      transition: opacity var(--transition), transform var(--transition); z-index: 60;
+    }
+    .flash.is-show { opacity: 1; transform: translateY(0); pointer-events: auto; }
+    .flash.is-success { border-color: rgba(45,191,110,.5); }
+    .flash.is-error   { border-color: rgba(244,63,94,.5); }
+
+    @media (prefers-reduced-motion: reduce) {
+      * { transition: none !important; animation: none !important; }
+      .btn:hover,
+      .btn:focus-visible,
+      .prepare-resume-chip:hover,
+      .prepare-resume-chip:focus-visible {
+        /* Honor reduced-motion: don't translate on hover/focus; keep
+           visual border/background changes (no motion involved) for clarity. */
+        transform: none;
+      }
+    }
+
+    /* PREPARE-MODE DIALOG ==================================== */
+    .prepare-dialog {
+      padding: 0;
+      border: none;
+      background: transparent;
+      color: var(--text);
+      max-width: 720px;
+      width: calc(100% - 32px);
+      border-radius: var(--radius-lg);
+      overflow: visible;
+    }
+    .prepare-dialog::backdrop {
+      background: rgba(0,0,0,.55);
+      backdrop-filter: blur(2px);
+    }
+    .prepare-card {
+      background: var(--bg-elev);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-lg);
+      display: flex; flex-direction: column;
+      max-height: 85vh;
+      overflow: hidden;
+      animation: fade-in 220ms ease both;
+      box-shadow: 0 24px 60px rgba(0,0,0,.4);
+    }
+    .prepare-progress {
+      height: 3px;
+      background: var(--bg-sunken);
+      position: relative;
+    }
+    .prepare-progress > span {
+      position: absolute; top: 0; left: 0; bottom: 0;
+      background: linear-gradient(90deg, var(--accent), var(--accent-dim));
+      transition: width 220ms cubic-bezier(.2,.7,.3,1);
+    }
+    .prepare-header { padding: 18px 22px; border-bottom: 1px solid var(--border); }
+    .prepare-step-label {
+      font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.08em;
+      color: var(--text-mute); font-weight: 700; margin-bottom: 6px; display: block;
+    }
+    .prepare-step-title { font-size: 1.05rem; margin: 0; }
+    .prepare-body { padding: 26px 22px; flex: 1; overflow-y: auto; min-height: 120px; }
+    .prepare-instruction {
+      font-size: 1.15rem; line-height: 1.6; white-space: pre-wrap;
+      color: var(--text);
+    }
+    .prepare-ingredients {
+      display: flex; flex-wrap: wrap; gap: 6px;
+      padding: 10px 22px;
+      border-top: 1px solid var(--border);
+      background: var(--bg-sunken);
+      max-height: 110px; overflow-y: auto;
+    }
+    .prepare-ingredient-chip {
+      font-size: 0.78rem; padding: 4px 10px; border-radius: 99px;
+      background: var(--bg-elev); border: 1px solid var(--border); color: var(--text);
+      white-space: nowrap;
+    }
+    .prepare-foot {
+      display: flex; justify-content: space-between; align-items: center;
+      padding: 14px 22px;
+      border-top: 1px solid var(--border);
+      background: var(--bg);
+    }
+
+    /* Resume chip — clickable affordance. Hover/soft focus softens the
+       accent border by saturating it to the full accent color, the
+       background gets a slightly stronger tint, and the chip lifts 1px
+       so it reads as clickable even before the user moves the mouse.
+       :focus-visible mirrors hover for keyboard users; :active adds a
+       brief press-down so click feels tactile. */
+    .prepare-resume-chip:hover,
+    .prepare-resume-chip:focus-visible {
+      background: rgba(45,191,110,.22);
+      border-color: var(--accent);
+      transform: translateY(-1px);
+      color: var(--accent);
+    }
+    .prepare-resume-chip:active {
+      transform: translateY(0);
+    }
+  </style>
+</head>
+<body>
+
+  <!-- ==============================================================
+       LEFT SIDEBAR — fixed Rung brand + 4-tab vertical nav.
+  =============================================================== -->
+  <aside class="sidebar" aria-label="Primary navigation">
+    <div>
+      <div class="brand">
+        <div class="brand-mark">R</div>
+        <div class="brand-text">
+          <strong>Rung</strong>
+          <small>Personal Finance</small>
+        </div>
+      </div>
+
+      <nav class="nav" id="primaryNav">
+        <a href="#overview"    class="nav-link is-active" data-target="overview">
+          <span class="nav-ico">◉</span> Overview
+        </a>
+        <a href="#canibuy"     class="nav-link" data-target="canibuy">
+          <span class="nav-ico">?</span> Can I Buy?
+        </a>
+        <a href="#transactions" class="nav-link" data-target="transactions">
+          <span class="nav-ico">≡</span> Transactions
+        </a>
+        <a href="#recipes"     class="nav-link" data-target="recipes">
+          <span class="nav-ico">♨</span> Recipes
+        </a>
+        <a href="#grocery"     class="nav-link" data-target="grocery">
+          <span class="nav-ico">☑</span> Grocery
+        </a>
+        <a href="#settings"    class="nav-link" data-target="settings">
+          <span class="nav-ico">⚙</span> Settings
+        </a>
+      </nav>
+    </div>
+
+    <div class="sidebar-foot">
+      <button class="theme-toggle" id="themeToggle" aria-label="Toggle theme">
+        <span id="themeLabel">☼ Switch to light</span>
+      </button>
+    </div>
+  </aside>
+
+  <!-- ==============================================================
+       MAIN CONTENT — 4 sections, one per sidebar tab.
+  =============================================================== -->
+  <main class="content">
+
+    <!-- OVERVIEW ------------------------------------------------------ -->
+    <section id="overview" class="page is-active" aria-labelledby="overview-title">
+      <header class="page-head">
+        <div>
+          <h1 id="overview-title">Overview</h1>
+          <div class="subtitle"><span id="locationLine">Loading location…</span></div>
+        </div>
+        <div class="head-actions">
+          <button id="linkBankBtn" class="plaid-btn" type="button">
+            <span>⌬</span> Link Bank Account
+          </button>
+        </div>
+      </header>
+
+      <div class="kpi-row">
+        <div class="card">
+          <div class="card-label">Liquid Cash</div>
+          <div class="card-value" id="kpiBalance">$0.00</div>
+          <div class="card-foot">Checking balance</div>
+        </div>
+        <div class="card is-danger">
+          <div class="card-label">Reserved Obligations</div>
+          <div class="card-value" id="kpiUnpaid">$0.00</div>
+          <div class="card-foot">Unpaid bills</div>
+        </div>
+        <div class="card is-positive">
+          <div class="card-label">Disposable Income</div>
+          <div class="card-value" id="kpiDisposable">$0.00</div>
+          <div class="card-foot">Net uncommitted cash</div>
+        </div>
+        <div class="card">
+          <div class="card-label">Active Unpaid Bills</div>
+          <div class="card-value" id="kpiBillCount">0</div>
+          <div class="card-foot">Currently outstanding</div>
+        </div>
+      </div>
+
+      <div class="split">
+        <div class="panel">
+          <h2>Liquidity Allocation</h2>
+          <div class="panel-sub">How your cash is committed today.</div>
+          <div style="display:flex; flex-direction:column; gap:10px;">
+            <div style="display:flex; justify-content:space-between; font-size:.85rem;">
+              <span>Unpaid Bills</span><span id="allocUnpaidAmt">$0.00</span>
+            </div>
+            <div style="height:8px; border-radius:999px; background:var(--bg-sunken); overflow:hidden;">
+              <div id="allocUnpaidBar" style="height:100%; width:0; background:var(--danger); border-radius:999px; transition:width .4s ease;"></div>
+            </div>
+            <div style="display:flex; justify-content:space-between; font-size:.85rem; margin-top:6px;">
+              <span>Safe Cash</span><span id="allocSafeAmt">$0.00</span>
+            </div>
+            <div style="height:8px; border-radius:999px; background:var(--bg-sunken); overflow:hidden;">
+              <div id="allocSafeBar" style="height:100%; width:0; background:var(--accent); border-radius:999px; transition:width .4s ease;"></div>
+            </div>
+          </div>
+        </div>
+        <div class="panel">
+          <h2>Key Metrics</h2>
+          <div class="panel-sub">Quick state from the backend.</div>
+          <ul style="list-style:none; padding:0; margin:0; display:flex; flex-direction:column; gap:6px;">
+            <li>• Liquid checking balance: <strong id="sumBalance">$0.00</strong></li>
+            <li>• Reserved obligations: <strong id="sumUnpaid">$0.00</strong></li>
+            <li>• Net uncommitted cash: <strong id="sumDisposable">$0.00</strong></li>
+            <li>• Active shopping region: <strong id="sumRegion">—</strong></li>
+            <li>• Sales tax rate: <strong id="sumTax">—</strong></li>
+            <li>• Paycheck assumption: <strong id="sumPaycheck">—</strong></li>
+          </ul>
+        </div>
+      </div>
+    </section>
+
+    <!-- CAN I BUY ----------------------------------------------------- -->
+    <section id="canibuy" class="page" aria-labelledby="canibuy-title">
+      <header class="page-head">
+        <div>
+          <h1 id="canibuy-title">Can I Buy This?</h1>
+          <div class="subtitle">Advisory check against your safe disposable budget + tax.</div>
+        </div>
+      </header>
+
+      <div class="canibuy-wrap">
+        <div class="canibuy-card">
+          <div class="budget-line">
+            <span>Safe-discount budget (after unpaid bills):</span>
+            <strong id="ciBudget">$0.00</strong>
+          </div>
+          <form id="canIBuyForm">
+            <div class="field">
+              <label for="ciItem">Item description</label>
+              <input type="text" id="ciItem" placeholder="e.g. Impact Driver" required />
+            </div>
+            <div class="field">
+              <label for="ciPrice">Item price ($)</label>
+              <input type="number" id="ciPrice" min="0.01" step="0.01" value="120.00" required />
+            </div>
+            <div class="row row-end">
+              <button class="btn is-primary" type="submit">Analyze</button>
+            </div>
+          </form>
+          <div id="canIBuyResult" class="verdict" style="display:none;"></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- TRANSACTIONS (logged expenses + recurring bills) ------------ -->
+    <section id="transactions" class="page" aria-labelledby="trans-title">
+      <header class="page-head">
+        <div>
+          <h1 id="trans-title">Transactions</h1>
+          <div class="subtitle">Log new expenses, review recent activity, and track recurring bills.</div>
+        </div>
+      </header>
+
+      <div class="split">
+        <div class="panel">
+          <h2>Log New Expense</h2>
+          <div class="panel-sub">Posts to /api/transactions and decrements your checking balance.</div>
+          <form id="logExpenseForm">
+            <div class="field">
+              <label for="tDesc">Description</label>
+              <input type="text" id="tDesc" placeholder="e.g. Hardware Store" required />
+            </div>
+            <div class="field">
+              <label for="tAmt">Amount ($)</label>
+              <input type="number" id="tAmt" min="0.01" step="0.01" value="25.00" required />
+            </div>
+            <div class="field">
+              <label for="tCat">Category</label>
+              <select id="tCat">
+                <option value="discretionary">Discretionary</option>
+                <option value="essentials">Essentials</option>
+                <option value="savings">Savings</option>
+              </select>
+            </div>
+            <div class="row row-end">
+              <button class="btn is-primary" type="submit">Post Transaction</button>
+            </div>
+          </form>
+        </div>
+
+        <div class="panel">
+          <h2>Transaction History</h2>
+          <div class="panel-sub">Most recent first.</div>
+          <div class="list" id="transactionList">
+            <div class="empty">Loading transactions…</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="split">
+        <div class="panel">
+          <h2>Recurring Bills</h2>
+          <div class="panel-sub">Track obligations; toggle paid or remove.</div>
+          <div class="list" id="billsList">
+            <div class="empty">Loading bills…</div>
+          </div>
+        </div>
+        <div class="panel">
+          <h2>Add Recurring Bill</h2>
+          <div class="panel-sub">Name, amount, and due date.</div>
+          <form id="addBillForm">
+            <div class="field">
+              <label for="bName">Bill name</label>
+              <input type="text" id="bName" placeholder="e.g. Electric Bill" required />
+            </div>
+            <div class="field">
+              <label for="bAmt">Amount ($)</label>
+              <input type="number" id="bAmt" min="0.01" step="0.01" value="75.00" required />
+            </div>
+            <div class="field">
+              <label for="bDate">Due date</label>
+              <input type="date" id="bDate" required />
+            </div>
+            <div class="row row-end">
+              <button class="btn is-primary" type="submit">Add Bill</button>
+            </div>
+          </form>
+        </div>
+      </div>
+    </section>
+
+    <!-- RECIPES ------------------------------------------------------ -->
+    <section id="recipes" class="page" aria-labelledby="recipes-title">
+      <header class="page-head">
+        <div>
+          <h1 id="recipes-title">Recipes</h1>
+          <div class="subtitle">Pick meals to include in your grocery run, paste a recipe URL, or add one manually below.</div>
+        </div>
+      </header>
+
+      <!-- IMPORT RECIPE BY URL ---------------------------------------- -->
+      <div class="panel" style="margin-bottom:20px;">
+        <h2>Import Recipe from URL</h2>
+        <div class="panel-sub">
+          Paste a link from <strong>Allrecipes</strong>, <strong>NYT Cooking</strong>,
+          <strong>BBC Good Food</strong>, <strong>Bon Appétit</strong>, or any of 600+
+          sites supported by <code>recipe-scrapers</code>.
+        </div>
+        <form id="importRecipeForm" class="row" style="align-items:flex-end; gap:12px; flex-wrap:wrap;">
+          <div class="field" style="flex:1 1 320px; min-width:0;">
+            <label for="importRecipeUrl">Recipe URL</label>
+            <input type="url" id="importRecipeUrl"
+                   placeholder="https://www.allrecipes.com/recipe/213742/cheesy-ham-and-hash-brown-casserole/"
+                   required />
+          </div>
+          <button class="btn is-primary" type="submit" id="importRecipeBtn">Import Recipe</button>
+        </form>
+        <div id="importRecipeStatus" role="status" aria-live="polite"
+             style="margin-top:10px; font-size:.85rem; color: var(--text-mute);"></div>
+      </div>
+
+      <div class="split">
+        <div class="panel">
+          <h2>Add Recipe</h2>
+          <div class="panel-sub">One ingredient per line: <code>name, qty, unit, swap1, swap2</code></div>
+          <form id="addRecipeForm">
+            <div class="field">
+              <label for="rTitle">Title</label>
+              <input type="text" id="rTitle" placeholder="e.g. Beef Tacos" required />
+            </div>
+            <div class="field">
+              <label for="rServings">Servings</label>
+              <input type="number" id="rServings" min="1" step="1" value="4" />
+            </div>
+            <div class="field">
+              <label for="rIngredients">Ingredients</label>
+              <textarea id="rIngredients" rows="5" placeholder="Ground Beef, 1.5, lbs, Turkey, Lentils&#10;Flour Tortillas, 8, item, Corn Tortillas&#10;Cheddar Cheese, 1, bag"></textarea>
+            </div>
+            <div class="row row-end">
+              <button class="btn is-primary" type="submit">Add Recipe</button>
+            </div>
+          </form>
+        </div>
+
+        <div class="panel">
+          <h2>Meal Plan</h2>
+          <div class="panel-sub">Check meals to include in this week's grocery run.</div>
+          <div id="recipeListContainer">
+            <div class="empty">Loading recipes…</div>
+          </div>
+          <div id="recipeCount" class="row" style="margin-top:12px; color: var(--text-mute); font-size: 0.85rem;">
+            <span>Selected for grocery list: <strong id="recipeSelectedCount">0</strong></span>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- GROCERY ------------------------------------------------------ -->
+    <section id="grocery" class="page" aria-labelledby="grocery-title">
+      <header class="page-head">
+        <div>
+          <h1 id="grocery-title">Grocery</h1>
+          <div class="subtitle">Tax-aware shopping list generated from your selected meals.</div>
+        </div>
+      </header>
+
+      <div class="split">
+        <div class="panel">
+          <h2>Generate List</h2>
+          <div class="panel-sub">Items are estimated at <code>$3.65/unit</code> with local sales tax applied.</div>
+          <div class="field">
+            <label for="storeSel">Preferred store</label>
+            <select id="storeSel">
+              <option>Walmart</option>
+              <option>Target</option>
+              <option>Aldi</option>
+              <option>Kroger</option>
+              <option>Local Market</option>
+            </select>
+          </div>
+          <div class="row row-end" style="margin-top: 8px;">
+            <button id="generateGroceryBtn" class="btn is-primary" type="button">Generate from selected recipes</button>
+          </div>
+          <div id="groceryMeta" style="margin-top: 14px; color: var(--text-mute); font-size: 0.85rem;"></div>
+        </div>
+
+        <div class="panel">
+          <h2>Active Grocery List</h2>
+          <div class="panel-sub">Tax-inclusive totals shown below the list.</div>
+          <div class="list" id="groceryListContainer">
+            <div class="empty">No active grocery list yet — generate one to begin.</div>
+          </div>
+          <div id="groceryTotal" style="margin-top: 14px; font-weight: 800; font-size: 1.1rem; text-align: right;"></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- SETTINGS ----------------------------------------------------- -->
+    <section id="settings" class="page" aria-labelledby="settings-title">
+      <header class="page-head">
+        <div>
+          <h1 id="settings-title">Settings</h1>
+          <div class="subtitle">Configure location &amp; tax, balance, budget ratios, and Plaid integration.</div>
+        </div>
+      </header>
+
+      <div class="settings-grid">
+        <div class="panel">
+          <h2>Location &amp; Tax</h2>
+          <div class="panel-sub">Auto-resolves tax for ZIP 65084 / 65026.</div>
+          <form id="locForm">
+            <div class="field">
+              <label for="sCity">City, State</label>
+              <input type="text" id="sCity" placeholder="Versailles, MO" />
+            </div>
+            <div class="field">
+              <label for="sZip">ZIP Code</label>
+              <input type="text" id="sZip" placeholder="65084" />
+            </div>
+            <div class="row row-end">
+              <button class="btn is-primary" type="submit">Update Location</button>
+            </div>
+          </form>
+        </div>
+
+        <div class="panel">
+          <h2>Checking Balance</h2>
+          <div class="panel-sub">Drives the can-i-buy sanity check.</div>
+          <form id="balanceForm">
+            <div class="field">
+              <label for="sBal">Balance ($)</label>
+              <input type="number" id="sBal" min="0" step="50" />
+            </div>
+            <div class="row row-end">
+              <button class="btn is-primary" type="submit">Save Balance</button>
+            </div>
+          </form>
+        </div>
+
+        <div class="panel">
+          <h2>Budget Allocation</h2>
+          <div class="panel-sub">Percentages should total 100.</div>
+          <form id="ratiosForm">
+            <div class="field">
+              <label for="sCheck">Paycheck ($)</label>
+              <input type="number" id="sCheck" min="0" step="100" />
+            </div>
+            <div class="field">
+              <label for="sSav">Savings %</label>
+              <input type="number" id="sSav" min="0" max="100" step="1" />
+            </div>
+            <div class="field">
+              <label for="sEss">Essentials %</label>
+              <input type="number" id="sEss" min="0" max="100" step="1" />
+            </div>
+            <div class="field">
+              <label for="sDis">Discretionary %</label>
+              <input type="number" id="sDis" min="0" max="100" step="1" />
+            </div>
+            <div class="row row-end">
+              <button class="btn is-primary" type="submit">Save Ratios</button>
+            </div>
+          </form>
+        </div>
+      </div>
+
+      <div class="panel">
+        <h2>Plaid Integration</h2>
+        <div class="panel-sub">Bank-link status and live balance sync.</div>
+        <div class="row" style="justify-content:space-between;">
+          <div class="plaid-status" id="plaidStatus">
+            <span class="dot"></span>
+            <span id="plaidStatusText">Status: not yet linked</span>
+          </div>
+          <div class="row">
+            <button id="syncBalancesBtn" class="btn is-ghost" type="button">Sync Balances</button>
+            <button id="linkBankBtnSettings" class="plaid-btn" type="button">
+              <span>⌬</span> Link Bank Account
+            </button>
+          </div>
+        </div>
+      </div>
+    </section>
+
+  </main>
+
+  <!-- Toast -->
+  <div id="flash" class="flash" role="status" aria-live="polite"></div>
+
+  <!-- ==============================================================
+       JS — vanilla fetch(). Targets the consolidated /api/* endpoints
+       plus the existing Plaid endpoints. No frameworks, no polling.
+  =============================================================== -->
+  <script>
+    'use strict';
+
+    // ----- helpers -----
+    const fmt = (n) => '$' + (Number(n) || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    const el  = (id) => document.getElementById(id);
+    const flash = (msg, kind) => {
+      const f = el('flash');
+      f.textContent = msg;
+      f.className = 'flash is-show ' + (kind === 'error' ? 'is-error' : 'is-success');
+      clearTimeout(flash._t);
+      flash._t = setTimeout(() => f.classList.remove('is-show'), 2400);
+    };
+    function escapeHtml(s) {
+      return String(s == null ? '' : s)
+        .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+    }
+
+    async function api(method, path, body) {
+      const opts = { method, headers: {} };
+      if (body !== undefined) {
+        opts.headers['Content-Type'] = 'application/json';
+        opts.body = JSON.stringify(body);
+      }
+      const r = await fetch(path, opts);
+      let data = {};
+      try { data = await r.json(); } catch (_) { /* tolerate empty bodies */ }
+      if (!r.ok && !data.error && !data.message) data.message = 'Request failed (' + r.status + ')';
+      return { ok: r.ok, status: r.status, data };
+    }
+
+    // ----- theme toggle -----
+    // THEME_KEY persists the user's explicit choice so the
+    // `prefers-color-scheme` media queries in CSS apply ONLY on first
+    // load (when there is no user choice yet, no data-theme-source
+    // attribute). Once the user toggles, their choice is the source
+    // of truth — data-theme-source="user" causes the :not() guard in
+    // the @media blocks to exclude them and the explicit
+    // [data-theme=...] rule takes over. Mirrored inline in <head> so
+    // returning users don't see a dark-flash on first paint.
+    const THEME_KEY = 'rung:theme-pref';
+    (function initTheme() {
+      const t = el('themeToggle');
+      const label = el('themeLabel');
+      const root = document.documentElement;
+      const sync = () => {
+        const cur = root.getAttribute('data-theme') || 'dark';
+        label.textContent = cur === 'dark' ? '☼ Switch to light' : '☾ Switch to dark';
+      };
+      // Hydrate from localStorage on boot so the persisted choice is
+      // applied even if the inline <head> restore script is blocked
+      // (CSP / very strict trackers). Tolerates private-mode failures.
+      try {
+        const saved = localStorage.getItem(THEME_KEY);
+        if (saved === 'dark' || saved === 'light') {
+          root.setAttribute('data-theme', saved);
+          root.setAttribute('data-theme-source', 'user');
+        }
+      } catch (_) { /* fall back to OS preference */ }
+      sync();
+      t.addEventListener('click', () => {
+        const cur = root.getAttribute('data-theme') || 'dark';
+        const next = cur === 'dark' ? 'light' : 'dark';
+        root.setAttribute('data-theme', next);
+        // Mark as USER-sourced so the CSS :not([data-theme-source="user"])
+        // guard for @media (prefers-color-scheme) stops applying from
+        // here on — explicit choice beats OS preference post-toggle.
+        root.setAttribute('data-theme-source', 'user');
+        try { localStorage.setItem(THEME_KEY, next); } catch (_) { /* skip persistence */ }
+        sync();
+      });
+      // Cross-tab sync: another tab toggling the theme writes to
+      // localStorage, which fires `storage` here (per W3C spec,
+      // never in the originating tab — so we don't need an
+      // "is this my own write" guard). Mirror the change so every
+      // open Rung tab stays in sync without per-tab toggling.
+      // Tolerates cleared keys (newValue === null): drop the
+      // source marker so this tab falls back to the markup default
+      // + OS preference. Ignores malformed values silently so a
+      // future contributor changing the storage shape won't
+      // crash older tabs. Tolerates IE quirks (storage event on
+      // window only fires in modern browsers — silent no-op
+      // elsewhere).
+      window.addEventListener('storage', (ev) => {
+        if (ev.key !== THEME_KEY) return;
+        const v = ev.newValue;
+        if (v === 'dark' || v === 'light') {
+          root.setAttribute('data-theme', v);
+          root.setAttribute('data-theme-source', 'user');
+          sync();
+        } else if (v === null) {
+          // Source tab cleared the key — drop the marker so OS
+          // preference takes over on the next paint.
+          root.removeAttribute('data-theme-source');
+          root.setAttribute('data-theme', 'dark');
+          sync();
+        }
+        // else: unknown / malformed value — no-op.
+      });
+    })();
+
+    // ----- tab / section routing -----
+    (function initNav() {
+      const navLinks = document.querySelectorAll('#primaryNav .nav-link');
+      const sections = document.querySelectorAll('.page');
+      const activate = (target) => {
+        navLinks.forEach(n => n.classList.toggle('is-active', n.dataset.target === target));
+        sections.forEach(s => s.classList.toggle('is-active', s.id === target));
+        history.replaceState(null, '', '#' + target);
+      };
+      navLinks.forEach(n => n.addEventListener('click', (e) => {
+        e.preventDefault();
+        activate(n.dataset.target);
+      }));
+      const initial = (location.hash || '#overview').replace('#', '');
+      if (document.getElementById(initial)) activate(initial);
+    })();
+
+    // ----- Plaid Link flow (preserved) -----
+    async function startPlaidLink() {
+      const { ok, data } = await api('POST', '/api/create_link_token');
+      if (!ok || !data.link_token) {
+        flash(data.error || data.message || 'Failed to create link token', 'error');
+        return;
+      }
+      const handler = Plaid.create({
+        token: data.link_token,
+        onSuccess: async (public_token) => {
+          const ex = await api('POST', '/api/set_access_token', { public_token });
+          if (!ex.ok) { flash(ex.data.error || 'Token exchange failed', 'error'); return; }
+          flash('Bank linked successfully', 'success');
+          await syncBalances();
+          await refreshOverview();
+          updatePlaidStatus(true);
+        },
+        onExit: (err) => { if (err) console.warn('Plaid exit', err); },
+        onEvent: () => { /* console.log(eventName); */ }
+      });
+      handler.open();
+    }
+    [el('linkBankBtn'), el('linkBankBtnSettings')].forEach(btn => {
+      if (btn) btn.addEventListener('click', startPlaidLink);
+    });
+
+    async function syncBalances() {
+      const r = await api('GET', '/api/sync_balances');
+      if (!r.ok && r.status !== 404) {
+        flash(r.data.error || r.data.message || 'Sync failed', 'error');
+      } else if (r.ok) {
+        flash('Balances synced', 'success');
+      }
+      return r;
+    }
+    el('syncBalancesBtn').addEventListener('click', async () => {
+      await syncBalances();
+      await refreshOverview();
+    });
+
+    function updatePlaidStatus(linked) {
+      const box = el('plaidStatus');
+      const txt = el('plaidStatusText');
+      if (!box || !txt) return;
+      if (linked) {
+        box.classList.add('is-linked');
+        txt.textContent = 'Status: linked — live balances will sync.';
+      } else {
+        box.classList.remove('is-linked');
+        txt.textContent = 'Status: not yet linked';
+      }
+    }
+
+    // ----- overview data -----
+    async function refreshOverview() {
+      // Pull two sources in parallel: /api/settings has location/balance/ratios,
+      // /summary has the bill aggregates the can-i-buy budget depends on.
+      const [sRes, sumRes] = await Promise.all([
+        api('GET', '/api/settings'),
+        api('GET', '/summary'),
+      ]);
+      if (!sRes.ok) return;
+      const s = sRes.data || {};
+      const loc = s.location || {};
+      const bal = (s.balance && s.balance.checking_balance) || 0;
+      const sum = sumRes.data || {};
+      const unpaid = sum.total_unpaid_bills || 0;
+      const disposable = sum.disposable_cash != null ? sum.disposable_cash : (bal - unpaid);
+      const taxPct = loc.sales_tax_pct != null ? loc.sales_tax_pct : 0;
+
+      el('kpiBalance').textContent     = fmt(bal);
+      el('kpiUnpaid').textContent      = fmt(unpaid);
+      el('kpiDisposable').textContent  = fmt(disposable);
+      el('kpiBillCount').textContent   = sum.recurring_bills_count || 0;
+
+      el('sumBalance').textContent     = fmt(bal);
+      el('sumUnpaid').textContent      = fmt(unpaid);
+      el('sumDisposable').textContent  = fmt(disposable);
+      el('sumRegion').textContent      = loc.city_state || '—';
+      el('sumTax').textContent         = taxPct ? taxPct + '%' : '—';
+      el('sumPaycheck').textContent    = (s.balance && s.balance.expected_paycheck)
+        ? fmt(s.balance.expected_paycheck) : '—';
+
+      el('locationLine').textContent   = (loc.city_state)
+        ? 'Location: ' + loc.city_state + ' · Tax: ' + (taxPct || 0) + '%'
+        : 'Location not yet configured';
+
+      // Budget line in can-i-buy card
+      el('ciBudget').textContent = fmt(Math.max(0, disposable));
+
+      // Allocation bars
+      el('allocUnpaidAmt').textContent = fmt(unpaid);
+      el('allocSafeAmt').textContent   = fmt(Math.max(0, disposable));
+      const total = Math.max(1, unpaid + Math.max(0, disposable));
+      el('allocUnpaidBar').style.width = ((unpaid / total) * 100).toFixed(1) + '%';
+      el('allocSafeBar').style.width   = ((Math.max(0, disposable) / total) * 100).toFixed(1) + '%';
+    }
+
+    // ----- transactions (logged expenses + recurring bills) -----
+        
+        
+    // ----- can-i-buy (POSTs to /api/can-i-buy, reads existing budget) -----
+    el('canIBuyForm').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const result = el('canIBuyResult');
+      result.style.display = 'none';
+      result.className = 'verdict';
+      const price = parseFloat(el('ciPrice').value);
+      if (!price || price <= 0) { flash('Enter a valid price', 'error'); return; }
+      const { ok, data } = await api('POST', '/api/can-i-buy', {
+        item: el('ciItem').value.trim() || '(unnamed item)',
+        price: price,
+      });
+      if (!ok) { flash(data.error || 'Analysis failed', 'error'); return; }
+      const verdict = data.verdict; // APPROVED | WARNING_OVER_BUDGET | DENIED
+      const cls = (verdict === 'APPROVED') ? 'is-approved'
+                : (verdict === 'WARNING_OVER_BUDGET') ? 'is-warning'
+                : 'is-denied';
+      const label = (verdict === 'APPROVED') ? 'GO'
+                  : (verdict === 'WARNING_OVER_BUDGET') ? 'WARN'
+                  : 'NO';
+      result.className = 'verdict ' + cls;
+      result.style.display = 'flex';
+      const note = data.advisor_note || data.recommendation || JSON.stringify(data);
+      result.innerHTML = `<div class="v-ico">${label}</div><div><strong>${verdict.replace('_', ' ')}</strong> — ${escapeHtml(note)}</div>`;
+    });
+
+    // ----- settings -----
+    function hydrateSettingsForm(s) {
+      const loc = (s && s.location) || {};
+      const bal = (s && s.balance) || {};
+      const rat = (s && s.ratios) || {};
+      if (el('sCity'))  el('sCity').value  = loc.city_state || '';
+      if (el('sZip'))   el('sZip').value   = loc.zip_code || '';
+      if (el('sBal'))   el('sBal').value   = bal.checking_balance != null ? bal.checking_balance : '';
+      if (el('sCheck')) el('sCheck').value = bal.expected_paycheck != null ? bal.expected_paycheck : '';
+      if (el('sSav'))   el('sSav').value   = rat.savings_ratio != null ? rat.savings_ratio : '';
+      if (el('sEss'))   el('sEss').value   = rat.essentials_ratio != null ? rat.essentials_ratio : '';
+      if (el('sDis'))   el('sDis').value   = rat.discretionary_ratio != null ? rat.discretionary_ratio : '';
+    }
+    el('locForm').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const body = {
+        city_state: el('sCity').value.trim(),
+        zip_code:   el('sZip').value.trim(),
+      };
+      const { ok, data } = await api('POST', '/api/settings', body);
+      if (!ok) { flash(data.error || 'Update failed', 'error'); return; }
+      hydrateSettingsForm(data);
+      flash('Location updated', 'success');
+      refreshOverview();
+    });
+    el('balanceForm').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const { ok, data } = await api('POST', '/api/settings', { checking_balance: parseFloat(el('sBal').value) });
+      if (!ok) { flash(data.error || 'Update failed', 'error'); return; }
+      hydrateSettingsForm(data);
+      flash('Balance saved', 'success');
+      refreshOverview();
+    });
+    el('ratiosForm').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const body = {
+        expected_paycheck:   parseFloat(el('sCheck').value),
+        savings_ratio:       parseFloat(el('sSav').value),
+        essentials_ratio:    parseFloat(el('sEss').value),
+        discretionary_ratio: parseFloat(el('sDis').value),
+      };
+      const { ok, data } = await api('POST', '/api/settings', body);
+      if (!ok) { flash(data.error || 'Update failed', 'error'); return; }
+      hydrateSettingsForm(data);
+      flash('Ratios saved', 'success');
+    });
+
+    // ----- recipes -----
+    function updateRecipeSelection() {
+      const ids = Array.from(document.querySelectorAll('input[data-recipe]:checked')).map(c => parseInt(c.dataset.recipe, 10));
+      const counter = el('recipeSelectedCount');
+      if (counter) counter.textContent = String(ids.length);
+      // Persist to window state for the grocery button to read later.
+      window.__rungSelectedRecipes = ids;
+    }
+
+    // ----- grocery -----
+    // ----- IMPORT RECIPE FROM URL -----
+
+// ----- PREPARE-MODE ----- ---------------------------------------------------
+// Splits a recipe's raw `instructions` text into discrete cooking steps.
+// Strategy (in order): numbered/bulleted lines → paragraph breaks → sentences.
+// The server returns one opaque string; all parsing happens client-side.
+
+let prepareState = null;
+
+// One-time attach: native <dialog>.close() fires for BOTH Esc-key
+// dismissal AND our explicit prepareClose(), so we listen for the
+// 'close' event to null out prepareState in either path. Without this,
+// pressing ArrowLeft/ArrowRight after the user closes the modal would
+// invisibly advance the persisted step (the keydown listener at module
+// level only gates on prepareState, not on dialog.open).
+(function attachPrepareDialogCloseListener() {
+  const dlg = el('prepareDialog');
+  if (dlg) {
+    dlg.addEventListener('close', () => {
+      prepareState = null;
+    });
+  }
+})();
+
+// Prepare-mode persistence — a single localStorage entry holding a map
+// keyed by recipe id. Schema (per recipe):
+//   { step: <int 0..totalSteps-1>, totalSteps: <int>, savedAt: <ISO> }
+// Stale handling: on reopen, if saved.step is missing/non-int OR falls
+// outside the freshly-parsed step count, we start at 0 and overwrite
+// the stale entry. Finish clears the entry; X/Esc retain it so the
+// user can come back later.
+/**
+ * Prepare-mode progress persistence (localStorage-backed).
+ *
+ * ON-DISK SHAPE CONTRACT (v1):
+ *   {
+ *     v: 1,
+ *     entries: {
+ *       "<recipeId>": { step: <int>, totalSteps: <int>, savedAt: <ISO> },
+ *       ...
+ *     }
+ *   }
+ *
+ * MIGRATION LADDER:
+ *   v0 (legacy, pre-versioning):
+ *     { "<recipeId>": {...} } — a bare inner map, no top-level `v`.
+ *     `_loadPrepareMap` migrates a v0 payload to v1 in memory; the
+ *     next `_savePrepareMap` call writes it back as v1 (write-
+ *     through migration — minimal disruption, single source of
+ *     truth for the contract).
+ *   v1 (current): the wrapped shape above. Reads pass through;
+        inMarker = true;
+      } else if (!line.trim()) {
+        if (cur.trim()) {
+          steps.push(cur.trim());
+          cur = '';
+          inMarker = false;
+        }
+      } else if (inMarker) {
+        cur += '\n' + line.trim();
+      }
+    }
+    if (cur.trim()) steps.push(cur.trim());
+    if (steps.length >= 2) return steps;
+  }
+
+  // Paragraph split (blank-line separator), markers pre-stripped.
+  const paras = norm.split(/\n{2,}/).map(stripMarker).filter(Boolean);
+  if (paras.length >= 2) return paras;
+
+  // Sentence fallback (single-paragraph prose). Strip markers BEFORE
+  // sentence splitting so a "• Cream butter. ..." line splits cleanly.
+  if (paras.length === 1) {
+    const cleaned = stripMarker(paras[0]);
+    const sents = cleaned
+      .split(/(?<=[.!?])\s+(?=[A-Z])/)
+      .map(s => s.trim())
+      .filter(Boolean);
+    if (sents.length >= 2) return sents;
+    return [cleaned];
+  }
+  return paras;
+}
+
+function openPrepareMode(recipe) {
+  if (!recipe || !recipe.instructions) {
+    flash('No instructions to prepare.', 'error');
+    return;
+  }
+  const steps = splitInstructionsToSteps(recipe.instructions);
+  if (!steps.length) {
+    flash('Could not parse instructions into steps.', 'error');
+    return;
+  }
+  // Resume from localStorage if a valid step is recorded for this recipe.
+  let startStep = 0;
+  const saved = _loadPrepareProgress(recipe.id);
+  if (saved && Number.isInteger(saved.step)
+      && saved.step > 0 && saved.step < steps.length) {
+    startStep = saved.step;
+  }
+  prepareState = { recipe, steps, step: startStep };
+  // Persist the (possibly resumed) starting step so a quick open-then-close
+  // still lands on the same step next time.
+  _savePrepareProgress(recipe.id, startStep, steps.length);
+  const dlg = el('prepareDialog');
+  if (!dlg) return;
+  dlg.showModal();
+  renderPrepareStep();
+  if (startStep > 0) {
+    flash(`Resumed at step ${startStep + 1} of ${steps.length}.`, 'success');
+  }
+  const nxt = dlg.querySelector('.prepare-next');
+  if (nxt) nxt.focus();
+}
+
+function renderPrepareStep() {
+  if (!prepareState) return;
+  const s = prepareState;
+  const dlg = el('prepareDialog');
+  if (!dlg) return;
+  const total = s.steps.length;
+  const idx = s.step;
+  const pct = total === 1 ? 100 : Math.round((idx / Math.max(1, total - 1)) * 100);
+  const isFirst = idx === 0;
+  const isLast = idx === total - 1;
+
+  const ingHtml = (s.recipe.ingredients && s.recipe.ingredients.length > 0)
+    ? `<div class="prepare-ingredients">
+        ${s.recipe.ingredients.map(i => {
+          const raw = (i.raw_text && String(i.raw_text).trim())
+            || (`${i.quantity || ''} ${i.unit || ''} ${i.product_name || ''}`
+                  .replace(/\s+/g, ' ').trim())
+            || '?';
+          return `<span class="prepare-ingredient-chip">${escapeHtml(raw)}</span>`;
+        }).join('')}
+       </div>`
+    : '';
+
+  dlg.innerHTML = `
+    <div class="prepare-card">
+      <div class="prepare-progress"><span style="width:${pct}%"></span></div>
+      <div class="prepare-header">
+        <span class="prepare-step-label">Step ${idx + 1} of ${total}</span>
+        <h2 id="prepare-title" class="prepare-step-title">${escapeHtml(s.recipe.title || 'Recipe')}</h2>
+      </div>
+      <div class="prepare-body">
+        <div class="prepare-instruction">${escapeHtml(s.steps[idx])}</div>
+      </div>
+      ${ingHtml}
+      <div class="prepare-foot">
+        <button type="button" class="btn is-ghost" data-prepare-action="close" aria-label="Close prepare mode">Close ✕</button>
+        <div class="row" style="gap:8px;">
+          <button type="button" class="btn is-ghost" data-prepare-action="prev" ${isFirst ? 'disabled' : ''}
+                  aria-label="Previous step">← Previous</button>
+          <button type="button" class="btn is-primary prepare-next" data-prepare-action="next"
+                  aria-label="${isLast ? 'Finish cooking' : 'Next step'}">${isLast ? 'Finish ✓' : 'Next →'}</button>
+        </div>
+      </div>
+    </div>
+  `;
+  dlg.querySelectorAll('[data-prepare-action]').forEach(btn => {
+    btn.addEventListener('click', () => handlePrepareAction(btn.dataset.prepareAction));
+  });
+}
+
+function handlePrepareAction(action) {
+  if (!prepareState) return;
+  if (action === 'close') return prepareClose();
+  if (action === 'next') {
+    if (prepareState.step < prepareState.steps.length - 1) {
+      prepareState.step += 1;
+      renderPrepareStep();
+      _savePrepareProgress(prepareState.recipe.id, prepareState.step, prepareState.steps.length);
+      el('prepareDialog').querySelector('.prepare-next')?.focus();
+    } else {
+      // Last step → recipe complete: clear the saved progress so the next
+      // open of this recipe starts fresh, not on a finished run.
+      flash('Enjoy your meal! \ud83c\udf7d', 'success');
+      _clearPrepareProgress(prepareState.recipe.id);
+      prepareClose();
+    }
+    return;
+  }
+  if (action === 'prev') {
+    if (prepareState.step > 0) {
+      prepareState.step -= 1;
+      renderPrepareStep();
+      _savePrepareProgress(prepareState.recipe.id, prepareState.step, prepareState.steps.length);
+      el('prepareDialog').querySelector('[data-prepare-action="prev"]')?.focus();
+    }
+  }
+}
+
+function prepareClose() {
+  const dlg = el('prepareDialog');
+  if (dlg && dlg.open) dlg.close();
+  prepareState = null;
+}
+
+document.addEventListener('keydown', (e) => {
+  if (!prepareState) return;
+  if (e.key === 'ArrowRight') {
+    e.preventDefault();
+    handlePrepareAction('next');
+  } else if (e.key === 'ArrowLeft') {
+    e.preventDefault();
+    handlePrepareAction('prev');
+  }
+});
+
+    
+    // ----- health probe on boot, then full hydration -----
+    (async function init() {
+      // /api/health only proves the server is up — it does NOT confirm a Plaid
+      // link. Start the status pill as 'not linked' and only flip to 'linked'
+      // inside the real Plaid onSuccess callback (after /api/set_access_token).
+      const h = await api('GET', '/api/health').catch(() => null);
+      updatePlaidStatus(false);
+      if (!h || !h.ok) flash('Backend unreachable. Some data may be stale.', 'error');
+
+      const s = await api('GET', '/api/settings').catch(() => null);
+      if (s && s.ok) hydrateSettingsForm(s.data);
+
+      await refreshOverview();
+      await refreshTransactions();
+      await refreshBills();
+      await refreshRecipes();
+      await refreshGrocery();
+    })();
+  </script>
+
+  <!-- PREPARE-MODE DIALOG host. showModal() gives us aria-modal +
+       focus trap + Esc-to-close + body scroll lock for free. -->
+  <dialog id="prepareDialog" class="prepare-dialog" aria-labelledby="prepare-title"></dialog>
+</body>
+</html>

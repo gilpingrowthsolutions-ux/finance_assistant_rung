@@ -811,11 +811,19 @@
               <label for="ciPrice">Item price ($)</label>
               <input type="number" id="ciPrice" min="0.01" step="0.01" value="120.00" required />
             </div>
+            <div class="field">
+              <label for="ciMultiplier">Safety Buffer (×)</label>
+              <input type="number" id="ciMultiplier" min="1.0" max="5.0" step="0.1" value="1.5" />
+              <small style="color:var(--text-mute);font-size:0.72rem;margin-top:2px;">Akon 2× Rule: only buy if you can afford it twice. Default 1.5×.</small>
+            </div>
             <div class="row row-end">
               <button class="btn is-primary" type="submit">Analyze</button>
             </div>
           </form>
           <div id="canIBuyResult" class="verdict" style="display:none;"></div>
+          <div id="canIBuyActions" style="display:none;margin-top:12px;" class="row row-end">
+            <button id="logExpenseFromCIBBtn" class="btn is-primary" type="button">Log Expense Now</button>
+          </div>
         </div>
       </div>
     </section>
@@ -1361,28 +1369,78 @@
        CAN I BUY FORM
     ================================================================ */
     function initCanIBuy() {
-      var form = document.getElementById('canIBuyForm');
-      if (!form) return;
-      form.addEventListener('submit', async function (e) {
+      var cibForm = document.getElementById('canIBuyForm');
+      if (!cibForm) return;
+      // Restore buffer multiplier from localStorage on page load
+      try {
+        var savedMult = localStorage.getItem('rung:buffer-multiplier');
+        if (savedMult) document.getElementById('ciMultiplier').value = savedMult;
+      } catch (_) {}
+      cibForm.addEventListener('submit', async function (e) {
         e.preventDefault();
         var item = document.getElementById('ciItem');
         var price = document.getElementById('ciPrice');
+        var multEl = document.getElementById('ciMultiplier');
         var result = document.getElementById('canIBuyResult');
+        var actionsEl = document.getElementById('canIBuyActions');
         if (!item || !price || !result) return;
+        var multiplier = parseFloat((multEl && multEl.value) || '1.5') || 1.5;
+        // Persist multiplier preference
+        try { localStorage.setItem('rung:buffer-multiplier', String(multiplier)); } catch (_) {}
         var resp = await api('POST', '/api/decision/can-i-buy', {
           item_name: item.value.trim() || 'Item',
-          cost: parseFloat(price.value) || 0
+          cost: parseFloat(price.value) || 0,
+          multiplier: multiplier,
         });
         result.style.display = 'block';
+        if (actionsEl) actionsEl.style.display = 'none';
         if (!resp.ok) {
           result.className = 'verdict is-denied';
           result.innerHTML = '<span class="v-ico">\u2717</span> API error: ' + (resp.data.error || 'Unknown');
           return;
         }
         var d = resp.data;
-        result.className = 'verdict ' + (d.approved ? 'is-approved' : 'is-denied');
-        result.innerHTML = '<span class="v-ico">' + (d.approved ? '\u2713' : '\u2717') + '</span> ' + escapeHtml(d.message || '') +
-          '<br/><small style="color:var(--text-mute);margin-top:4px;display:block;">Remaining buffer: ' + fmt(d.remaining_buffer_after_purchase) + '</small>';
+        // Three-tier verdict styling
+        var verdictClass = 'is-approved';
+        var verdictIco = '\u2713';
+        if (d.verdict === 'denied')  { verdictClass = 'is-denied';  verdictIco = '\u2717'; }
+        else if (d.verdict === 'warning') { verdictClass = 'is-warning'; verdictIco = '\u26a0'; }
+        result.className = 'verdict ' + verdictClass;
+        result.innerHTML =
+          '<span class="v-ico">' + verdictIco + '</span> ' +
+          '<div><strong>' + escapeHtml(d.item_name || 'Item') + ' — ' + fmt(d.item_cost) + '</strong>' +
+          '<br/><span>' + escapeHtml(d.impact_text || '') + '</span>' +
+          '<br/><small style="color:var(--text-mute);display:block;margin-top:6px;">' +
+          'Pre-purchase pace: ' + fmt((d.pre_daily_pace || 0)) + '/day · ' +
+          'Post-purchase: ' + fmt((d.post_daily_pace || 0)) + '/day · ' +
+          (d.days_remaining || 0) + ' days remaining · ' +
+          'Free cash: ' + fmt((d.free_cash || 0)) +
+          '</small></div>';
+        // Show Log Expense Now button for approved purchases
+        if (actionsEl && d.approved) {
+          actionsEl.style.display = 'flex';
+          var logBtn = document.getElementById('logExpenseFromCIBBtn');
+          if (logBtn) {
+            // Remove old listeners by cloning
+            var newBtn = logBtn.cloneNode(true);
+            logBtn.parentNode.replaceChild(newBtn, logBtn);
+            newBtn.addEventListener('click', async function () {
+              var logResp = await api('POST', '/api/transactions', {
+                description: d.item_name,
+                amount: d.item_cost,
+                category: 'discretionary',
+              });
+              if (logResp.ok) {
+                flash('Expense logged: ' + d.item_name + ' (' + fmt(d.item_cost) + ')', 'success');
+                if (typeof refreshOverview === 'function') refreshOverview();
+                result.style.display = 'none';
+                actionsEl.style.display = 'none';
+              } else {
+                flash('Failed to log expense: ' + (logResp.data.error || 'Unknown'), 'error');
+              }
+            });
+          }
+        }
       });
     }
 

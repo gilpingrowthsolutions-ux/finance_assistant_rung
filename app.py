@@ -875,25 +875,91 @@ def get_budget_summary():
 
 @app.route("/api/decision/can-i-buy", methods=["POST"])
 def can_i_buy():
-    """Tab 1: Decision Engine Evaluator."""
+    """Behavioral Decision Engine — evaluates a purchase against your
+    remaining pay-period cash, daily burn rate, and a configurable
+    safety-buffer multiplier.
+
+    Request body
+    ------------
+    item_name : str
+    cost : float
+    multiplier : float, optional (default 1.5)
+        Safety-buffer multiplier.  A purchase is considered "safe"
+        only when ``free_cash >= cost * multiplier``.
+
+    Returns (200)
+    -------------
+    {
+      "item_name": str,
+      "item_cost": float,
+      "approved": bool,          # cost <= free_cash
+      "verdict": "safe" | "warning" | "denied",
+      "pre_daily_pace": float,   # $/day before purchase
+      "post_daily_pace": float,  # $/day after  purchase
+      "days_remaining": int,
+      "impact_text": str,        # human-readable pacing impact
+    }
+    """
     account = Account.query.first()
     data = request.json or {}
     item_name = data.get("item_name", "Requested Item")
     item_cost = float(data.get("cost", 0.0))
-    
+    multiplier = float(data.get("multiplier", 1.5))
+
     metrics = compute_liquidity_metrics(account)
     free_cash = metrics["free_cash_remaining"]
-    
-    approved = item_cost <= free_cash
-    margin_after = free_cash - item_cost
-    
+
+    # Days actually remaining (now → period end), not the full config value.
+    pay_period_end = datetime.utcnow() + timedelta(days=account.pay_period_days)
+    days = max(1, (pay_period_end - datetime.utcnow()).days)
+
+    # ---- Daily pace (pre- and post-purchase) ----
+    pre_pace = round(free_cash / days, 2) if days > 0 else 0.0
+    post_pace = round((free_cash - item_cost) / days, 2) if days > 0 else 0.0
+
+    # ---- Three-tier verdict ----
+    if item_cost > free_cash:
+        verdict = "denied"
+        approved = False
+    elif free_cash >= (item_cost * multiplier):
+        verdict = "safe"
+        approved = True
+    else:
+        verdict = "warning"
+        approved = True
+
+    # ---- Human-readable impact text ----
+    if verdict == "safe":
+        impact = (
+            f"🟢 This purchase drops your daily fun spending from "
+            f"${pre_pace:.2f}/day to ${post_pace:.2f}/day for "
+            f"{days} days — well within your {multiplier:.1f}× safety buffer."
+        )
+    elif verdict == "warning":
+        impact = (
+            f"🟡 Pacing warning: your daily spend drops from "
+            f"${pre_pace:.2f}/day to ${post_pace:.2f}/day for "
+            f"{days} days. It fits, but you're below your "
+            f"{multiplier:.1f}× buffer — spend cautiously."
+        )
+    else:
+        shortfall = round(item_cost - free_cash, 2)
+        impact = (
+            f"🔴 Insufficient funds: you're ${shortfall:.2f} short. "
+            f"Your current daily pace is ${pre_pace:.2f}/day with "
+            f"{days} days left in the pay period."
+        )
+
     return jsonify({
         "item_name": item_name,
         "item_cost": item_cost,
         "approved": approved,
-        "unallocated_free_cash": free_cash,
-        "remaining_buffer_after_purchase": round(margin_after, 2),
-        "message": "Purchase Approved!" if approved else f"Purchase Denied. Exceeds safe unallocated cash by ${abs(margin_after):.2f}"
+        "verdict": verdict,
+        "pre_daily_pace": pre_pace,
+        "post_daily_pace": post_pace,
+        "days_remaining": days,
+        "impact_text": impact,
+        "free_cash": round(free_cash, 2),
     })
 
 @app.route("/api/recipes/search", methods=["GET"])

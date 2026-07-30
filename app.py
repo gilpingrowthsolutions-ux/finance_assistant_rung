@@ -1089,6 +1089,8 @@ def copilot_parse():
       "_fallback": false
     }
     """
+    from sqlalchemy import or_
+
     data = request.json or {}
     user_text = data.get("text", "").strip()
     if not user_text:
@@ -1116,15 +1118,29 @@ def copilot_parse():
         except (ValueError, TypeError):
             continue
         action = bill.get("action", "add")
-        if not name or amount <= 0:
+        if not name:
             continue
         if action == "remove":
-            existing = Bill.query.filter(
-                Bill.name.ilike(f"%{name}%")
-            ).first()
+            # Fuzzy bidirectional match: "Hulu subscription" should match
+            # a bill named "Hulu".  Split the LLM name into words and
+            # find a bill whose name contains any non-trivial word.
+            # Skip generic stop words to avoid false matches.
+            _STOP = {"subscription", "monthly", "bill", "service", "account",
+                     "remove", "cancel", "delete", "the", "and", "for"}
+            words = [w for w in name.split() if len(w) > 2 and w.lower() not in _STOP]
+            if words:
+                filters = [Bill.name.ilike(f"%{w}%") for w in words]
+                existing = Bill.query.filter(or_(*filters)).first()
+            else:
+                existing = Bill.query.filter(
+                    Bill.name.ilike(f"%{name}%")
+                ).first()
             if existing:
                 db.session.delete(existing)
-                actions["bills_removed"].append({"name": name, "amount": amount})
+                actions["bills_removed"].append({"name": existing.name, "amount": existing.amount})
+            continue
+        if amount <= 0:
+            continue
         else:
             due_date = datetime.utcnow() + timedelta(days=14)
             b = Bill(name=name.title(), amount=amount, due_date=due_date)

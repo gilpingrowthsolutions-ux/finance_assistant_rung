@@ -338,21 +338,37 @@ def _derive_clean_keyword(product_name):
     s = product_name.strip().lower()
     # Strip leading quantity + unit + fraction (e.g. "1 lb", "½ teaspoon", "2 cups")
     s = re.sub(r'^[\d\s¼½¾⅓⅔⅛⅜⅝⅞/.\-–]+\s*', '', s)
-    # Strip common unit words at the start — loop because re.sub with ^
-    # only anchors once; multiple leading qualifiers need multiple passes.
-    _QUAL_RE = re.compile(
+
+    # Pass 1: Strip measurement / container words from the START only.
+    # (cup, oz, lb, gram, can, bottle, etc. — these are units, not food names)
+    _UNIT_RE = re.compile(
         r'^(cup|teaspoon|tablespoon|tbsp|tsp|oz|ounce|lb|lbs|pound|'
         r'can|clove|head|stalk|sprig|pinch|dash|bunch|piece|slice|'
         r'jar|bottle|bag|box|package|pack|g|gram|kg|ml|l|liter|'
-        r'quart|pint|gallon|dozen|whole|large|small|medium|'
+        r'quart|pint|gallon|dozen)s?\s+'
+    )
+    while True:
+        s2 = _UNIT_RE.sub('', s, count=1)
+        if s2 == s:
+            break
+        s = s2
+
+    # Pass 2: Strip descriptor / preparation words from ANYWHERE in the
+    # string (not just the start).  Fixes cases like
+    #   "mature cheddar finely grated" → "mature cheddar" → "cheddar"
+    # where "finely" and "grated" are mid-string modifiers that the
+    # old ^-anchored regex never saw.
+    _DESC_RE = re.compile(
+        r'\b(whole|large|small|medium|'
         r'fresh|frozen|dried|chopped|minced|diced|sliced|crushed|'
         r'grated|shredded|ground|boneless|skinless|trimmed|cooked|'
         r'uncooked|raw|ripe|organic|sea|all.purpose|crumbled|sautéed|'
         r'roasted|toasted|peeled|seeded|cored|halved|quartered|'
-        r'thinly|finely|coarsely|roughly|kosher)s?\s+'
+        r'thinly|finely|coarsely|roughly|kosher)s?\b\s*'
     )
     while True:
-        s2 = _QUAL_RE.sub('', s, count=1)
+        s2 = _DESC_RE.sub('', s, count=1)
+        s2 = re.sub(r'\s+', ' ', s2).strip()
         if s2 == s:
             break
         s = s2

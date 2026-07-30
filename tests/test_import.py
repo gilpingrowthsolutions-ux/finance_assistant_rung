@@ -138,7 +138,7 @@ kw_cases = [
     ('\u00bc cup grated Parmesan',       'parmesan'),
     ('1 tablespoon soy sauce',            'soy_sauce'),
     ('Kosher salt',                       'salt'),
-    ('1 can (15 oz) diced tomatoes',      'diced_tomatoes'),
+    ('1 can (15 oz) diced tomatoes',      'tomatoes'),
 ]
 for inp, exp in kw_cases:
     got = _derive_clean_keyword(inp)

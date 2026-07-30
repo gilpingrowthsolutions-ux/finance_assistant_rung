@@ -1,0 +1,45 @@
+[Unit]
+Description=Rung StorePriceCache Kroger Ingest (one-shot)
+Documentation=file:///opt/rung/deploy/README.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+
+# ---- env-var contract -------------------------------------------------------
+# Required keys (set in EnvironmentFile):
+#   KROGER_CLIENT_ID
+#   KROGER_CLIENT_SECRET
+#   DATABASE_URL
+# Optional keys:
+#   INGEST_CONFIG        (default: /opt/rung/scripts/ingest_store_prices.config.example.json)
+#   INGEST_LOG_LEVEL     (default: INFO)
+EnvironmentFile=/etc/rung/ingest.env
+
+# ---- execution --------------------------------------------------------------
+User=rung
+Group=rung
+WorkingDirectory=/opt/rung
+
+# Surface real-time Python output to journald.
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/usr/bin/python3 /opt/rung/scripts/ingest_store_prices.py \
+    --config ${INGEST_CONFIG:-/opt/rung/scripts/ingest_store_prices.config.example.json} \
+    --verbose
+
+# Security hardening: write only to the configured paths.
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/log/rung /opt/rung /var/lib/rung
+NoNewPrivileges=true
+PrivateTmp=true
+
+# Resource limits: Kroger API is fast but the cache can be large.
+MemoryMax=512M
+CPUQuota=50%
+
+# Failure handling: log success/failure for the timer.
+StandardOutput=journal
+StandardError=journal
+SuccessExitStatus=0 1

@@ -1,0 +1,53 @@
+# /etc/cron.d/rung-ingest
+#
+# Cron fragment for the Rung StorePriceCache ingest pipeline.
+#
+# Install:
+#   sudo cp deploy/cron/rung-ingest.cron /etc/cron.d/rung-ingest
+#   sudo chown root:root /etc/cron.d/rung-ingest
+#   sudo chmod 0644 /etc/cron.d/rung-ingest
+#
+# Files in /etc/cron.d/ are picked up automatically by cron; no
+# `crontab -e` step needed. The script must be readable by the user
+# cron runs as (usually root) and the env-var file below must be
+# readable only by that user.
+#
+# ---- CADENCE ---------------------------------------------------------------
+# Twice daily at 03:15 and 15:15 -- the "off-peak" hours chosen so the
+# job doesn't compete with typical user-facing traffic and so the 12h
+# interval catches weekly ad rotation (most U.S. grocery ads reset
+# Wednesday/Thursday mornings). Adjust the hour/minute below if your
+# traffic profile is different.
+#
+# Cadence trade-offs:
+#   every 6h   -- catches daily flash deals; burns ~4x API quota
+#   twice/day  -- recommended; catches weekly ads + same-day deltas
+#   daily      -- light; misses same-day deltas
+#   weekly     -- lowest; risks stale-cache price drift of 5-7 days
+#
+# ---- ENV-VAR CONTRACT ------------------------------------------------------
+# /etc/rung/ingest.env is a shell-form file (KEY=VALUE per line). It is
+# read by `set -a; . /etc/rung/ingest.env; set +a` before the script.
+# Required:
+#   KROGER_CLIENT_ID     -- developer.kroger.com
+#   KROGER_CLIENT_SECRET -- developer.kroger.com
+#   DATABASE_URL         -- e.g. sqlite:////var/lib/rung/finance.db
+# Optional:
+#   INGEST_CONFIG        -- JSON config path (default: scripts/ingest_store_prices.config.example.json)
+#   INGEST_LOG_LEVEL     -- DEBUG | INFO | WARNING | ERROR (default INFO)
+#   PYTHONUNBUFFERED     -- set to 1 so journald sees real-time output
+
+# m h dom mon dow user  command
+15 3,15 * * *  root  set -a; . /etc/rung/ingest.env; set +a; \
+    /usr/bin/python3 /opt/rung/scripts/ingest_store_prices.py \
+        --config "${INGEST_CONFIG:-/opt/rung/scripts/ingest_store_prices.config.example.json}" \
+        >> /var/log/rung/ingest.log 2>&1
+
+# Catch-up run at 06:15 weekdays only -- guards against transient
+# Kroger API failures during the overnight job. Idempotent: re-runs
+# upsert by (store_name, item_keyword, product_title). Matches the
+# systemd timer + K8s CronJob cadence.
+15 6 * * 1-5  root  set -a; . /etc/rung/ingest.env; set +a; \
+    /usr/bin/python3 /opt/rung/scripts/ingest_store_prices.py \
+        --config "${INGEST_CONFIG:-/opt/rung/scripts/ingest_store_prices.config.example.json}" \
+        >> /var/log/rung/ingest.log 2>&1

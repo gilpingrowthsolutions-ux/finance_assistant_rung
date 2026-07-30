@@ -1,0 +1,28 @@
+# Example PersistentVolumeClaim for the Rung ingest CronJob.
+#
+# The CronJob mounts this at /var/lib/rung so the SQLite
+# database (finance.db) survives pod restarts. SQLite is fine for a
+# single-writer schedule like this; if you need multi-writer or
+# multi-node durability, point DATABASE_URL at Postgres instead and
+# delete this PVC.
+#
+# Apply:
+#   kubectl apply -f deploy/k8s/rung-ingest-pvc.yaml.example
+#
+# Pick the storageClassName that your cluster has available. Common
+# values on the major managed clusters: gp3 (EKS), standard
+# (GKE default), managed-premium (AKS).
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: rung-data-pvc
+  labels:
+    app: rung
+    component: store-cache-ingest
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi
+  # storageClassName: gp3    # uncomment + set per cluster

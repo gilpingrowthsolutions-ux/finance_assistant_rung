@@ -1,0 +1,1093 @@
+[
+  {
+    "title": "Chicken Tikka Masala",
+    "ingredients": [
+      "Chicken Breast",
+      "Yogurt",
+      "Tomato Sauce",
+      "Heavy Cream",
+      "Garam Masala",
+      "Turmeric",
+      "Cumin",
+      "Garlic",
+      "Ginger",
+      "Butter"
+    ],
+    "instructions": "Cut chicken breasts into 2-inch chunks. Mix yogurt, garam masala, turmeric, cumin, minced garlic, and grated ginger in a bowl. Coat chicken in the marinade and refrigerate for at least 2 hours. Thread chicken onto skewers and broil on high for 12 minutes, turning once, until charred. In a large skillet, melt butter over medium heat. Add remaining minced garlic and cook 30 seconds. Pour in tomato sauce and heavy cream, stirring until smooth. Simmer for 8 minutes until thickened. Slide charred chicken off skewers into the sauce. Simmer together for 10 minutes. Garnish with fresh cilantro and serve over basmati rice.",
+    "category": "Indian",
+    "area": "Indian"
+  },
+  {
+    "title": "Beef Tacos",
+    "ingredients": [
+      "Ground Beef",
+      "Taco Seasoning",
+      "Corn Tortillas",
+      "Lettuce",
+      "Tomato",
+      "Cheddar Cheese",
+      "Sour Cream",
+      "Lime"
+    ],
+    "instructions": "Heat a large skillet over medium-high heat. Add ground beef and cook, breaking apart with a spoon, until browned and no longer pink, about 6 minutes. Drain excess fat. Stir in taco seasoning and 1/3 cup water. Reduce heat and simmer for 5 minutes until thickened. Warm corn tortillas in a dry skillet or directly over a gas flame for 30 seconds per side. Fill each tortilla with seasoned beef. Top with shredded lettuce, diced tomatoes, grated cheddar cheese, and a dollop of sour cream. Squeeze fresh lime juice over tacos before serving.",
+    "category": "Mexican",
+    "area": "Mexican"
+  },
+  {
+    "title": "Vegetable Stir Fry",
+    "ingredients": [
+      "Broccoli",
+      "Bell Peppers",
+      "Carrots",
+      "Snap Peas",
+      "Soy Sauce",
+      "Sesame Oil",
+      "Garlic",
+      "Ginger",
+      "Rice Noodles"
+    ],
+    "instructions": "Cook rice noodles according to package directions, drain, and set aside. Heat sesame oil in a wok or large skillet over high heat until shimmering. Add minced garlic and grated ginger, stirring for 30 seconds until fragrant. Add broccoli florets, sliced bell peppers, julienned carrots, and snap peas. Stir fry for 3-4 minutes until vegetables are tender-crisp. Pour in soy sauce and toss to coat. Add cooked noodles and toss everything together for 1 minute until well combined. Serve immediately with a sprinkle of sesame seeds.",
+    "category": "Asian",
+    "area": "Chinese"
+  },
+  {
+    "title": "Margherita Pizza",
+    "ingredients": [
+      "Pizza Dough",
+      "San Marzano Tomatoes",
+      "Fresh Mozzarella",
+      "Fresh Basil",
+      "Olive Oil",
+      "Salt"
+    ],
+    "instructions": "Preheat oven to 500°F with a pizza stone or inverted baking sheet inside for 30 minutes. Stretch pizza dough into a 12-inch round on a floured surface. Crush San Marzano tomatoes by hand in a bowl and spread a thin layer over the dough, leaving a 1-inch border. Tear fresh mozzarella into pieces and distribute evenly across the sauce. Drizzle with olive oil and sprinkle with flaky salt. Slide pizza onto the hot stone and bake for 10-12 minutes until crust is golden and cheese is bubbling. Remove from oven, top with fresh basil leaves, and drizzle with additional olive oil. Slice and serve immediately.",
+    "category": "Italian",
+    "area": "Italian"
+  },
+  {
+    "title": "Greek Salad",
+    "ingredients": [
+      "Cucumber",
+      "Tomato",
+      "Red Onion",
+      "Kalamata Olives",
+      "Feta Cheese",
+      "Olive Oil",
+      "Lemon Juice",
+      "Oregano"
+    ],
+    "instructions": "Cut cucumber in half lengthwise, then slice into half-moons. Dice tomatoes into bite-sized chunks. Slice red onion into thin rings. Combine cucumber, tomato, onion, and kalamata olives in a large bowl. In a small jar, whisk together olive oil, fresh lemon juice, dried oregano, salt, and pepper. Pour dressing over vegetables and toss gently. Transfer to a serving platter. Crumble feta cheese generously over the top. Garnish with a sprinkle of dried oregano and a few extra olives. Serve at room temperature.",
+    "category": "Greek",
+    "area": "Greek"
+  },
+  {
+    "title": "Mushroom Risotto",
+    "ingredients": [
+      "Arborio Rice",
+      "Mushrooms",
+      "Vegetable Broth",
+      "White Wine",
+      "Onion",
+      "Parmesan Cheese",
+      "Butter",
+      "Thyme"
+    ],
+    "instructions": "Warm vegetable broth in a saucepan and keep at a gentle simmer. In a large, wide pot, melt 2 tablespoons of butter over medium heat. Add sliced mushrooms and cook without stirring for 3 minutes until golden, then stir and cook 2 more minutes. Season with salt and fresh thyme. Remove mushrooms and set aside. Add remaining butter and finely diced onion to the pot. Cook until onion is translucent, about 4 minutes. Add arborio rice and stir for 2 minutes until the grains are translucent at the edges. Pour in white wine and stir until fully absorbed. Begin adding warm broth one ladleful at a time, stirring frequently and waiting until each addition is nearly absorbed before adding the next. Continue for 18-20 minutes until rice is creamy and al dente. Fold in cooked mushrooms, grated parmesan, and a final pat of butter. Cover and rest for 2 minutes before serving.",
+    "category": "Italian",
+    "area": "Italian"
+  },
+  {
+    "title": "Thai Green Curry",
+    "ingredients": [
+      "Chicken Thighs",
+      "Green Curry Paste",
+      "Coconut Milk",
+      "Bamboo Shoots",
+      "Thai Basil",
+      "Fish Sauce",
+      "Brown Sugar",
+      "Bell Peppers"
+    ],
+    "instructions": "Slice chicken thighs into bite-sized pieces. Open coconut milk and scoop the thick cream from the top into a wok or deep skillet. Heat over medium-high heat until the cream starts to separate and bubble. Stir in green curry paste and fry for 2 minutes until deeply fragrant. Add chicken pieces and cook, stirring, until sealed on all sides, about 4 minutes. Pour in the remaining coconut milk, add drained bamboo shoots, and sliced bell peppers. Bring to a gentle simmer and cook for 15 minutes, stirring occasionally. Season with fish sauce and brown sugar, adjusting to achieve a balance of salty, sweet, and spicy. Remove from heat and stir in a generous handful of Thai basil leaves. Serve immediately over jasmine rice.",
+    "category": "Thai",
+    "area": "Thai"
+  },
+  {
+    "title": "Chicken Rice Bowl",
+    "ingredients": [
+      "Chicken Breast",
+      "White Rice",
+      "Soy Sauce",
+      "Sesame Oil",
+      "Green Onions"
+    ],
+    "instructions": "Season chicken breasts with salt and pepper. Heat sesame oil in a skillet over medium-high heat. Cook chicken for 6-7 minutes per side until golden brown and cooked through. Let rest for 5 minutes, then slice against the grain. Serve sliced chicken over a bowl of steamed white rice. Drizzle with soy sauce and garnish with sliced green onions.",
+    "category": "Asian",
+    "area": "Global"
+  },
+  {
+    "title": "Authentic Carne Asada Street Tacos",
+    "ingredients": [
+      "Flank Steak",
+      "Lime Juice",
+      "Orange Juice",
+      "Garlic",
+      "Cumin",
+      "Chili Powder",
+      "Cilantro",
+      "White Onion",
+      "Corn Tortillas",
+      "Salt",
+      "Pepper",
+      "Vegetable Oil"
+    ],
+    "instructions": "Slice flank steak against the grain into thin strips. Whisk lime juice, orange juice, minced garlic, cumin, chili powder, salt, and pepper to create the marinade. Coat the steak strips in marinade and refrigerate for at least 2 hours. Heat a cast iron skillet or grill to high heat. Cook the marinated steak in batches for 2-3 minutes per side until charred but tender. Warm corn tortillas on a dry comal or skillet. Double-layer each taco with two tortillas. Fill with carne asada and top with diced white onion and fresh cilantro. Serve with lime wedges and your favorite salsa.",
+    "category": "Mexican",
+    "area": "Mexican"
+  },
+  {
+    "title": "Baja Fish Tacos",
+    "ingredients": [
+      "White Fish Fillets",
+      "Flour",
+      "Beer",
+      "Egg",
+      "Baking Powder",
+      "Cabbage",
+      "Crema",
+      "Lime",
+      "Chipotle Peppers",
+      "Adobo Sauce",
+      "Cilantro",
+      "Corn Tortillas",
+      "Vegetable Oil",
+      "Salt"
+    ],
+    "instructions": "Cut white fish fillets into 3-inch strips and pat dry. Whisk together flour, beer, egg, baking powder, and a pinch of salt to make a light tempura-style batter. Heat 1 inch of vegetable oil in a heavy skillet to 350°F. Dip fish strips into batter, letting excess drip off, then fry in batches for 3-4 minutes until golden and crispy. Drain on paper towels. For the chipotle crema, blend crema with chipotle peppers in adobo sauce and a squeeze of lime until smooth. Finely shred cabbage. Warm corn tortillas on a dry skillet. Assemble tacos with a bed of shredded cabbage, crispy fish, a drizzle of chipotle crema, and fresh cilantro. Serve with lime wedges.",
+    "category": "Seafood",
+    "area": "Mexican"
+  },
+  {
+    "title": "Pork Al Pastor Tacos",
+    "ingredients": [
+      "Pork Shoulder",
+      "Pineapple",
+      "Guajillo Chiles",
+      "Achiote Paste",
+      "White Vinegar",
+      "Garlic",
+      "Cumin",
+      "Oregano",
+      "Cilantro",
+      "White Onion",
+      "Corn Tortillas",
+      "Salt",
+      "Pepper"
+    ],
+    "instructions": "Slice pork shoulder into thin 1/4-inch slices. Toast guajillo chiles in a dry skillet until fragrant, then soak in hot water for 15 minutes. Blend softened chiles with achiote paste, white vinegar, garlic, cumin, oregano, salt, and pepper to create a deep red marinade. Coat pork slices thoroughly in the marinade and refrigerate for at least 4 hours or overnight. Grill or sear the marinated pork slices in a hot cast iron skillet until charred on both sides, about 3-4 minutes per side. Dice fresh pineapple into small cubes and grill briefly until caramelized. Chop the cooked pork into small pieces. Warm corn tortillas. Fill with al pastor pork, top with grilled pineapple, diced white onion, and fresh cilantro. Finish with a squeeze of lime.",
+    "category": "Pork",
+    "area": "Mexican"
+  },
+  {
+    "title": "Classic Smash Burgers",
+    "ingredients": [
+      "Ground Beef 80/20",
+      "Potato Buns",
+      "American Cheese",
+      "Pickles",
+      "Yellow Onion",
+      "Ketchup",
+      "Mustard",
+      "Salt",
+      "Pepper",
+      "Butter"
+    ],
+    "instructions": "Divide ground beef into 4 equal balls, about 4 ounces each. Do not season the meat yet. Heat a cast iron griddle or heavy skillet over high heat until smoking. Place a beef ball on the hot surface and immediately smash it flat with a heavy spatula or burger press until it's about 1/4-inch thin. Season generously with salt and pepper. Cook for 2 minutes until the edges are lacy and crispy. Flip the patty, place a slice of American cheese on top, and cook for 1 more minute. While the patties cook, butter the cut sides of potato buns and toast on the griddle until golden. Spread ketchup and mustard on the bun bottoms. Layer with pickles, thinly sliced onion, the cheese-topped patty, and the bun top. Press gently and serve immediately.",
+    "category": "American",
+    "area": "American"
+  },
+  {
+    "title": "Bacon Cheddar Melt",
+    "ingredients": [
+      "Ground Beef",
+      "Bacon",
+      "Sharp Cheddar Cheese",
+      "Sourdough Bread",
+      "Red Onion",
+      "Mayonnaise",
+      "Dijon Mustard",
+      "Butter",
+      "Salt",
+      "Pepper"
+    ],
+    "instructions": "Cook bacon in a skillet until crispy. Drain on paper towels and crumble. Form ground beef into thin, square patties slightly larger than your bread slices. Season with salt and pepper. Cook patties in the bacon fat over medium-high heat for 3 minutes per side. Spread butter on one side of each sourdough slice and mayonnaise on the other. On the unbuttered side of one slice, layer: cheese, patty, crumbled bacon, thinly sliced red onion, more cheese, and a smear of Dijon mustard. Top with second bread slice, buttered side out. Grill the sandwich in a skillet over medium heat for 3-4 minutes per side until bread is golden and cheese is fully melted. Press gently with a spatula while cooking. Let rest 1 minute before slicing diagonally.",
+    "category": "American",
+    "area": "American"
+  },
+  {
+    "title": "Mushroom Swiss Burger",
+    "ingredients": [
+      "Ground Beef",
+      "Swiss Cheese",
+      "Mushrooms",
+      "Brioche Buns",
+      "Garlic",
+      "Thyme",
+      "Beef Broth",
+      "Worcestershire Sauce",
+      "Mayonnaise",
+      "Salt",
+      "Pepper",
+      "Olive Oil"
+    ],
+    "instructions": "Form ground beef into 4 patties, season with salt and pepper. Heat olive oil in a skillet over medium-high heat. Cook patties for 4 minutes per side for medium. During the last minute, top each patty with a slice of Swiss cheese and cover the pan to melt. Remove patties and set aside. In the same skillet, add sliced mushrooms and minced garlic. Cook for 5 minutes until mushrooms release their liquid and turn golden. Add fresh thyme, a splash of beef broth, and Worcestershire sauce. Simmer until the liquid reduces to a glaze. Toast brioche buns in the skillet. Spread mayonnaise on both bun halves. Place the Swiss-topped patty on the bottom bun, pile the sautéed mushrooms on top, and close the bun. Serve with crispy fries.",
+    "category": "American",
+    "area": "American"
+  },
+  {
+    "title": "Black Bean Vegetarian Burger",
+    "ingredients": [
+      "Black Beans",
+      "Breadcrumbs",
+      "Egg",
+      "Red Bell Pepper",
+      "Red Onion",
+      "Garlic",
+      "Cumin",
+      "Smoked Paprika",
+      "Whole Wheat Buns",
+      "Avocado",
+      "Lime",
+      "Cilantro",
+      "Salt",
+      "Olive Oil"
+    ],
+    "instructions": "Drain and rinse black beans. Spread on a baking sheet and dry in a 300°F oven for 15 minutes. In a skillet, heat olive oil and sauté diced red onion, minced garlic, and diced red bell pepper until soft, about 5 minutes. Transfer half the beans to a food processor with the sautéed vegetables, egg, cumin, smoked paprika, and salt. Pulse until chunky but cohesive. Transfer to a bowl and fold in remaining whole beans and breadcrumbs. Form into 4 patties. Refrigerate for 30 minutes. Heat olive oil in a nonstick skillet over medium heat. Cook patties for 5 minutes per side until deeply browned and heated through. Mash avocado with lime juice and salt to create a quick guacamole. Toast whole wheat buns. Spread guacamole on both halves, place the black bean patty on the bottom bun, top with fresh cilantro leaves, and close the burger. Serve with sweet potato fries.",
+    "category": "Vegetarian",
+    "area": "American"
+  },
+  {
+    "title": "Spicy Jalapeño Burger",
+    "ingredients": [
+      "Ground Beef",
+      "Jalapeños",
+      "Pepper Jack Cheese",
+      "Brioche Buns",
+      "Chipotle Mayo",
+      "Romaine Lettuce",
+      "Tomato",
+      "Garlic Powder",
+      "Cayenne Pepper",
+      "Salt",
+      "Pepper",
+      "Vegetable Oil"
+    ],
+    "instructions": "Season ground beef with salt, pepper, garlic powder, and a pinch of cayenne. Divide into 4 patties. Press a few fresh jalapeño slices into the top of each patty. Heat vegetable oil in a cast iron skillet over high heat. Cook patties jalapeño-side down for 4 minutes. Flip, top each patty with a slice of Pepper Jack cheese, and cook 3 more minutes. For chipotle mayo, mix mayonnaise with chopped chipotle peppers in adobo and a squeeze of lime. Toast brioche buns in the skillet. Spread chipotle mayo on both bun halves. Layer lettuce and sliced tomato on the bottom bun, place the jalapeño-cheese patty on top, add extra fresh jalapeño rings if desired, and close the bun. Serve with cold beer or a limeade.",
+    "category": "American",
+    "area": "American"
+  },
+  {
+    "title": "Chicken Street Tacos",
+    "ingredients": [
+      "Chicken Thighs",
+      "Lime",
+      "Garlic",
+      "Cumin",
+      "Chili Powder",
+      "Cilantro",
+      "White Onion",
+      "Corn Tortillas",
+      "Avocado",
+      "Salsa Verde",
+      "Salt",
+      "Vegetable Oil"
+    ],
+    "instructions": "Season boneless chicken thighs with cumin, chili powder, minced garlic, salt, and the juice of 2 limes. Let marinate for 30 minutes. Heat vegetable oil in a cast iron skillet over medium-high heat. Cook chicken thighs for 6 minutes per side until charred and cooked through. Let rest for 5 minutes, then dice into small pieces. Warm corn tortillas on a dry comal. Double-layer each taco. Fill with diced chicken. Top with finely diced white onion, chopped fresh cilantro, and sliced avocado. Drizzle with salsa verde and a squeeze of fresh lime. Serve with radish slices and hot sauce on the side.",
+    "category": "Mexican",
+    "area": "Mexican"
+  },
+  {
+    "title": "Birria-Style Beef Tacos",
+    "ingredients": [
+      "Beef Chuck Roast",
+      "Guajillo Chiles",
+      "Ancho Chiles",
+      "Garlic",
+      "Onion",
+      "Cumin",
+      "Mexican Oregano",
+      "Bay Leaves",
+      "Beef Broth",
+      "Apple Cider Vinegar",
+      "Corn Tortillas",
+      "Oaxaca Cheese",
+      "Cilantro",
+      "Lime",
+      "Salt"
+    ],
+    "instructions": "Toast guajillo and ancho chiles in a dry skillet for 2 minutes. Cover with hot water and soak for 20 minutes. In a blender, combine soaked chiles, garlic, half an onion, cumin, oregano, and apple cider vinegar. Blend until smooth. Cut beef chuck into large chunks and season with salt. Place in a Dutch oven. Pour the chile sauce over the beef, add beef broth and bay leaves. Bring to a boil, then reduce heat to low, cover, and simmer for 3 hours until beef is fork-tender. Remove beef and shred with two forks. Strain the cooking liquid into a bowl for dipping. To assemble tacos, dip each corn tortilla in the consommé, then place in a hot skillet. Add shredded beef and Oaxaca cheese. Fold in half and cook 2 minutes per side until crispy and cheese is melted. Serve with a small cup of consommé for dipping, garnished with diced onion, cilantro, and lime wedges.",
+    "category": "Mexican",
+    "area": "Mexican"
+  },
+  {
+    "title": "Sweet Potato and Black Bean Tacos",
+    "ingredients": [
+      "Sweet Potatoes",
+      "Black Beans",
+      "Corn Tortillas",
+      "Avocado",
+      "Lime",
+      "Cumin",
+      "Smoked Paprika",
+      "Garlic Powder",
+      "Cilantro",
+      "Cotija Cheese",
+      "Crema",
+      "Olive Oil",
+      "Salt",
+      "Pepper"
+    ],
+    "instructions": "Preheat oven to 425°F. Peel and dice sweet potatoes into 1/2-inch cubes. Toss with olive oil, cumin, smoked paprika, garlic powder, salt, and pepper. Spread on a baking sheet in a single layer. Roast for 25 minutes, flipping halfway, until tender and caramelized at the edges. Drain and rinse black beans. Warm in a small saucepan with a pinch of cumin and salt. Warm corn tortillas on a dry skillet. Smash half an avocado onto each tortilla as a base. Layer roasted sweet potatoes and warm black beans on top. Drizzle with crema, crumble cotija cheese, and garnish with fresh cilantro and a squeeze of lime. Serve with pickled red onions on the side.",
+    "category": "Vegetarian",
+    "area": "Mexican"
+  },
+  {
+    "title": "Lemon Herb Roasted Chicken",
+    "ingredients": [
+      "Whole Chicken",
+      "Lemons",
+      "Garlic",
+      "Fresh Rosemary",
+      "Fresh Thyme",
+      "Butter",
+      "Olive Oil",
+      "Salt",
+      "Pepper"
+    ],
+    "instructions": "Preheat oven to 425°F. Pat the whole chicken dry with paper towels. Season generously inside and out with salt and pepper. Mix softened butter with minced garlic, chopped rosemary, and thyme leaves. Gently loosen the skin over the breast and thighs and spread the herb butter underneath. Stuff the cavity with halved lemons and remaining herb sprigs. Truss the legs with kitchen twine. Rub the outside of the chicken with olive oil. Place on a rack in a roasting pan. Roast for 15 minutes at 425°F, then reduce heat to 375°F and continue roasting for 45-60 minutes until the internal temperature reaches 165°F in the thickest part of the thigh. Let rest for 15 minutes before carving. Drizzle pan juices over the sliced meat. Serve with roasted vegetables and pan gravy.",
+    "category": "Chicken",
+    "area": "American"
+  },
+  {
+    "title": "Honey Garlic Chicken Thighs",
+    "ingredients": [
+      "Chicken Thighs",
+      "Honey",
+      "Soy Sauce",
+      "Garlic",
+      "Ginger",
+      "Rice Vinegar",
+      "Sesame Oil",
+      "Green Onions",
+      "Sesame Seeds",
+      "Salt",
+      "Pepper",
+      "Vegetable Oil"
+    ],
+    "instructions": "Season bone-in, skin-on chicken thighs with salt and pepper. Heat vegetable oil in an oven-safe skillet over medium-high heat. Place chicken thighs skin-side down and cook without moving for 5 minutes until skin is golden and crispy. Flip and cook for 3 more minutes. Remove chicken and drain excess fat. In a bowl, whisk honey, soy sauce, rice vinegar, minced garlic, grated ginger, and sesame oil. Pour the sauce into the skillet and bring to a simmer. Return chicken to the skillet skin-side up, spooning sauce over the tops. Transfer to a 400°F oven and bake for 20 minutes until chicken is cooked through and sauce has thickened to a glaze. Garnish with sliced green onions and sesame seeds. Serve over steamed jasmine rice with a side of blanched bok choy.",
+    "category": "Chicken",
+    "area": "Asian"
+  },
+  {
+    "title": "Chicken Parmesan",
+    "ingredients": [
+      "Chicken Breast",
+      "Breadcrumbs",
+      "Parmesan Cheese",
+      "Mozzarella Cheese",
+      "Eggs",
+      "Marinara Sauce",
+      "Flour",
+      "Garlic",
+      "Fresh Basil",
+      "Olive Oil",
+      "Salt",
+      "Pepper",
+      "Spaghetti"
+    ],
+    "instructions": "Preheat oven to 400°F. Butterfly chicken breasts and pound to even 1/2-inch thickness. Season with salt and pepper. Set up a breading station: flour in one dish, beaten eggs in another, and a mixture of breadcrumbs and grated parmesan in a third. Dredge each chicken breast in flour, dip in egg, then coat thoroughly in the breadcrumb mixture. Heat olive oil in a large oven-safe skillet over medium-high heat. Cook breaded chicken for 3 minutes per side until golden and crispy. Pour marinara sauce around the chicken pieces, not on top (to keep the crust crispy). Top each breast with sliced fresh mozzarella and additional grated parmesan. Transfer to the oven and bake for 15 minutes until cheese is melted and bubbly. While chicken bakes, cook spaghetti according to package directions. Serve chicken parmesan over a bed of spaghetti, spoon extra marinara on top, and garnish with fresh basil.",
+    "category": "Italian",
+    "area": "Italian"
+  },
+  {
+    "title": "Teriyaki Chicken",
+    "ingredients": [
+      "Chicken Thighs",
+      "Soy Sauce",
+      "Mirin",
+      "Sake",
+      "Brown Sugar",
+      "Ginger",
+      "Garlic",
+      "Rice Vinegar",
+      "Cornstarch",
+      "Green Onions",
+      "Sesame Seeds",
+      "Vegetable Oil"
+    ],
+    "instructions": "Whisk soy sauce, mirin, sake, brown sugar, rice vinegar, minced garlic, and grated ginger in a bowl to make teriyaki sauce. Set aside 1/4 cup for finishing. Cut chicken thighs into bite-sized pieces. Heat vegetable oil in a wok or large skillet over high heat. Add chicken in a single layer and cook without stirring for 3 minutes until deeply browned. Toss and cook for 3 more minutes. Pour teriyaki sauce over the chicken and bring to a boil. Mix cornstarch with 2 tablespoons cold water to make a slurry. Stir into the pan and cook for 1 minute until the sauce thickens and glazes the chicken. Drizzle the reserved teriyaki sauce on top. Garnish with sliced green onions and toasted sesame seeds. Serve over steamed short-grain rice with a side of pickled ginger.",
+    "category": "Chicken",
+    "area": "Japanese"
+  },
+  {
+    "title": "Chicken Alfredo",
+    "ingredients": [
+      "Fettuccine",
+      "Chicken Breast",
+      "Heavy Cream",
+      "Parmesan Cheese",
+      "Butter",
+      "Garlic",
+      "Italian Parsley",
+      "Salt",
+      "Pepper",
+      "Olive Oil"
+    ],
+    "instructions": "Season chicken breasts with salt and pepper. Heat olive oil in a skillet over medium-high heat. Cook chicken for 6 minutes per side until golden and cooked through. Let rest for 5 minutes, then slice thinly. Cook fettuccine in salted boiling water until al dente. Reserve 1 cup of pasta water before draining. In the same skillet, melt butter over medium heat. Add minced garlic and cook for 30 seconds until fragrant. Pour in heavy cream and bring to a gentle simmer. Whisk in grated parmesan cheese until smooth and thickened, about 3 minutes. Season with salt and pepper. Toss drained fettuccine with the alfredo sauce, adding pasta water a splash at a time if the sauce is too thick. Add sliced chicken and toss gently. Serve in warm bowls, garnished with fresh Italian parsley and extra parmesan.",
+    "category": "Italian",
+    "area": "Italian"
+  },
+  {
+    "title": "Chicken Marsala",
+    "ingredients": [
+      "Chicken Breast",
+      "Mushrooms",
+      "Marsala Wine",
+      "Chicken Broth",
+      "Flour",
+      "Butter",
+      "Olive Oil",
+      "Garlic",
+      "Fresh Parsley",
+      "Salt",
+      "Pepper"
+    ],
+    "instructions": "Slice chicken breasts in half horizontally to create thin cutlets. Place between plastic wrap and pound to 1/4-inch thickness. Season with salt and pepper. Dredge each cutlet in flour, shaking off excess. Heat olive oil and 1 tablespoon butter in a large skillet over medium-high heat. Cook chicken cutlets for 3 minutes per side until golden. Remove and set aside. Add remaining butter to the skillet. Sauté sliced mushrooms and minced garlic for 5 minutes until mushrooms are deeply browned. Pour in Marsala wine and chicken broth, scraping up brown bits from the bottom. Simmer for 5 minutes until the sauce reduces by half. Return chicken to the skillet and spoon sauce over the top. Simmer together for 3 minutes. Garnish with chopped fresh parsley. Serve with mashed potatoes or buttered egg noodles to soak up the sauce.",
+    "category": "Italian",
+    "area": "Italian"
+  },
+  {
+    "title": "Classic Beef Stew",
+    "ingredients": [
+      "Beef Chuck",
+      "Potatoes",
+      "Carrots",
+      "Celery",
+      "Onion",
+      "Garlic",
+      "Beef Broth",
+      "Red Wine",
+      "Tomato Paste",
+      "Flour",
+      "Bay Leaves",
+      "Thyme",
+      "Frozen Peas",
+      "Olive Oil",
+      "Salt",
+      "Pepper"
+    ],
+    "instructions": "Cut beef chuck into 1-inch cubes and pat dry. Season generously with salt and pepper. Heat olive oil in a Dutch oven over medium-high heat. Brown beef in batches, without crowding, for 4 minutes per side until deeply caramelized. Remove and set aside. Add diced onion, sliced carrots, and chopped celery to the pot. Cook for 5 minutes until softened. Add minced garlic and tomato paste, stirring for 1 minute. Sprinkle flour over the vegetables and stir for 2 minutes. Pour in red wine and scrape up the fond. Add beef broth, bay leaves, fresh thyme, and the browned beef. Bring to a boil, then reduce heat to low, cover, and simmer for 1.5 hours. Add peeled and diced potatoes and continue simmering for 30 minutes until potatoes are tender. Stir in frozen peas in the last 5 minutes. Remove bay leaves. Adjust seasoning with salt and pepper. Serve in deep bowls with crusty bread.",
+    "category": "Beef",
+    "area": "American"
+  },
+  {
+    "title": "Shepherd's Pie",
+    "ingredients": [
+      "Ground Lamb",
+      "Potatoes",
+      "Carrots",
+      "Peas",
+      "Onion",
+      "Garlic",
+      "Beef Broth",
+      "Tomato Paste",
+      "Worcestershire Sauce",
+      "Butter",
+      "Milk",
+      "Egg Yolk",
+      "Thyme",
+      "Salt",
+      "Pepper",
+      "Olive Oil"
+    ],
+    "instructions": "Peel and quarter potatoes. Boil in salted water until fork-tender, about 20 minutes. Drain and mash with butter and warm milk until smooth. Season with salt and pepper. Stir in an egg yolk for richness. Preheat oven to 400°F. Heat olive oil in a large skillet over medium-high heat. Add ground lamb and cook, breaking apart, until browned. Remove and set aside. In the same skillet, cook diced onion, diced carrots, and minced garlic for 5 minutes. Return lamb to the pan. Stir in tomato paste and Worcestershire sauce. Sprinkle with flour and cook for 1 minute. Pour in beef broth and add fresh thyme. Simmer for 10 minutes until thickened. Stir in frozen peas. Transfer the lamb mixture to a 9x13 baking dish. Spread the mashed potatoes evenly over the top, creating peaks with a fork. Bake for 20 minutes until bubbling and the potato top is golden. Broil for 3 minutes for extra browning. Let rest for 10 minutes before serving.",
+    "category": "Beef",
+    "area": "British"
+  },
+  {
+    "title": "Beef Stroganoff",
+    "ingredients": [
+      "Beef Sirloin",
+      "Mushrooms",
+      "Sour Cream",
+      "Beef Broth",
+      "Onion",
+      "Garlic",
+      "Dijon Mustard",
+      "Paprika",
+      "Egg Noodles",
+      "Butter",
+      "Flour",
+      "Salt",
+      "Pepper",
+      "Vegetable Oil"
+    ],
+    "instructions": "Slice beef sirloin into thin strips against the grain. Season with salt, pepper, and paprika. Heat vegetable oil in a large skillet over high heat. Sear beef strips in batches for 2 minutes per side until browned but still pink inside. Remove and set aside. Reduce heat to medium. Add butter to the pan. Cook sliced mushrooms and diced onion for 6 minutes until golden and mushrooms have released their liquid. Add minced garlic and cook 1 minute. Sprinkle flour over the mushrooms and stir for 1 minute. Pour in beef broth, scraping up brown bits. Stir in Dijon mustard. Simmer for 5 minutes until thickened. Reduce heat to low. Stir in sour cream until smooth and creamy. Return beef and any accumulated juices to the pan. Warm through for 2 minutes without boiling (to prevent curdling). Meanwhile, cook egg noodles according to package directions. Serve stroganoff over buttered egg noodles, garnished with fresh parsley.",
+    "category": "Beef",
+    "area": "Russian"
+  },
+  {
+    "title": "Classic Meatloaf",
+    "ingredients": [
+      "Ground Beef",
+      "Breadcrumbs",
+      "Eggs",
+      "Onion",
+      "Garlic",
+      "Ketchup",
+      "Worcestershire Sauce",
+      "Milk",
+      "Italian Parsley",
+      "Salt",
+      "Pepper",
+      "Brown Sugar",
+      "Mustard"
+    ],
+    "instructions": "Preheat oven to 350°F. In a large bowl, combine ground beef, breadcrumbs, beaten eggs, finely diced onion, minced garlic, milk, Worcestershire sauce, chopped parsley, salt, and pepper. Mix gently with your hands until just combined — overmixing makes meatloaf dense. Shape into a loaf on a lined baking sheet or press into a loaf pan. For the glaze, whisk together ketchup, brown sugar, and a splash of Worcestershire sauce. Spread half the glaze over the top of the meatloaf. Bake for 45 minutes. Spread remaining glaze on top and bake for 15 more minutes until internal temperature reaches 160°F. Let rest for 10 minutes before slicing. Serve with mashed potatoes and green beans.",
+    "category": "Beef",
+    "area": "American"
+  },
+  {
+    "title": "Steak with Chimichurri",
+    "ingredients": [
+      "Ribeye Steak",
+      "Fresh Parsley",
+      "Fresh Cilantro",
+      "Garlic",
+      "Red Wine Vinegar",
+      "Olive Oil",
+      "Red Pepper Flakes",
+      "Oregano",
+      "Salt",
+      "Pepper"
+    ],
+    "instructions": "Take ribeye steaks out of the refrigerator 30 minutes before cooking to come to room temperature. Season generously on both sides with salt and pepper. For the chimichurri, finely chop fresh parsley and cilantro. Mince garlic. Combine herbs and garlic in a bowl with red wine vinegar, olive oil, red pepper flakes, dried oregano, and a pinch of salt. Stir well and let sit at room temperature. Heat a cast iron skillet over high heat until smoking. Add a splash of high-smoke-point oil. Place steaks in the skillet and press down gently. Cook for 4 minutes without moving for a perfect crust. Flip and cook for 3 minutes for medium-rare. Add butter, garlic, and rosemary to the pan and baste the steaks for the last minute. Let steaks rest on a cutting board for 5 minutes. Slice against the grain and spoon chimichurri generously over the top. Serve with grilled vegetables or a simple green salad.",
+    "category": "Beef",
+    "area": "Argentinian"
+  },
+  {
+    "title": "Honey Mustard Pork Chops",
+    "ingredients": [
+      "Pork Chops",
+      "Honey",
+      "Dijon Mustard",
+      "Whole Grain Mustard",
+      "Garlic",
+      "Apple Cider Vinegar",
+      "Olive Oil",
+      "Fresh Rosemary",
+      "Salt",
+      "Pepper"
+    ],
+    "instructions": "Season thick-cut pork chops with salt and pepper on both sides. Whisk honey, Dijon mustard, whole grain mustard, minced garlic, apple cider vinegar, olive oil, and chopped rosemary to make the glaze. Place pork chops in a dish, pour half the glaze over them, and marinate for 30 minutes. Heat olive oil in a cast iron skillet over medium-high heat. Sear pork chops for 4 minutes per side until golden brown. Reduce heat to medium-low, pour the remaining glaze over the chops, and cover the pan. Cook for 6-8 minutes until internal temperature reaches 145°F. Remove chops and let rest for 5 minutes. Simmer the pan sauce for 2 minutes until slightly thickened. Spoon the honey mustard sauce over the pork chops. Serve with roasted apples and mashed potatoes.",
+    "category": "Pork",
+    "area": "American"
+  },
+  {
+    "title": "Pulled Pork Sandwiches",
+    "ingredients": [
+      "Pork Shoulder",
+      "BBQ Sauce",
+      "Apple Cider Vinegar",
+      "Brown Sugar",
+      "Paprika",
+      "Garlic Powder",
+      "Onion Powder",
+      "Mustard Powder",
+      "Cayenne Pepper",
+      "Salt",
+      "Pepper",
+      "Brioche Buns",
+      "Coleslaw Mix"
+    ],
+    "instructions": "Mix brown sugar, paprika, garlic powder, onion powder, mustard powder, cayenne, salt, and pepper to create a dry rub. Pat pork shoulder dry and coat thoroughly with the rub. Wrap in plastic and refrigerate overnight. Preheat oven to 300°F. Place the pork shoulder fat-side up in a Dutch oven. Add apple cider vinegar and 1/2 cup water to the pot. Cover tightly and roast for 4-5 hours until the meat pulls apart easily with a fork. Remove pork from the pot, let cool slightly, then shred with two forks, discarding excess fat. Skim fat from the cooking liquid and mix some of the liquid into the shredded pork for moisture. Toss the shredded pork with your favorite BBQ sauce. Toast brioche buns. Pile the pulled pork high on the bun bottoms. Top with creamy coleslaw and close the buns. Serve with extra BBQ sauce and pickles on the side.",
+    "category": "Pork",
+    "area": "American"
+  },
+  {
+    "title": "BBQ Baby Back Ribs",
+    "ingredients": [
+      "Baby Back Ribs",
+      "Brown Sugar",
+      "Paprika",
+      "Garlic Powder",
+      "Onion Powder",
+      "Chili Powder",
+      "Cumin",
+      "Salt",
+      "Pepper",
+      "BBQ Sauce",
+      "Apple Juice",
+      "Butter"
+    ],
+    "instructions": "Remove the thin membrane from the back of the ribs. Mix brown sugar, paprika, garlic powder, onion powder, chili powder, cumin, salt, and pepper for the dry rub. Coat ribs generously on all sides. Wrap in plastic and refrigerate for at least 4 hours or overnight. Preheat oven to 275°F. Place ribs on a foil-lined baking sheet, meat-side up. Cover tightly with foil. Bake for 2.5 hours until tender but not falling apart. Remove foil and brush with BBQ sauce. Increase oven temperature to 400°F. Return ribs uncovered and bake for 15 minutes. For a finishing glaze, mix BBQ sauce with a splash of apple juice and melted butter. Brush onto the ribs and bake 10 more minutes. Let rest for 5 minutes, then slice between the bones. Serve with coleslaw and cornbread.",
+    "category": "Pork",
+    "area": "American"
+  },
+  {
+    "title": "Pork Schnitzel",
+    "ingredients": [
+      "Pork Loin",
+      "Breadcrumbs",
+      "Flour",
+      "Eggs",
+      "Lemon",
+      "Parsley",
+      "Vegetable Oil",
+      "Salt",
+      "Pepper"
+    ],
+    "instructions": "Slice pork loin into 1/2-inch medallions. Place between plastic wrap and pound to 1/4-inch thickness using a rolling pin or meat mallet. Season both sides with salt and pepper. Set up breading station: flour in one dish, beaten eggs in another, and breadcrumbs mixed with chopped parsley in a third. Dredge each cutlet first in flour, then egg, then breadcrumbs, pressing firmly to adhere. Heat 1/2 inch of vegetable oil in a large skillet over medium-high heat until shimmering. Fry schnitzels one at a time for 2-3 minutes per side until deep golden brown and crispy. Drain on paper towels. Working quickly, season with a pinch of salt immediately after frying. Serve with lemon wedges to squeeze over the top. Accompany with warm German potato salad and a cucumber dill salad.",
+    "category": "Pork",
+    "area": "German"
+  },
+  {
+    "title": "Stuffed Pork Tenderloin",
+    "ingredients": [
+      "Pork Tenderloin",
+      "Spinach",
+      "Sun-Dried Tomatoes",
+      "Goat Cheese",
+      "Garlic",
+      "Fresh Rosemary",
+      "Olive Oil",
+      "Salt",
+      "Pepper",
+      "Kitchen Twine"
+    ],
+    "instructions": "Preheat oven to 400°F. Butterfly the pork tenderloin by slicing lengthwise almost in half, opening it like a book. Cover with plastic wrap and pound to an even 1/2-inch thickness. Season both sides with salt, pepper, and chopped rosemary. Heat olive oil in a skillet over medium heat. Sauté minced garlic for 30 seconds, then add spinach and cook until wilted, about 2 minutes. Let cool slightly. Spread the spinach mixture over the butterflied pork. Top with chopped sun-dried tomatoes and crumbled goat cheese. Roll the tenderloin tightly from one long edge and tie with kitchen twine at 2-inch intervals. Rub the outside with olive oil, salt, and pepper. Sear the rolled tenderloin in a hot skillet for 2 minutes per side until browned. Transfer to the oven and roast for 20-25 minutes until internal temperature reaches 145°F. Let rest for 10 minutes, remove twine, and slice into medallions. Serve with roasted asparagus and a balsamic glaze.",
+    "category": "Pork",
+    "area": "Italian"
+  },
+  {
+    "title": "Spaghetti Carbonara",
+    "ingredients": [
+      "Spaghetti",
+      "Guanciale",
+      "Eggs",
+      "Pecorino Romano",
+      "Black Pepper",
+      "Salt"
+    ],
+    "instructions": "Bring a large pot of salted water to a boil. Cook spaghetti until al dente. While the pasta cooks, slice guanciale into small strips. Cook in a cold skillet over medium heat, stirring occasionally, until the fat renders and the meat is crispy, about 8 minutes. Remove from heat. In a bowl, whisk together eggs, grated pecorino romano, and a generous amount of freshly cracked black pepper. When pasta is done, reserve 1 cup of pasta water. Drain spaghetti and add it directly to the skillet with the guanciale and its rendered fat. Toss to coat. Remove skillet from heat and let cool for 30 seconds (to avoid scrambling the eggs). Pour the egg and cheese mixture over the pasta, tossing vigorously with tongs. Add pasta water a splash at a time until the sauce is silky and coats each strand. Serve immediately in warm bowls with extra pecorino and black pepper on top.",
+    "category": "Italian",
+    "area": "Italian"
+  },
+  {
+    "title": "Baked Ziti",
+    "ingredients": [
+      "Ziti Pasta",
+      "Italian Sausage",
+      "Marinara Sauce",
+      "Ricotta Cheese",
+      "Mozzarella Cheese",
+      "Parmesan Cheese",
+      "Garlic",
+      "Fresh Basil",
+      "Egg",
+      "Salt",
+      "Pepper",
+      "Olive Oil"
+    ],
+    "instructions": "Preheat oven to 375°F. Cook ziti in salted boiling water for 2 minutes less than package directions. Drain and set aside. Heat olive oil in a large skillet. Remove Italian sausage from casings and cook, breaking apart, until browned and cooked through, about 8 minutes. Add minced garlic and cook 1 minute. Pour in marinara sauce and simmer for 5 minutes. In a bowl, combine ricotta cheese, 1 cup shredded mozzarella, 1/2 cup grated parmesan, beaten egg, chopped fresh basil, salt, and pepper. In a 9x13 baking dish, layer: a thin spread of sauce on the bottom, half the ziti, half the ricotta mixture, half the sausage sauce. Repeat layers. Top with remaining mozzarella and parmesan. Cover with foil and bake for 20 minutes. Remove foil and bake for 15 more minutes until bubbly and golden. Let rest for 10 minutes before serving. Garnish with fresh basil.",
+    "category": "Italian",
+    "area": "Italian"
+  },
+  {
+    "title": "Pesto Pasta with Cherry Tomatoes",
+    "ingredients": [
+      "Tricolor Rotini",
+      "Fresh Basil",
+      "Pine Nuts",
+      "Parmesan Cheese",
+      "Garlic",
+      "Olive Oil",
+      "Cherry Tomatoes",
+      "Mozzarella Pearls",
+      "Salt",
+      "Pepper"
+    ],
+    "instructions": "Make the pesto: In a food processor, combine fresh basil leaves, toasted pine nuts, grated parmesan, and minced garlic. Pulse while drizzling in olive oil until smooth. Season with salt and pepper. Cook rotini in salted boiling water until al dente. Reserve 1/2 cup pasta water before draining. While pasta cooks, halve cherry tomatoes. In a large bowl, combine hot drained pasta with pesto, tossing to coat. Add pasta water a splash at a time if needed for consistency. Fold in cherry tomato halves and fresh mozzarella pearls. Season with salt and pepper. Serve warm or at room temperature. Garnish with extra basil leaves, toasted pine nuts, and a drizzle of olive oil.",
+    "category": "Italian",
+    "area": "Italian"
+  },
+  {
+    "title": "Classic Lasagna",
+    "ingredients": [
+      "Lasagna Noodles",
+      "Ground Beef",
+      "Italian Sausage",
+      "Marinara Sauce",
+      "Ricotta Cheese",
+      "Mozzarella Cheese",
+      "Parmesan Cheese",
+      "Eggs",
+      "Garlic",
+      "Onion",
+      "Fresh Basil",
+      "Italian Parsley",
+      "Salt",
+      "Pepper",
+      "Olive Oil"
+    ],
+    "instructions": "Cook lasagna noodles according to package directions. Drain and lay flat on a sheet of parchment. Heat olive oil in a large skillet. Cook diced onion until soft, add minced garlic, then crumbled ground beef and Italian sausage. Cook until browned. Pour in marinara sauce, add chopped basil, and simmer for 15 minutes. In a bowl, mix ricotta, 2 cups shredded mozzarella, 1 cup grated parmesan, beaten eggs, chopped parsley, salt, and pepper. Preheat oven to 375°F. Spread a thin layer of meat sauce on the bottom of a 9x13 dish. Layer: noodles, ricotta mixture, meat sauce, mozzarella. Repeat for 3 layers. Finish with noodles, remaining meat sauce, and a generous topping of mozzarella and parmesan. Cover with foil and bake for 40 minutes. Remove foil and bake for 15 more minutes until golden and bubbly. Let rest for 20 minutes before slicing — this is essential for clean layers. Garnish with fresh parsley and basil.",
+    "category": "Italian",
+    "area": "Italian"
+  },
+  {
+    "title": "Garlic Shrimp Pasta",
+    "ingredients": [
+      "Shrimp",
+      "Linguine",
+      "Garlic",
+      "Butter",
+      "Olive Oil",
+      "White Wine",
+      "Lemon",
+      "Red Pepper Flakes",
+      "Italian Parsley",
+      "Salt",
+      "Pepper"
+    ],
+    "instructions": "Peel and devein shrimp, leaving tails on for presentation. Pat dry and season with salt, pepper, and a pinch of red pepper flakes. Cook linguine in salted boiling water until al dente. Reserve 1 cup pasta water. While pasta cooks, heat olive oil and butter in a large skillet over medium-high heat. Add shrimp in a single layer and cook for 2 minutes per side until pink and curled. Remove shrimp and set aside. Reduce heat to medium. Add minced garlic and extra red pepper flakes to the skillet. Cook for 30 seconds until fragrant. Pour in white wine and squeeze in lemon juice, scraping up brown bits. Simmer for 2 minutes. Add 1/2 cup pasta water and bring to a simmer. Toss in drained linguine and cooked shrimp. Toss everything together for 1 minute, adding more pasta water if needed for a silky sauce. Remove from heat. Toss with butter and chopped parsley. Serve in warm bowls with lemon wedges and extra red pepper flakes.",
+    "category": "Seafood",
+    "area": "Italian"
+  },
+  {
+    "title": "Cacio e Pepe",
+    "ingredients": [
+      "Spaghetti",
+      "Pecorino Romano",
+      "Black Pepper",
+      "Salt",
+      "Butter"
+    ],
+    "instructions": "Toast a generous amount of whole black peppercorns in a dry skillet over medium heat for 2 minutes until fragrant. Grind coarsely. Cook spaghetti in salted boiling water until al dente. While pasta cooks, finely grate pecorino romano cheese. Reserve 1.5 cups of pasta water — this is crucial. Drain spaghetti. Return the pot to low heat and add 1 tablespoon of butter and a generous amount of the cracked black pepper. Toast the pepper in the butter for 1 minute. Add 1 cup of pasta water and bring to a simmer. Add the drained spaghetti and toss vigorously. Remove from heat. Gradually add the grated pecorino, tossing and adding pasta water as needed, until the sauce is creamy and emulsified. The key is to work off the heat and add cheese gradually to prevent clumping. Serve immediately in warm bowls with extra pecorino and a final crack of black pepper.",
+    "category": "Italian",
+    "area": "Italian"
+  },
+  {
+    "title": "Beef and Broccoli Stir Fry",
+    "ingredients": [
+      "Flank Steak",
+      "Broccoli",
+      "Soy Sauce",
+      "Oyster Sauce",
+      "Sesame Oil",
+      "Garlic",
+      "Ginger",
+      "Cornstarch",
+      "Brown Sugar",
+      "Vegetable Oil",
+      "Rice"
+    ],
+    "instructions": "Slice flank steak thinly against the grain into 1/4-inch strips. Toss with 1 tablespoon soy sauce, 1 tablespoon cornstarch, and a splash of sesame oil. Let marinate for 15 minutes. In a small bowl, whisk soy sauce, oyster sauce, brown sugar, minced garlic, grated ginger, and 1/2 cup water. Set aside. Blanch broccoli florets in boiling water for 1 minute, then drain and plunge into ice water. Heat vegetable oil in a wok over high heat until smoking. Add beef strips in a single layer and sear without stirring for 2 minutes. Toss and cook for 1 more minute. Remove beef. Add broccoli to the wok and stir fry for 2 minutes. Pour in the sauce mixture and bring to a boil. Mix 1 tablespoon cornstarch with 2 tablespoons cold water to make a slurry. Stir into the sauce and cook for 30 seconds until thickened. Return beef to the wok and toss to coat. Serve immediately over steamed jasmine rice.",
+    "category": "Asian",
+    "area": "Chinese"
+  },
+  {
+    "title": "Chicken Cashew Stir Fry",
+    "ingredients": [
+      "Chicken Breast",
+      "Cashews",
+      "Snow Peas",
+      "Red Bell Pepper",
+      "Soy Sauce",
+      "Hoisin Sauce",
+      "Rice Vinegar",
+      "Sesame Oil",
+      "Garlic",
+      "Ginger",
+      "Cornstarch",
+      "Green Onions",
+      "Vegetable Oil",
+      "Rice"
+    ],
+    "instructions": "Dice chicken breast into bite-sized cubes. Toss with soy sauce and cornstarch. Let marinate for 10 minutes. In a small bowl, whisk hoisin sauce, soy sauce, rice vinegar, sesame oil, and 2 tablespoons water for the sauce. Toast cashews in a dry wok over medium heat until golden, about 3 minutes. Remove and set aside. Increase heat to high and add vegetable oil. Stir fry chicken cubes for 4 minutes until golden and cooked through. Remove chicken. Add sliced red bell pepper and snow peas to the wok. Stir fry for 2 minutes. Add minced garlic and grated ginger, cooking for 30 seconds. Return chicken to the wok. Pour in the sauce and toss everything together for 1 minute until the sauce coats the ingredients. Add toasted cashews and sliced green onions. Toss once more. Serve immediately over steamed jasmine rice.",
+    "category": "Asian",
+    "area": "Chinese"
+  },
+  {
+    "title": "Tofu Vegetable Stir Fry",
+    "ingredients": [
+      "Extra Firm Tofu",
+      "Broccoli",
+      "Carrots",
+      "Snap Peas",
+      "Bell Peppers",
+      "Soy Sauce",
+      "Sesame Oil",
+      "Garlic",
+      "Ginger",
+      "Sriracha",
+      "Cornstarch",
+      "Vegetable Oil",
+      "Rice Noodles"
+    ],
+    "instructions": "Press extra firm tofu for 20 minutes to remove excess moisture. Cut into 1-inch cubes. Toss with soy sauce and cornstarch. Heat vegetable oil in a wok over high heat. Fry tofu cubes in batches until golden and crispy on all sides, about 6 minutes. Remove and set aside. Cook rice noodles according to package directions. In the same wok, add sesame oil. Stir fry broccoli florets, julienned carrots, snap peas, and sliced bell peppers for 3 minutes. Add minced garlic and grated ginger, cooking for 30 seconds. Return tofu to the wok. Add soy sauce and sriracha to taste. Toss everything together. Add cooked noodles and toss until combined and heated through. Serve in bowls garnished with sesame seeds and sliced green onions.",
+    "category": "Vegetarian",
+    "area": "Chinese"
+  },
+  {
+    "title": "Classic Mac and Cheese",
+    "ingredients": [
+      "Elbow Macaroni",
+      "Sharp Cheddar",
+      "Gruyere Cheese",
+      "Whole Milk",
+      "Butter",
+      "Flour",
+      "Breadcrumbs",
+      "Mustard Powder",
+      "Salt",
+      "Pepper",
+      "Paprika"
+    ],
+    "instructions": "Preheat oven to 375°F. Cook elbow macaroni in salted boiling water for 2 minutes less than package directions. Drain and set aside. In a large pot, melt butter over medium heat. Whisk in flour and cook for 2 minutes to make a roux. Slowly pour in warm milk, whisking constantly until smooth. Cook for 3-4 minutes until thickened. Reduce heat to low. Add grated sharp cheddar and grated gruyere by handfuls, stirring until fully melted and smooth. Season with mustard powder, salt, pepper, and a pinch of paprika. Fold in the drained macaroni until every piece is coated. Transfer to a buttered 9x13 baking dish. For the topping, mix breadcrumbs with melted butter and a sprinkle of paprika. Spread evenly over the mac and cheese. Bake for 20 minutes until bubbly and the topping is golden and crispy. Let rest for 10 minutes before serving. The top should be crispy, the inside creamy.",
+    "category": "Comfort Food",
+    "area": "American"
+  },
+  {
+    "title": "Chicken Pot Pie",
+    "ingredients": [
+      "Chicken Breast",
+      "Pie Crust",
+      "Carrots",
+      "Celery",
+      "Potatoes",
+      "Peas",
+      "Onion",
+      "Garlic",
+      "Chicken Broth",
+      "Heavy Cream",
+      "Butter",
+      "Flour",
+      "Thyme",
+      "Salt",
+      "Pepper",
+      "Egg Wash"
+    ],
+    "instructions": "Preheat oven to 400°F. Season chicken breasts with salt and pepper. Roast on a baking sheet for 25 minutes until cooked through. Let cool, then shred or dice. Reduce oven to 375°F. In a large pot, melt butter over medium heat. Cook diced onion, sliced carrots, and chopped celery for 5 minutes until softened. Add minced garlic and cook 1 minute. Sprinkle flour over the vegetables and stir for 2 minutes. Slowly pour in chicken broth, whisking constantly. Add diced potatoes and fresh thyme. Simmer for 10 minutes until potatoes are tender. Stir in heavy cream, frozen peas, and the cooked chicken. Season with salt and pepper. Pour filling into a 9-inch pie dish. Roll out pie crust and place over the filling. Crimp the edges and cut several steam vents. Brush with egg wash for a golden finish. Bake for 35 minutes until the crust is golden and the filling is bubbling through the vents. Let rest for 15 minutes before serving.",
+    "category": "Comfort Food",
+    "area": "American"
+  },
+  {
+    "title": "Fish and Chips with Tartar Sauce",
+    "ingredients": [
+      "Cod Fillets",
+      "Russet Potatoes",
+      "Flour",
+      "Beer",
+      "Baking Powder",
+      "Egg",
+      "Salt",
+      "Pepper",
+      "Vegetable Oil",
+      "Mayonnaise",
+      "Pickles",
+      "Capers",
+      "Lemon",
+      "Parsley"
+    ],
+    "instructions": "Cut russet potatoes into 1/2-inch thick fries. Soak in cold water for 30 minutes to remove starch. Drain and pat completely dry. Heat vegetable oil in a deep pot to 325°F. Fry potatoes in batches for 5 minutes without browning. Remove and drain on paper towels. Increase oil temperature to 375°F. For the batter, whisk flour, beer, baking powder, egg, and a pinch of salt until smooth. Season cod fillets with salt and pepper. Pat dry. Dip each fillet into the batter, letting excess drip off. Carefully lower into the hot oil. Fry for 5-6 minutes until deep golden and crispy. Drain on paper towels. Refry the potatoes at 375°F for 3-4 minutes until crispy and golden. Season with salt immediately. For tartar sauce, combine mayonnaise, finely chopped pickles, capers, lemon juice, and chopped parsley. Serve the fish and chips with tartar sauce, lemon wedges, and malt vinegar.",
+    "category": "Seafood",
+    "area": "British"
+  },
+  {
+    "title": "French Onion Soup",
+    "ingredients": [
+      "Yellow Onions",
+      "Butter",
+      "Beef Broth",
+      "Dry White Wine",
+      "Thyme",
+      "Bay Leaf",
+      "Gruyere Cheese",
+      "French Baguette",
+      "Salt",
+      "Pepper",
+      "Sugar"
+    ],
+    "instructions": "Halve and thinly slice yellow onions. Melt butter in a large, heavy pot over medium heat. Add onions and a pinch of salt and sugar. Cook, stirring occasionally, for 40-45 minutes until the onions are deeply caramelized and mahogany brown. Do not rush this step — low and slow is key. Sprinkle a teaspoon of flour over the onions and stir for 2 minutes. Pour in dry white wine and scrape up all the brown bits from the bottom. Let the wine reduce by half, about 3 minutes. Add beef broth, fresh thyme sprigs, and a bay leaf. Bring to a boil, then reduce heat and simmer for 20 minutes. Remove thyme sprigs and bay leaf. Season with salt and pepper. Preheat broiler. Ladle soup into oven-safe bowls. Float a slice of toasted baguette on top of each. Pile grated gruyere cheese generously over the bread. Broil for 3-4 minutes until the cheese is bubbling and deeply browned. Let cool for 5 minutes before serving.",
+    "category": "Comfort Food",
+    "area": "French"
+  },
+  {
+    "title": "Loaded Baked Potato Soup",
+    "ingredients": [
+      "Russet Potatoes",
+      "Bacon",
+      "Sharp Cheddar Cheese",
+      "Sour Cream",
+      "Milk",
+      "Chicken Broth",
+      "Butter",
+      "Flour",
+      "Green Onions",
+      "Salt",
+      "Pepper"
+    ],
+    "instructions": "Scrub potatoes and pierce with a fork. Bake at 400°F for 1 hour until tender. Let cool, then scoop out the flesh, discarding skins. Cook bacon in a large pot until crispy. Remove and crumble, reserving 2 tablespoons of bacon fat in the pot. Add butter to the bacon fat over medium heat. Whisk in flour and cook for 2 minutes. Slowly pour in milk and chicken broth, whisking constantly. Cook for 5 minutes until thickened. Add the baked potato flesh and mash roughly into the soup with a potato masher. Stir in grated sharp cheddar until melted. Season with salt and pepper. Reduce heat to low and stir in sour cream. Warm through without boiling. Ladle into bowls and top with crumbled bacon, extra shredded cheddar, sliced green onions, and a dollop of sour cream. Serve with crusty bread.",
+    "category": "Comfort Food",
+    "area": "American"
+  },
+  {
+    "title": "Biscuits and Sausage Gravy",
+    "ingredients": [
+      "Buttermilk Biscuits",
+      "Breakfast Sausage",
+      "Flour",
+      "Whole Milk",
+      "Butter",
+      "Salt",
+      "Black Pepper",
+      "Cayenne Pepper"
+    ],
+    "instructions": "Preheat oven to 450°F. Make biscuits: In a bowl, whisk flour, baking powder, sugar, and salt. Cut cold butter into the flour mixture until it resembles coarse meal. Add buttermilk and stir just until combined. Pat dough to 1-inch thickness and cut with a biscuit cutter. Place on a baking sheet and bake for 12 minutes until golden. For the gravy, cook breakfast sausage in a large skillet over medium-high heat, breaking apart with a spoon, until browned and cooked through, about 8 minutes. Reduce heat to medium. Sprinkle flour over the sausage and stir for 2 minutes, coating the meat. Slowly pour in whole milk, stirring constantly, until the gravy thickens, about 5 minutes. Season generously with black pepper, salt, and a pinch of cayenne. Cook for 2 more minutes until thick and creamy. Split hot biscuits in half, place on a plate, and ladle the sausage gravy generously over the top. Serve immediately with hot sauce and scrambled eggs.",
+    "category": "Breakfast",
+    "area": "American"
+  },
+  {
+    "title": "Tomato Basil Soup",
+    "ingredients": [
+      "Canned San Marzano Tomatoes",
+      "Fresh Basil",
+      "Onion",
+      "Garlic",
+      "Vegetable Broth",
+      "Heavy Cream",
+      "Olive Oil",
+      "Butter",
+      "Salt",
+      "Pepper",
+      "Sugar"
+    ],
+    "instructions": "Heat olive oil and butter in a large pot over medium heat. Cook diced onion until soft and translucent, about 6 minutes. Add minced garlic and cook 1 minute. Pour in crushed San Marzano tomatoes with their juices. Add vegetable broth, a teaspoon of sugar, salt, and pepper. Bring to a boil, then reduce heat and simmer for 25 minutes. Remove from heat. Add a large handful of fresh basil leaves. Use an immersion blender to puree the soup until completely smooth. Alternatively, blend in batches in a blender, taking care with hot liquid. Return to low heat. Stir in heavy cream until fully incorporated. Warm through without boiling. Season again with salt and pepper to taste. Serve in bowls with a swirl of cream and a few small basil leaves. Pair with a grilled cheese sandwich for the ultimate comfort meal.",
+    "category": "Comfort Food",
+    "area": "Italian"
+  },
+  {
+    "title": "Caesar Salad with Homemade Dressing",
+    "ingredients": [
+      "Romaine Lettuce",
+      "Anchovy Fillets",
+      "Garlic",
+      "Egg Yolk",
+      "Lemon Juice",
+      "Dijon Mustard",
+      "Worcestershire Sauce",
+      "Olive Oil",
+      "Parmesan Cheese",
+      "Croutons",
+      "Salt",
+      "Pepper"
+    ],
+    "instructions": "For the dressing, mash anchovy fillets and minced garlic together into a paste using the side of a knife. In a bowl, whisk the anchovy-garlic paste with egg yolk, lemon juice, Dijon mustard, and Worcestershire sauce. While whisking constantly, drizzle in olive oil in a thin stream until the dressing emulsifies and thickens. Stir in grated Parmesan. Season with black pepper — go easy on salt as anchovies and cheese are salty. Tear romaine lettuce into bite-sized pieces, wash, and dry thoroughly. Place in a large salad bowl. Add homemade croutons. Pour dressing over the salad and toss well until every leaf is coated. Use your hands for the best distribution. Top with shaved parmesan and extra cracked black pepper. Serve immediately as a side or add grilled chicken for a main course.",
+    "category": "Salad",
+    "area": "Italian"
+  },
+  {
+    "title": "Minestrone Soup",
+    "ingredients": [
+      "Cannellini Beans",
+      "Ditalini Pasta",
+      "Zucchini",
+      "Carrots",
+      "Celery",
+      "Onion",
+      "Garlic",
+      "Canned Diced Tomatoes",
+      "Vegetable Broth",
+      "Parmesan Rind",
+      "Fresh Basil",
+      "Olive Oil",
+      "Salt",
+      "Pepper"
+    ],
+    "instructions": "Heat olive oil in a large pot over medium heat. Cook diced onion, sliced carrots, and chopped celery for 6 minutes until softened. Add minced garlic and cook 1 minute. Pour in diced tomatoes, vegetable broth, and a parmesan rind (for deep umami). Add drained and rinsed cannellini beans. Bring to a boil, then reduce heat and simmer for 20 minutes. Add diced zucchini and ditalini pasta. Cook for 10 minutes until pasta and zucchini are tender. Remove the parmesan rind. Season with salt, pepper, and a pinch of red pepper flakes if desired. Stir in fresh basil and a drizzle of olive oil just before serving. Serve with crusty bread and a generous sprinkle of grated parmesan on top.",
+    "category": "Soup",
+    "area": "Italian"
+  },
+  {
+    "title": "Fluffy Buttermilk Pancakes",
+    "ingredients": [
+      "Flour",
+      "Buttermilk",
+      "Eggs",
+      "Sugar",
+      "Butter",
+      "Baking Powder",
+      "Baking Soda",
+      "Salt",
+      "Vanilla Extract",
+      "Maple Syrup"
+    ],
+    "instructions": "In a large bowl, whisk together flour, sugar, baking powder, baking soda, and salt. In a separate bowl, whisk buttermilk, melted butter, eggs, and vanilla extract. Pour the wet ingredients into the dry ingredients and stir gently with a spatula until just combined. A few lumps are fine — overmixing makes pancakes tough. Let the batter rest for 5 minutes. Heat a griddle or nonstick skillet over medium heat. Lightly butter the surface. Pour 1/4 cup batter for each pancake. Cook until bubbles form on the surface and edges look set, about 2-3 minutes. Flip and cook for 2 more minutes until golden. Keep warm in a 200°F oven while cooking remaining batches. Serve stacked with a pat of butter on top, warm maple syrup, and fresh berries.",
+    "category": "Breakfast",
+    "area": "American"
+  },
+  {
+    "title": "Avocado Toast with Poached Egg",
+    "ingredients": [
+      "Sourdough Bread",
+      "Avocado",
+      "Eggs",
+      "Lemon Juice",
+      "Red Pepper Flakes",
+      "Microgreens",
+      "Salt",
+      "Pepper",
+      "Olive Oil"
+    ],
+    "instructions": "Toast thick slices of sourdough bread until golden and crisp. Halve avocados, remove the pit, and scoop the flesh into a bowl. Add lemon juice, salt, and pepper. Mash with a fork to your desired consistency — chunky or smooth. For poached eggs, bring a pot of water to a gentle simmer with a splash of vinegar. Create a gentle whirlpool and slide in a fresh egg. Poach for 3-4 minutes until whites are set but yolk is still runny. Remove with a slotted spoon and drain on paper towel. Spread the mashed avocado generously on the warm toast. Place the poached egg on top. Season the egg with salt, pepper, and red pepper flakes. Drizzle with olive oil. Garnish with microgreens or fresh herbs. Serve open-faced with a side of mixed greens.",
+    "category": "Breakfast",
+    "area": "Global"
+  },
+  {
+    "title": "Breakfast Burrito",
+    "ingredients": [
+      "Flour Tortillas",
+      "Eggs",
+      "Breakfast Sausage",
+      "Potatoes",
+      "Sharp Cheddar Cheese",
+      "Salsa",
+      "Sour Cream",
+      "Avocado",
+      "Salt",
+      "Pepper",
+      "Vegetable Oil"
+    ],
+    "instructions": "Dice potatoes into small cubes. Heat vegetable oil in a skillet over medium heat. Cook potatoes with salt and pepper until golden and crispy, about 12 minutes. Set aside. Cook breakfast sausage in the same skillet, breaking apart, until browned. Remove and set aside. Scramble eggs in the same skillet until just set but still soft. Warm flour tortillas on a dry skillet. To assemble, lay a warm tortilla flat. Layer: scrambled eggs, crispy potatoes, crumbled sausage, shredded sharp cheddar, diced avocado, salsa, and a dollop of sour cream. Fold in the sides, then roll tightly from the bottom to form a burrito. Return to the skillet seam-side down for 2 minutes to seal. Serve whole or sliced in half with extra salsa on the side. Perfect for a hearty breakfast or brunch.",
+    "category": "Breakfast",
+    "area": "Mexican"
+  },
+  {
+    "title": "Classic French Toast",
+    "ingredients": [
+      "Brioche Bread",
+      "Eggs",
+      "Whole Milk",
+      "Vanilla Extract",
+      "Cinnamon",
+      "Nutmeg",
+      "Butter",
+      "Maple Syrup",
+      "Powdered Sugar",
+      "Salt"
+    ],
+    "instructions": "Slice brioche into 1-inch thick slices. Leave them out for a few hours to dry slightly — stale bread absorbs the custard better. In a wide, shallow dish, whisk eggs, whole milk, vanilla extract, ground cinnamon, a pinch of nutmeg, and a pinch of salt until smooth. Heat a griddle or skillet over medium heat and melt butter. Dip each bread slice into the custard for 15 seconds per side, letting excess drip off. Cook on the griddle for 3-4 minutes per side until deep golden brown and slightly crispy on the outside but soft inside. Keep warm in a 200°F oven while cooking remaining slices. Serve two or three slices per person. Dust with powdered sugar, drizzle with warm maple syrup, and add fresh berries or sliced bananas on top.",
+    "category": "Breakfast",
+    "area": "French"
+  }
+]

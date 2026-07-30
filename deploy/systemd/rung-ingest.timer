@@ -1,0 +1,20 @@
+[Unit]
+Description=Rung StorePriceCache Ingest Schedule
+Documentation=file:///opt/rung/deploy/README.md
+
+[Timer]
+# Twice daily at 03:15 and 15:15 -- see deploy/README.md for the
+# cadence rationale (catches weekly ad rotation + same-day deltas
+# without burning API quota).
+OnCalendar=*-*-* 03:15:00
+OnCalendar=*-*-* 15:15:00
+# Catch-up run at 06:15 weekdays only -- guards against transient
+# Kroger API failures during the overnight job.
+OnCalendar=Mon..Fri 06:15:00
+
+# Run missed jobs within 1h of the next opportunity if the host was
+# off when a trigger fired.
+Persistent=true
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,50 @@
+# Dockerfile.ingest — minimal image for the Rung StorePriceCache
+# ingest pipeline. Only `requests` is required at runtime; everything
+# else (argparse, json, csv, logging, datetime) is stdlib. We do NOT
+# install Flask/SQLAlchemy/plaid-python/recipe-scrapers because the
+# ingest CLI doesn't import them.
+#
+# Build:
+#   docker build -f Dockerfile.ingest -t rung/ingest:latest .
+#
+# Push to your registry:
+#   docker tag rung/ingest:latest <registry>/rung/ingest:latest
+#   docker push <registry>/rung/ingest:latest
+#
+# Then update deploy/k8s/rung-ingest-cronjob.yaml +
+# deploy/k8s/rung-ingest-catchup-cronjob.yaml `image:` to the pushed
+# reference before `kubectl apply`.
+
+FROM python:3.12-slim
+
+# Install only what the CLI needs. `--no-cache-dir` keeps the layer
+# small; --no-install-recommends avoids apt bloat.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates \
+    && rm -rf /var/lib/apt/lists/* \
+    && pip install --no-cache-dir 'requests>=2.34'
+
+# Set up a non-root user that matches the UID/GID pinned by the
+# K8s CronJob securityContext (runAsUser: 10001). Doing it at build
+# time so the image's /etc/passwd matches the runtime requirement.
+RUN groupadd --system --gid 10001 rung \
+    && useradd  --system --uid 10001 --gid rung \
+                --home /var/lib/rung --shell /usr/sbin/nologin rung \
+    && mkdir -p /var/lib/rung \
+    && chown -R rung:rung /var/lib/rung
+
+WORKDIR /opt/rung
+
+# Copy only the CLI script and example config. An ops engineer can
+# overlay their own ingest_store_prices.config.json via a ConfigMap
+# at runtime (see deploy/k8s/rung-ingest-configmap.yaml.example).
+COPY scripts/ingest_store_prices.py          /opt/rung/scripts/ingest_store_prices.py
+COPY scripts/ingest_store_prices.config.example.json \
+                                            /opt/rung/scripts/ingest_store_prices.config.example.json
+
+USER rung:rung
+
+# Default to --help; the CronJob / systemd manifests pass the real
+# --config path explicitly via the command array.
+ENTRYPOINT ["/usr/local/bin/python3", "/opt/rung/scripts/ingest_store_prices.py"]
+CMD ["--help"]

@@ -31,27 +31,20 @@
   <!-- Prepare-Mode Storage Helpers (standalone, testable) -->
   <script src="/static/js/prepare-storage.js"></script>
 
-    <!-- Recipes module (standalone, testable) -->
+  <!-- Recipes module (standalone, testable) -->
   <script src="/static/js/recipes.js"></script>
 
-    <!-- Grocery module (standalone, testable) -->
+  <!-- Grocery module (standalone, testable) -->
   <script src="/static/js/grocery.js"></script>
 
-    <!-- Transactions + recurring-bills module (standalone, testable) -->
+  <!-- Transactions + recurring-bills module (standalone, testable) -->
   <script src="/static/js/transactions.js"></script>
 
-  
   <style>
     /* =============================================================
        THEME VARIABLES — dark default, light override via [data-theme]
     ============================================================= */
     :root {
-      /* OS-level color-scheme hint — scrollbars, native form-control
-         backgrounds (checkbox / radio / range rendered with
-         accent-color), and other UA-drawn chrome follow our declared
-         palette so the accent stays vivid even when the browser
-         draws chrome itself. Declaring both "dark light" lets the UA
-         pick the closest match to the user's OS preference. */
       color-scheme: dark light;
       --radius-sm: 6px;
       --radius-md: 10px;
@@ -256,7 +249,7 @@
     }
     .card .card-value { font-size: 1.85rem; font-weight: 800; letter-spacing: -0.02em; }
     .card.is-positive .card-value { color: var(--positive); }
-    .card.is-danger  .card-value  { color: var(--danger); }
+    .card.is-danger .card-value { color: var(--danger); }
     .card .card-foot { margin-top: 6px; font-size: 0.78rem; color: var(--text-mute); }
 
     .panel {
@@ -398,12 +391,24 @@
       background: var(--bg-sunken); color: var(--text); font-size: 0.92rem;
       display: flex; align-items: flex-start; gap: 10px;
     }
-    .verdict.is-approved  { border-color: rgba(45,191,110,.4); background: var(--accent-soft); }
-    .verdict.is-approved .v-ico  { color: #fff; background: var(--accent); }
-    .verdict.is-warning   { border-color: rgba(245,158,11,.4); background: rgba(245,158,11,.10); }
-    .verdict.is-warning .v-ico   { color: #fff; background: var(--warn); }
-    .verdict.is-denied    { border-color: rgba(244,63,94,.4); background: rgba(244,63,94,.10); }
-    .verdict.is-denied .v-ico    { color: #fff; background: var(--danger); }
+    .verdict.is-approved {
+      border-color: rgba(45,191,110,.4); background: var(--accent-soft);
+    }
+    .verdict.is-approved .v-ico {
+      color: #fff; background: var(--accent);
+    }
+    .verdict.is-warning {
+      border-color: rgba(245,158,11,.4); background: rgba(245,158,11,.10);
+    }
+    .verdict.is-warning .v-ico {
+      color: #fff; background: var(--warn);
+    }
+    .verdict.is-denied {
+      border-color: rgba(244,63,94,.4); background: rgba(244,63,94,.10);
+    }
+    .verdict.is-denied .v-ico {
+      color: #fff; background: var(--danger);
+    }
     .verdict .v-ico {
       display: inline-grid; place-items: center;
       width: 26px; height: 26px; border-radius: 6px;
@@ -447,7 +452,9 @@
     }
     .flash.is-show { opacity: 1; transform: translateY(0); pointer-events: auto; }
     .flash.is-success { border-color: rgba(45,191,110,.5); }
-    .flash.is-error   { border-color: rgba(244,63,94,.5); }
+    .flash.is-error {
+      border-color: rgba(244,63,94,.5);
+    }
 
     @media (prefers-reduced-motion: reduce) {
       * { transition: none !important; animation: none !important; }
@@ -542,13 +549,129 @@
     .prepare-resume-chip:active {
       transform: translateY(0);
     }
+
+    /* ACTIVE-RECIPES EXPANDER (Grocery tab) ====================== */
+    .recipes-expander {
+      border: 1px solid var(--border);
+      border-radius: var(--radius-lg);
+      background: var(--bg-elev);
+      box-shadow: var(--shadow-sm);
+      margin-bottom: 18px;
+      overflow: hidden;
+      transition: border-color var(--transition);
+    }
+    .recipes-expander:hover {
+      border-color: var(--border-strong);
+    }
+    .recipes-expander > summary {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 16px 20px;
+      cursor: pointer;
+      font-size: 1.0rem;
+      font-weight: 700;
+      color: var(--text);
+      user-select: none;
+      list-style: none;
+      transition: background var(--transition);
+    }
+    .recipes-expander > summary::-webkit-details-marker {
+      display: none;
+    }
+    .recipes-expander > summary::before {
+      content: "▸";
+      display: inline-block;
+      margin-right: 10px;
+      font-size: 0.8rem;
+      transition: transform 200ms ease;
+      color: var(--text-mute);
+    }
+    .recipes-expander[open] > summary::before {
+      transform: rotate(90deg);
+    }
+    .recipes-expander > summary:hover {
+      background: var(--bg-sunken);
+    }
+    .recipes-expander > summary:focus-visible {
+      outline: 2px solid var(--accent-soft);
+      outline-offset: -2px;
+      border-radius: var(--radius-lg);
+    }
+    .recipes-expander .expander-badge {
+      font-size: 0.7rem;
+      padding: 3px 10px;
+      border-radius: 999px;
+      background: var(--accent-soft);
+      color: var(--accent);
+      border: 1px solid rgba(45,191,110,.3);
+      font-weight: 700;
+      letter-spacing: 0.03em;
+      white-space: nowrap;
+    }
+    .recipes-expander-body {
+      padding: 8px 20px 20px;
+    }
+    .recipes-expander-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 12px;
+    }
+    @media (max-width: 780px) {
+      .recipes-expander-grid {
+        grid-template-columns: 1fr;
+      }
+    }
+    .recipe-mini-card {
+      background: var(--bg-sunken);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-md);
+      padding: 14px 16px;
+      transition: border-color var(--transition);
+    }
+    .recipe-mini-card:hover {
+      border-color: var(--border-strong);
+    }
+    .recipe-mini-card .rmc-title {
+      font-weight: 700;
+      font-size: 0.88rem;
+      margin-bottom: 2px;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .recipe-mini-card .rmc-servings {
+      font-size: 0.72rem;
+      color: var(--text-mute);
+      margin-bottom: 8px;
+    }
+    .recipe-mini-card .rmc-ingredients {
+      list-style: none;
+      padding: 0;
+      margin: 0;
+      display: flex;
+      flex-direction: column;
+      gap: 3px;
+    }
+    .recipe-mini-card .rmc-ingredients li {
+      font-size: 0.78rem;
+      color: var(--text-dim);
+      padding-left: 12px;
+      position: relative;
+    }
+    .recipe-mini-card .rmc-ingredients li::before {
+      content: "•";
+      position: absolute;
+      left: 0;
+      color: var(--accent);
+    }
   </style>
 </head>
 <body>
 
   <!-- ==============================================================
-       LEFT SIDEBAR — fixed Rung brand + 4-tab vertical nav.
-  =============================================================== -->
+   LEFT SIDEBAR — fixed Rung brand + 4-tab vertical nav.
+   =============================================================== -->
   <aside class="sidebar" aria-label="Primary navigation">
     <div>
       <div class="brand">
@@ -560,22 +683,22 @@
       </div>
 
       <nav class="nav" id="primaryNav">
-        <a href="#overview"    class="nav-link is-active" data-target="overview">
+        <a href="#overview"   class="tab-btn nav-link is-active" data-target="overview" data-tab="overview">
           <span class="nav-ico">◉</span> Overview
         </a>
-        <a href="#canibuy"     class="nav-link" data-target="canibuy">
+        <a href="#canibuy"   class="tab-btn nav-link" data-target="canibuy" data-tab="canibuy">
           <span class="nav-ico">?</span> Can I Buy?
         </a>
-        <a href="#transactions" class="nav-link" data-target="transactions">
+        <a href="#transactions" class="tab-btn nav-link" data-target="transactions" data-tab="transactions">
           <span class="nav-ico">≡</span> Transactions
         </a>
-        <a href="#recipes"     class="nav-link" data-target="recipes">
+        <a href="#recipes"   class="tab-btn nav-link" data-target="recipes" data-tab="recipes">
           <span class="nav-ico">♨</span> Recipes
         </a>
-        <a href="#grocery"     class="nav-link" data-target="grocery">
+        <a href="#grocery"   class="tab-btn nav-link" data-target="grocery" data-tab="grocery">
           <span class="nav-ico">☑</span> Grocery
         </a>
-        <a href="#settings"    class="nav-link" data-target="settings">
+        <a href="#settings"  class="tab-btn nav-link" data-target="settings" data-tab="settings">
           <span class="nav-ico">⚙</span> Settings
         </a>
       </nav>
@@ -589,12 +712,12 @@
   </aside>
 
   <!-- ==============================================================
-       MAIN CONTENT — 4 sections, one per sidebar tab.
-  =============================================================== -->
+   MAIN CONTENT — 4 sections, one per sidebar tab.
+   =============================================================== -->
   <main class="content">
 
     <!-- OVERVIEW ------------------------------------------------------ -->
-    <section id="overview" class="page is-active" aria-labelledby="overview-title">
+    <section id="overview" class="page is-active tab-content" aria-labelledby="overview-title">
       <header class="page-head">
         <div>
           <h1 id="overview-title">Overview</h1>
@@ -665,7 +788,7 @@
     </section>
 
     <!-- CAN I BUY ----------------------------------------------------- -->
-    <section id="canibuy" class="page" aria-labelledby="canibuy-title">
+    <section id="canibuy" class="page tab-content" aria-labelledby="canibuy-title">
       <header class="page-head">
         <div>
           <h1 id="canibuy-title">Can I Buy This?</h1>
@@ -698,7 +821,7 @@
     </section>
 
     <!-- TRANSACTIONS (logged expenses + recurring bills) ------------ -->
-    <section id="transactions" class="page" aria-labelledby="trans-title">
+    <section id="transactions" class="page tab-content" aria-labelledby="trans-title">
       <header class="page-head">
         <div>
           <h1 id="trans-title">Transactions</h1>
@@ -731,36 +854,20 @@
               <button class="btn is-primary" type="submit">Post Transaction</button>
             </div>
           </form>
+          <div id="transactionList" class="list" style="margin-top:16px;"></div>
         </div>
 
-        <div class="panel">
-          <h2>Transaction History</h2>
-          <div class="panel-sub">Most recent first.</div>
-          <div class="list" id="transactionList">
-            <div class="empty">Loading transactions…</div>
-          </div>
-        </div>
-      </div>
-
-      <div class="split">
         <div class="panel">
           <h2>Recurring Bills</h2>
-          <div class="panel-sub">Track obligations; toggle paid or remove.</div>
-          <div class="list" id="billsList">
-            <div class="empty">Loading bills…</div>
-          </div>
-        </div>
-        <div class="panel">
-          <h2>Add Recurring Bill</h2>
-          <div class="panel-sub">Name, amount, and due date.</div>
+          <div class="panel-sub">Track monthly obligations.</div>
           <form id="addBillForm">
             <div class="field">
               <label for="bName">Bill name</label>
-              <input type="text" id="bName" placeholder="e.g. Electric Bill" required />
+              <input type="text" id="bName" placeholder="e.g. Rent" required />
             </div>
             <div class="field">
               <label for="bAmt">Amount ($)</label>
-              <input type="number" id="bAmt" min="0.01" step="0.01" value="75.00" required />
+              <input type="number" id="bAmt" min="0.01" step="0.01" value="100.00" required />
             </div>
             <div class="field">
               <label for="bDate">Due date</label>
@@ -770,56 +877,60 @@
               <button class="btn is-primary" type="submit">Add Bill</button>
             </div>
           </form>
+          <div id="billsList" class="list" style="margin-top:16px;"></div>
         </div>
       </div>
     </section>
 
-    <!-- RECIPES ------------------------------------------------------ -->
-    <section id="recipes" class="page" aria-labelledby="recipes-title">
+    <!-- RECIPES ----------------------------------------------------------- -->
+    <section id="recipes" class="page tab-content" aria-labelledby="recipes-title">
       <header class="page-head">
         <div>
           <h1 id="recipes-title">Recipes</h1>
-          <div class="subtitle">Pick meals to include in your grocery run, paste a recipe URL, or add one manually below.</div>
+          <div class="subtitle">Search recipes locally or from TheMealDB.</div>
+        </div>
+        <div class="head-actions">
+          <span id="recipeSelectedCount" style="font-size:0.85rem;color:var(--text-mute);align-self:center;">0 selected</span>
         </div>
       </header>
 
-      <!-- IMPORT RECIPE BY URL ---------------------------------------- -->
-      <div class="panel" style="margin-bottom:20px;">
-        <h2>Import Recipe from URL</h2>
-        <div class="panel-sub">
-          Paste a link from <strong>Allrecipes</strong>, <strong>NYT Cooking</strong>,
-          <strong>BBC Good Food</strong>, <strong>Bon Appétit</strong>, or any of 600+
-          sites supported by <code>recipe-scrapers</code>.
+      <!-- Keyword Search Bar -->
+      <div class="panel" style="padding:16px 20px;">
+        <div class="row" style="gap:8px; flex-wrap:wrap;">
+          <input type="text" id="recipeSearchInput"
+                 placeholder="Search recipes… e.g. chicken, rice, pasta"
+                 style="flex:1; min-width:180px; background:var(--bg-sunken); border:1px solid var(--border);
+                        color:var(--text); border-radius:var(--radius-md); padding:10px 12px;
+                        font-size:0.92rem; font-family:inherit;
+                        transition:border-color 160ms ease, box-shadow 160ms ease;" />
+          <button id="searchRecipesBtn" class="btn is-primary" type="button">
+            Search
+          </button>
+          <button id="refreshRecipesBtn" class="btn is-ghost" type="button">
+            Browse All
+          </button>
         </div>
-        <form id="importRecipeForm" class="row" style="align-items:flex-end; gap:12px; flex-wrap:wrap;">
-          <div class="field" style="flex:1 1 320px; min-width:0;">
-            <label for="importRecipeUrl">Recipe URL</label>
-            <input type="url" id="importRecipeUrl"
-                   placeholder="https://www.allrecipes.com/recipe/213742/cheesy-ham-and-hash-brown-casserole/"
-                   required />
-          </div>
-          <button class="btn is-primary" type="submit" id="importRecipeBtn">Import Recipe</button>
-        </form>
-        <div id="importRecipeStatus" role="status" aria-live="polite"
-             style="margin-top:10px; font-size:.85rem; color: var(--text-mute);"></div>
       </div>
+
+      <!-- Search Results -->
+      <div id="recipeResultsList" class="list" style="margin-bottom:18px;"></div>
 
       <div class="split">
         <div class="panel">
           <h2>Add Recipe</h2>
-          <div class="panel-sub">One ingredient per line: <code>name, qty, unit, swap1, swap2</code></div>
+          <div class="panel-sub">Manually enter a recipe.</div>
           <form id="addRecipeForm">
             <div class="field">
               <label for="rTitle">Title</label>
-              <input type="text" id="rTitle" placeholder="e.g. Beef Tacos" required />
+              <input type="text" id="rTitle" placeholder="e.g. Chicken &amp; Rice" required />
             </div>
             <div class="field">
               <label for="rServings">Servings</label>
-              <input type="number" id="rServings" min="1" step="1" value="4" />
+              <input type="number" id="rServings" min="1" value="4" />
             </div>
             <div class="field">
-              <label for="rIngredients">Ingredients</label>
-              <textarea id="rIngredients" rows="5" placeholder="Ground Beef, 1.5, lbs, Turkey, Lentils&#10;Flour Tortillas, 8, item, Corn Tortillas&#10;Cheddar Cheese, 1, bag"></textarea>
+              <label for="rIngredients">Ingredients (one per line)</label>
+              <textarea id="rIngredients" rows="4" placeholder="2 cups rice&#10;1 lb chicken breast&#10;1 tbsp olive oil"></textarea>
             </div>
             <div class="row row-end">
               <button class="btn is-primary" type="submit">Add Recipe</button>
@@ -828,691 +939,941 @@
         </div>
 
         <div class="panel">
-          <h2>Meal Plan</h2>
-          <div class="panel-sub">Check meals to include in this week's grocery run.</div>
-          <div id="recipeListContainer">
-            <div class="empty">Loading recipes…</div>
-          </div>
-          <div id="recipeCount" class="row" style="margin-top:12px; color: var(--text-mute); font-size: 0.85rem;">
-            <span>Selected for grocery list: <strong id="recipeSelectedCount">0</strong></span>
-          </div>
+          <h2>Import from URL</h2>
+          <div class="panel-sub">Paste a recipe webpage link.</div>
+          <form id="importRecipeForm">
+            <div class="field">
+              <label for="importRecipeUrl">Recipe URL</label>
+              <input type="url" id="importRecipeUrl" placeholder="https://example.com/recipe" />
+            </div>
+            <div class="row row-end">
+              <button class="btn is-primary" id="importRecipeBtn" type="submit">Import</button>
+            </div>
+            <div id="importRecipeStatus" style="margin-top:8px;font-size:0.82rem;color:var(--text-mute);"></div>
+          </form>
         </div>
+      </div>
+
+      <div id="recipeListContainer" class="list"></div>
+      <div class="row row-end" style="margin-top:12px;">
+        <button id="generateRecipesBtn" class="btn is-primary" type="button">Generate Recipes</button>
       </div>
     </section>
 
-    <!-- GROCERY ------------------------------------------------------ -->
-    <section id="grocery" class="page" aria-labelledby="grocery-title">
+    <!-- GROCERY ----------------------------------------------------------- -->
+    <section id="grocery" class="page tab-content" aria-labelledby="grocery-title">
       <header class="page-head">
         <div>
-          <h1 id="grocery-title">Grocery</h1>
-          <div class="subtitle">Tax-aware shopping list generated from your selected meals.</div>
+          <h1 id="grocery-title">Grocery &amp; Store Cart</h1>
+          <div class="subtitle">Build your pay period cart from selected recipes.</div>
+        </div>
+        <div class="head-actions">
+          <button id="buildCartBtn" class="btn is-primary" type="button">☑ Auto-Fill Pay Period Cart</button>
         </div>
       </header>
 
+      <!-- Active Recipes Expander -->
+      <details class="recipes-expander" id="activeRecipesExpander">
+        <summary>
+          <span>📖 Active Pay-Period Recipes</span>
+          <span class="expander-badge" id="activeRecipeCount">0 Selected</span>
+        </summary>
+        <div class="recipes-expander-body">
+          <div id="activeRecipesGrid" class="recipes-expander-grid">
+            <div class="empty" id="activeRecipesEmpty">No recipes selected for this pay period yet. Go to the Recipes tab to pick your meals!</div>
+          </div>
+        </div>
+      </details>
+
       <div class="split">
         <div class="panel">
-          <h2>Generate List</h2>
-          <div class="panel-sub">Items are estimated at <code>$3.65/unit</code> with local sales tax applied.</div>
+          <h2>Store Location</h2>
+          <div class="panel-sub">Set your local store for price lookups.</div>
           <div class="field">
-            <label for="storeSel">Preferred store</label>
+            <label for="storeZip">Zip Code</label>
+            <input type="text" id="storeZip" placeholder="65084" value="65084" />
+          </div>
+          <div class="field">
+            <label for="storeSel">Store</label>
             <select id="storeSel">
-              <option>Walmart</option>
-              <option>Target</option>
-              <option>Aldi</option>
-              <option>Kroger</option>
-              <option>Local Market</option>
+              <option value="walmart">Walmart</option>
+              <option value="kroger">Kroger</option>
+              <option value="dollar_general">Dollar General</option>
             </select>
           </div>
-          <div class="row row-end" style="margin-top: 8px;">
-            <button id="generateGroceryBtn" class="btn is-primary" type="button">Generate from selected recipes</button>
+          <div class="field">
+            <label for="budgetInput">Pay Period Budget ($)</label>
+            <input type="number" id="budgetInput" min="1" step="1" value="100" />
           </div>
-          <div id="groceryMeta" style="margin-top: 14px; color: var(--text-mute); font-size: 0.85rem;"></div>
         </div>
 
         <div class="panel">
-          <h2>Active Grocery List</h2>
-          <div class="panel-sub">Tax-inclusive totals shown below the list.</div>
-          <div class="list" id="groceryListContainer">
-            <div class="empty">No active grocery list yet — generate one to begin.</div>
+          <h2>Budget Status</h2>
+          <div class="panel-sub">Cart total vs. budget.</div>
+          <div style="display:flex;justify-content:space-between;font-size:0.85rem;margin-bottom:8px;">
+            <span>Cart Subtotal</span><strong id="cartSubtotal">$0.00</strong>
           </div>
-          <div id="groceryTotal" style="margin-top: 14px; font-weight: 800; font-size: 1.1rem; text-align: right;"></div>
+          <div style="display:flex;justify-content:space-between;font-size:0.85rem;margin-bottom:12px;">
+            <span>Budget</span><strong id="cartBudget">$100.00</strong>
+          </div>
+          <div style="height:12px;border-radius:999px;background:var(--bg-sunken);overflow:hidden;">
+            <div id="cartBudgetBar" style="height:100%;width:0%;border-radius:999px;transition:width 0.4s ease;background:var(--accent);"></div>
+          </div>
+          <div id="budgetWarning" style="display:none;margin-top:8px;padding:8px 12px;border-radius:6px;background:rgba(244,63,94,.10);color:var(--danger);font-size:0.82rem;"></div>
         </div>
+      </div>
+
+      <div class="panel">
+        <h2>Quick Product Search</h2>
+        <div class="panel-sub">Look up individual product prices on demand via RapidAPI.</div>
+        <div class="row" style="gap:8px;flex-wrap:wrap;">
+          <input type="text" id="rapidSearchInput"
+                 placeholder="Search product… e.g. cilantro, chicken breast"
+                 style="flex:1; min-width:160px; background:var(--bg-sunken); border:1px solid var(--border);
+                        color:var(--text); border-radius:var(--radius-md); padding:10px 12px;
+                        font-size:0.92rem; font-family:inherit;
+                        transition:border-color 160ms ease, box-shadow 160ms ease;" />
+          <select id="rapidStoreFilter" style="background:var(--bg-sunken);border:1px solid var(--border);color:var(--text);border-radius:var(--radius-md);padding:10px 12px;font-size:0.85rem;">
+            <option value="">Any store</option>
+            <option value="Walmart">Walmart</option>
+            <option value="Kroger">Kroger</option>
+            <option value="Gerbes">Gerbes</option>
+            <option value="Target">Target</option>
+          </select>
+          <button id="rapidSearchBtn" class="btn is-primary" type="button">Search</button>
+        </div>
+        <div id="rapidSearchResult" style="margin-top:10px;"></div>
+      </div>
+
+      <div class="panel">
+        <h2>Cart Items</h2>
+        <div class="panel-sub">Ingredients with store product matches.</div>
+        <div id="storeCartContainer" class="list">
+          <div class="empty">No cart items yet — select recipes and click "Auto-Fill Pay Period Cart".</div>
+        </div>
+        <div id="groceryMeta" style="margin-top:10px;font-size:0.82rem;color:var(--text-mute);"></div>
+        <div id="groceryTotal" style="margin-top:6px;font-size:1.1rem;font-weight:700;"></div>
       </div>
     </section>
 
-    <!-- SETTINGS ----------------------------------------------------- -->
-    <section id="settings" class="page" aria-labelledby="settings-title">
+    <!-- SETTINGS ---------------------------------------------------------- -->
+    <section id="settings" class="page tab-content" aria-labelledby="settings-title">
       <header class="page-head">
         <div>
           <h1 id="settings-title">Settings</h1>
-          <div class="subtitle">Configure location &amp; tax, balance, budget ratios, and Plaid integration.</div>
+          <div class="subtitle">Manage your account, location, and preferences.</div>
         </div>
       </header>
 
       <div class="settings-grid">
         <div class="panel">
           <h2>Location &amp; Tax</h2>
-          <div class="panel-sub">Auto-resolves tax for ZIP 65084 / 65026.</div>
-          <form id="locForm">
-            <div class="field">
-              <label for="sCity">City, State</label>
-              <input type="text" id="sCity" placeholder="Versailles, MO" />
-            </div>
-            <div class="field">
-              <label for="sZip">ZIP Code</label>
-              <input type="text" id="sZip" placeholder="65084" />
-            </div>
-            <div class="row row-end">
-              <button class="btn is-primary" type="submit">Update Location</button>
-            </div>
-          </form>
+          <div class="panel-sub">Set your shopping region and local rates.</div>
+          <div class="field">
+            <label for="settingsZip">Zip Code</label>
+            <input type="text" id="settingsZip" placeholder="65084" />
+          </div>
+          <div class="field">
+            <label for="settingsSalesTax">Sales Tax Rate (%)</label>
+            <input type="number" id="settingsSalesTax" min="0" max="15" step="0.01" value="8.25" />
+          </div>
+          <div class="field">
+            <label for="settingsGroceryTax">Grocery Tax Rate (%)</label>
+            <input type="number" id="settingsGroceryTax" min="0" max="15" step="0.01" value="1.25" />
+          </div>
+          <div id="settingsStoreDisplay" style="font-size:0.85rem;color:var(--text-mute);margin-bottom:8px;padding:8px 10px;background:var(--bg-sunken);border-radius:6px;">
+            Store: <span id="settingsStoreName">Not yet detected</span>
+          </div>
+          <div class="row row-end">
+            <button class="btn is-primary" id="updateLocationBtn" type="button">Save Location</button>
+          </div>
         </div>
 
         <div class="panel">
-          <h2>Checking Balance</h2>
-          <div class="panel-sub">Drives the can-i-buy sanity check.</div>
-          <form id="balanceForm">
-            <div class="field">
-              <label for="sBal">Balance ($)</label>
-              <input type="number" id="sBal" min="0" step="50" />
-            </div>
-            <div class="row row-end">
-              <button class="btn is-primary" type="submit">Save Balance</button>
-            </div>
-          </form>
+          <h2>Budget Ratios</h2>
+          <div class="panel-sub">Allocate your income across categories.</div>
+          <div class="field">
+            <label for="settingsFoodPct">Food Allocation (%)</label>
+            <input type="number" id="settingsFoodPct" min="0" max="100" step="1" value="40" />
+          </div>
+          <div class="field">
+            <label for="settingsPayPeriod">Pay Period (days)</label>
+            <input type="number" id="settingsPayPeriod" min="1" max="31" step="1" value="14" />
+          </div>
+          <div class="field">
+            <label for="settingsMealsPerDay">Meals Per Day</label>
+            <input type="number" id="settingsMealsPerDay" min="1" max="10" step="1" value="3" />
+          </div>
+          <div class="row row-end">
+            <button class="btn is-primary" id="updateRatiosBtn" type="button">Save Ratios</button>
+          </div>
         </div>
 
         <div class="panel">
-          <h2>Budget Allocation</h2>
-          <div class="panel-sub">Percentages should total 100.</div>
-          <form id="ratiosForm">
-            <div class="field">
-              <label for="sCheck">Paycheck ($)</label>
-              <input type="number" id="sCheck" min="0" step="100" />
-            </div>
-            <div class="field">
-              <label for="sSav">Savings %</label>
-              <input type="number" id="sSav" min="0" max="100" step="1" />
-            </div>
-            <div class="field">
-              <label for="sEss">Essentials %</label>
-              <input type="number" id="sEss" min="0" max="100" step="1" />
-            </div>
-            <div class="field">
-              <label for="sDis">Discretionary %</label>
-              <input type="number" id="sDis" min="0" max="100" step="1" />
-            </div>
-            <div class="row row-end">
-              <button class="btn is-primary" type="submit">Save Ratios</button>
-            </div>
-          </form>
-        </div>
-      </div>
-
-      <div class="panel">
-        <h2>Plaid Integration</h2>
-        <div class="panel-sub">Bank-link status and live balance sync.</div>
-        <div class="row" style="justify-content:space-between;">
-          <div class="plaid-status" id="plaidStatus">
-            <span class="dot"></span>
-            <span id="plaidStatusText">Status: not yet linked</span>
+          <h2>Account</h2>
+          <div class="panel-sub">Adjust your liquid checking balance.</div>
+          <div class="field">
+            <label for="settingsBalance">Checking Balance ($)</label>
+            <input type="number" id="settingsBalance" min="0" step="0.01" value="1250.00" />
           </div>
-          <div class="row">
-            <button id="syncBalancesBtn" class="btn is-ghost" type="button">Sync Balances</button>
-            <button id="linkBankBtnSettings" class="plaid-btn" type="button">
-              <span>⌬</span> Link Bank Account
-            </button>
+          <div class="row row-end">
+            <button class="btn is-primary" id="updateBalanceBtn" type="button">Update Balance</button>
           </div>
+          <div class="field" style="margin-top:16px;">
+            <label for="sweepAmount">Vault Sweep ($)</label>
+            <input type="number" id="sweepAmount" min="0.01" step="0.01" value="10.00" />
+          </div>
+          <div class="row row-end">
+            <button class="btn is-ghost" id="sweepVaultBtn" type="button">→ Sweep to Vault</button>
+          </div>
+          <div id="vaultBalanceDisplay" style="margin-top:8px;font-size:0.85rem;color:var(--text-mute);">Vault: $150.00</div>
         </div>
       </div>
     </section>
 
   </main>
 
-  <!-- Toast -->
-  <div id="flash" class="flash" role="status" aria-live="polite"></div>
+  <!-- PREPARE-MODE DIALOG (hidden until user clicks Start cooking) ---------- -->
+  <dialog class="prepare-dialog" id="prepareDialog">
+    <div class="prepare-card">
+      <div class="prepare-progress"><span id="prepareProgressBar" style="width:0%;"></span></div>
+      <div class="prepare-header">
+        <span class="prepare-step-label" id="prepareStepLabel">Step 1 of 1</span>
+        <h3 class="prepare-step-title" id="prepareStepTitle">Ready to cook</h3>
+      </div>
+      <div class="prepare-body">
+        <div class="prepare-instruction" id="prepareInstruction">Loading…</div>
+      </div>
+      <div class="prepare-ingredients" id="prepareIngredients"></div>
+      <div class="prepare-foot">
+        <button class="btn is-ghost" id="preparePrevBtn" type="button" disabled>← Back</button>
+        <button class="btn is-primary" id="prepareNextBtn" type="button">Next →</button>
+      </div>
+    </div>
+  </dialog>
 
-  <!-- ==============================================================
-       JS — vanilla fetch(). Targets the consolidated /api/* endpoints
-       plus the existing Plaid endpoints. No frameworks, no polling.
-  =============================================================== -->
+  <!-- FLASH TOAST CONTAINER -->
+  <div class="flash" id="flash"></div>
+
+    <!-- INLINE BODY SCRIPT — glue layer for external JS modules + tab UI + Overview + Prepare mode -->
   <script>
     'use strict';
 
-    // ----- helpers -----
-    const fmt = (n) => '$' + (Number(n) || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-    const el  = (id) => document.getElementById(id);
-    const flash = (msg, kind) => {
-      const f = el('flash');
-      f.textContent = msg;
-      f.className = 'flash is-show ' + (kind === 'error' ? 'is-error' : 'is-success');
-      clearTimeout(flash._t);
-      flash._t = setTimeout(() => f.classList.remove('is-show'), 2400);
-    };
+    /* ================================================================
+       HELPER GLOBALS — referenced by recipes.js, grocery.js, transactions.js
+    ================================================================ */
+
     function escapeHtml(s) {
       return String(s == null ? '' : s)
         .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
         .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
     }
 
-    async function api(method, path, body) {
-      const opts = { method, headers: {} };
-      if (body !== undefined) {
-        opts.headers['Content-Type'] = 'application/json';
-        opts.body = JSON.stringify(body);
-      }
-      const r = await fetch(path, opts);
-      let data = {};
-      try { data = await r.json(); } catch (_) { /* tolerate empty bodies */ }
-      if (!r.ok && !data.error && !data.message) data.message = 'Request failed (' + r.status + ')';
-      return { ok: r.ok, status: r.status, data };
+    function fmt(n) {
+      return '$' + (Number(n) || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
     }
 
-    // ----- theme toggle -----
-    // THEME_KEY persists the user's explicit choice so the
-    // `prefers-color-scheme` media queries in CSS apply ONLY on first
-    // load (when there is no user choice yet, no data-theme-source
-    // attribute). Once the user toggles, their choice is the source
-    // of truth — data-theme-source="user" causes the :not() guard in
-    // the @media blocks to exclude them and the explicit
-    // [data-theme=...] rule takes over. Mirrored inline in <head> so
-    // returning users don't see a dark-flash on first paint.
-    const THEME_KEY = 'rung:theme-pref';
-    (function initTheme() {
-      const t = el('themeToggle');
-      const label = el('themeLabel');
-      const root = document.documentElement;
-      const sync = () => {
-        const cur = root.getAttribute('data-theme') || 'dark';
-        label.textContent = cur === 'dark' ? '☼ Switch to light' : '☾ Switch to dark';
-      };
-      // Hydrate from localStorage on boot so the persisted choice is
-      // applied even if the inline <head> restore script is blocked
-      // (CSP / very strict trackers). Tolerates private-mode failures.
+    async function api(method, path, body) {
       try {
-        const saved = localStorage.getItem(THEME_KEY);
-        if (saved === 'dark' || saved === 'light') {
-          root.setAttribute('data-theme', saved);
-          root.setAttribute('data-theme-source', 'user');
+        const opts = { method: method.toUpperCase() };
+        if (body !== undefined) {
+          opts.headers = { 'Content-Type': 'application/json' };
+          opts.body = JSON.stringify(body);
         }
-      } catch (_) { /* fall back to OS preference */ }
-      sync();
-      t.addEventListener('click', () => {
-        const cur = root.getAttribute('data-theme') || 'dark';
-        const next = cur === 'dark' ? 'light' : 'dark';
-        root.setAttribute('data-theme', next);
-        // Mark as USER-sourced so the CSS :not([data-theme-source="user"])
-        // guard for @media (prefers-color-scheme) stops applying from
-        // here on — explicit choice beats OS preference post-toggle.
-        root.setAttribute('data-theme-source', 'user');
-        try { localStorage.setItem(THEME_KEY, next); } catch (_) { /* skip persistence */ }
-        sync();
-      });
-      // Cross-tab sync: another tab toggling the theme writes to
-      // localStorage, which fires `storage` here (per W3C spec,
-      // never in the originating tab — so we don't need an
-      // "is this my own write" guard). Mirror the change so every
-      // open Rung tab stays in sync without per-tab toggling.
-      // Tolerates cleared keys (newValue === null): drop the
-      // source marker so this tab falls back to the markup default
-      // + OS preference. Ignores malformed values silently so a
-      // future contributor changing the storage shape won't
-      // crash older tabs. Tolerates IE quirks (storage event on
-      // window only fires in modern browsers — silent no-op
-      // elsewhere).
-      window.addEventListener('storage', (ev) => {
-        if (ev.key !== THEME_KEY) return;
-        const v = ev.newValue;
-        if (v === 'dark' || v === 'light') {
-          root.setAttribute('data-theme', v);
-          root.setAttribute('data-theme-source', 'user');
-          sync();
-        } else if (v === null) {
-          // Source tab cleared the key — drop the marker so OS
-          // preference takes over on the next paint.
-          root.removeAttribute('data-theme-source');
-          root.setAttribute('data-theme', 'dark');
-          sync();
-        }
-        // else: unknown / malformed value — no-op.
-      });
-    })();
+        const r = await fetch(path, opts);
+        const data = await r.json().catch(function () { return {}; });
+        return { ok: r.ok, status: r.status, data: data };
+      } catch (err) {
+        return { ok: false, status: 0, data: { error: err.message || 'Network error' } };
+      }
+    }
 
-    // ----- tab / section routing -----
-    (function initNav() {
-      const navLinks = document.querySelectorAll('#primaryNav .nav-link');
-      const sections = document.querySelectorAll('.page');
-      const activate = (target) => {
-        navLinks.forEach(n => n.classList.toggle('is-active', n.dataset.target === target));
-        sections.forEach(s => s.classList.toggle('is-active', s.id === target));
-        history.replaceState(null, '', '#' + target);
-      };
-      navLinks.forEach(n => n.addEventListener('click', (e) => {
+    function flash(msg, kind) {
+      var el = document.getElementById('flash');
+      if (!el) return;
+      el.textContent = msg;
+      el.className = 'flash is-show' + (kind === 'error' ? ' is-error' : kind === 'success' ? ' is-success' : '');
+      clearTimeout(el._flashTimer);
+      el._flashTimer = setTimeout(function () { el.classList.remove('is-show'); }, 3500);
+    }
+
+    function splitInstructionsToSteps(text) {
+      if (!text || !text.trim()) return [];
+      var norm = String(text).replace(/\r\n?/g, '\n');
+      var marker = /^\s*(?:[-*\u2022]|\d+[.)])\s+/;
+      var stripMarker = function (s) { return String(s || '').replace(marker, ''); };
+      var steps = [];
+      var cur = '';
+      var inMarker = false;
+      norm.split('\n').forEach(function (line) {
+        if (marker.test(line)) {
+          if (cur.trim()) steps.push(cur.trim());
+          cur = stripMarker(line);
+          inMarker = true;
+        } else if (!line.trim()) {
+          if (cur.trim()) { steps.push(cur.trim()); cur = ''; inMarker = false; }
+        } else {
+          cur = cur ? cur + '\n' + line : line;
+        }
+      });
+      if (cur.trim()) steps.push(cur.trim());
+      if (steps.length) return steps;
+      var paras = norm.split(/\n{2,}/).map(stripMarker).filter(Boolean);
+      if (paras.length === 1) {
+        var cleaned = stripMarker(paras[0]);
+        var sents = cleaned.split(/(?<=[.!?])\s+(?=[A-Z])/).filter(Boolean);
+        if (sents.length >= 2) return sents;
+        return [cleaned];
+      }
+      if (paras.length > 1) return paras;
+      if (norm.trim()) return [norm.trim()];
+      return [];
+    }
+
+    /* ================================================================
+       TAB NAVIGATION
+    ================================================================ */
+    function initTabs() {
+      var btns = document.querySelectorAll('.tab-btn');
+      var pages = document.querySelectorAll('.tab-content');
+      btns.forEach(function (btn) {
+        btn.addEventListener('click', function (e) {
+          e.preventDefault();
+          var target = btn.getAttribute('data-tab');
+          if (!target) return;
+          btns.forEach(function (b) { b.classList.remove('is-active'); });
+          pages.forEach(function (p) {
+            p.style.display = 'none';
+            p.classList.remove('is-active');
+          });
+          btn.classList.add('is-active');
+          var sec = document.getElementById(target);
+          if (sec) { sec.style.display = 'block'; sec.classList.add('is-active'); }
+          // Refresh the Active Recipes expander whenever the Grocery tab opens.
+          if (target === 'grocery' && typeof refreshActiveRecipesExpander === 'function') {
+            refreshActiveRecipesExpander();
+          }
+        });
+      });
+    }
+
+    /* ================================================================
+       THEME TOGGLE
+    ================================================================ */
+    function initTheme() {
+      var toggle = document.getElementById('themeToggle');
+      var label = document.getElementById('themeLabel');
+      if (!toggle) return;
+      var cur = document.documentElement.getAttribute('data-theme') || 'dark';
+      function apply(theme) {
+        cur = theme;
+        document.documentElement.setAttribute('data-theme', theme);
+        document.documentElement.setAttribute('data-theme-source', 'user');
+        try { localStorage.setItem('rung:theme-pref', theme); } catch (_) {}
+        if (label) label.textContent = theme === 'dark' ? '\u263c Switch to light' : '\u263e Switch to dark';
+      }
+      toggle.addEventListener('click', function () { apply(cur === 'dark' ? 'light' : 'dark'); });
+    }
+
+    /* ================================================================
+       OVERVIEW — refresh from /api/budget/summary
+    ================================================================ */
+    async function refreshOverview() {
+      var resp = await api('GET', '/api/budget/summary');
+      if (!resp.ok) return;
+      var d = resp.data || {};
+      var $ = function (id) { return document.getElementById(id); };
+      if ($('kpiBalance')) $('kpiBalance').textContent = fmt(d.checking_balance);
+      if ($('kpiUnpaid')) $('kpiUnpaid').textContent = fmt(d.upcoming_bills_total);
+      if ($('kpiDisposable')) $('kpiDisposable').textContent = fmt(d.safe_disposable_cash);
+      if ($('kpiBillCount')) $('kpiBillCount').textContent = String((d.upcoming_bills_total || 0) > 0 ? (d.upcoming_bills_total / 60 | 0) : 0);
+      if ($('sumBalance')) $('sumBalance').textContent = fmt(d.checking_balance);
+      if ($('sumUnpaid')) $('sumUnpaid').textContent = fmt(d.upcoming_bills_total);
+      if ($('sumDisposable')) $('sumDisposable').textContent = fmt(d.safe_disposable_cash);
+      if ($('sumRegion')) $('sumRegion').textContent = d.location ? (d.location.city_state || '\u2014') : '\u2014';
+      if ($('sumTax')) $('sumTax').textContent = d.location ? ((d.location.sales_tax_pct || 0) + '%') : '\u2014';
+      if ($('sumPaycheck')) $('sumPaycheck').textContent = d.expected_paycheck ? fmt(d.expected_paycheck) : '\u2014';
+      var total = d.checking_balance || 1;
+      var upct = Math.min(100, ((d.upcoming_bills_total || 0) / total) * 100);
+      if ($('allocUnpaidAmt')) $('allocUnpaidAmt').textContent = fmt(d.upcoming_bills_total);
+      if ($('allocUnpaidBar')) $('allocUnpaidBar').style.width = upct + '%';
+      if ($('allocSafeAmt')) $('allocSafeAmt').textContent = fmt(d.safe_disposable_cash);
+      if ($('allocSafeBar')) $('allocSafeBar').style.width = Math.max(0, 100 - upct) + '%';
+      if ($('ciBudget')) $('ciBudget').textContent = fmt(d.safe_disposable_cash);
+      if ($('vaultBalanceDisplay') && d.vault_balance != null) {
+        $('vaultBalanceDisplay').textContent = 'Vault: ' + fmt(d.vault_balance);
+      }
+    }
+
+    /* ================================================================
+       RECIPE SELECTION COUNTER
+    ================================================================ */
+    function updateRecipeSelection() {
+      var checked = document.querySelectorAll('input[type="checkbox"][data-recipe]:checked');
+      var count = document.getElementById('recipeSelectedCount');
+      if (count) count.textContent = checked.length + ' selected';
+    }
+
+    /* ================================================================
+       PREPARE MODE — cooking walkthrough dialog
+    ================================================================ */
+    var prepareState = null;
+
+    function openPrepareMode(recipe) {
+      var dialog = document.getElementById('prepareDialog');
+      if (!dialog || !recipe) return;
+      var steps = splitInstructionsToSteps(recipe.instructions || '');
+      if (!steps.length) { flash('Could not parse instructions into steps.', 'error'); return; }
+      var ingredients = (recipe.ingredients || []).map(function (i) {
+        return (i.quantity || 1) + ' ' + (i.unit || '') + ' ' + (i.product_name || '');
+      });
+      prepareState = { recipeId: recipe.id, title: recipe.title || 'Recipe', steps: steps, ingredients: ingredients, index: 0 };
+      if (typeof _savePrepareProgress === 'function') {
+        _savePrepareProgress(recipe.id, 0, steps.length);
+      }
+      renderPrepareStep();
+      dialog.showModal();
+    }
+
+    function renderPrepareStep() {
+      if (!prepareState) return;
+      var s = prepareState, idx = s.index, total = s.steps.length;
+      var $ = function (id) { return document.getElementById(id); };
+      if ($('prepareStepLabel')) $('prepareStepLabel').textContent = 'Step ' + (idx + 1) + ' of ' + total;
+      if ($('prepareStepTitle')) $('prepareStepTitle').textContent = s.title;
+      if ($('prepareInstruction')) $('prepareInstruction').textContent = s.steps[idx];
+      if ($('prepareProgressBar')) $('prepareProgressBar').style.width = ((idx + 1) / total * 100) + '%';
+      if ($('preparePrevBtn')) $('preparePrevBtn').disabled = idx === 0;
+      if ($('prepareNextBtn')) $('prepareNextBtn').textContent = idx >= total - 1 ? 'Finish \u2713' : 'Next \u2192';
+      var ingC = $('prepareIngredients');
+      if (ingC) {
+        ingC.innerHTML = '';
+        s.ingredients.forEach(function (ing) {
+          var chip = document.createElement('span');
+          chip.className = 'prepare-ingredient-chip';
+          chip.textContent = ing;
+          ingC.appendChild(chip);
+        });
+      }
+    }
+
+    /* ================================================================
+       CAN I BUY FORM
+    ================================================================ */
+    function initCanIBuy() {
+      var form = document.getElementById('canIBuyForm');
+      if (!form) return;
+      form.addEventListener('submit', async function (e) {
         e.preventDefault();
-        activate(n.dataset.target);
-      }));
-      const initial = (location.hash || '#overview').replace('#', '');
-      if (document.getElementById(initial)) activate(initial);
-    })();
+        var item = document.getElementById('ciItem');
+        var price = document.getElementById('ciPrice');
+        var result = document.getElementById('canIBuyResult');
+        if (!item || !price || !result) return;
+        var resp = await api('POST', '/api/decision/can-i-buy', {
+          item_name: item.value.trim() || 'Item',
+          cost: parseFloat(price.value) || 0
+        });
+        result.style.display = 'block';
+        if (!resp.ok) {
+          result.className = 'verdict is-denied';
+          result.innerHTML = '<span class="v-ico">\u2717</span> API error: ' + (resp.data.error || 'Unknown');
+          return;
+        }
+        var d = resp.data;
+        result.className = 'verdict ' + (d.approved ? 'is-approved' : 'is-denied');
+        result.innerHTML = '<span class="v-ico">' + (d.approved ? '\u2713' : '\u2717') + '</span> ' + escapeHtml(d.message || '') +
+          '<br/><small style="color:var(--text-mute);margin-top:4px;display:block;">Remaining buffer: ' + fmt(d.remaining_buffer_after_purchase) + '</small>';
+      });
+    }
 
-    // ----- Plaid Link flow (preserved) -----
-    async function startPlaidLink() {
-      const { ok, data } = await api('POST', '/api/create_link_token');
-      if (!ok || !data.link_token) {
-        flash(data.error || data.message || 'Failed to create link token', 'error');
+    /* ================================================================
+       RECIPES SEARCH — /api/recipes/search?q=<keyword>
+    ================================================================ */
+    async function refreshRecipes() {
+      var list = document.getElementById('recipeListContainer');
+      if (!list) return;
+      list.innerHTML = '<div class="empty">Loading recipes\u2026</div>';
+      var resp = await api('GET', '/api/recipes');
+      if (!resp.ok) {
+        list.innerHTML = '<div class="empty">Could not load recipes.</div>'; return;
+      }
+      renderRecipeList(Array.isArray(resp.data) ? resp.data : [], list);
+    }
+
+    async function searchRecipesByKeyword(query) {
+      var list = document.getElementById('recipeResultsList');
+      if (!list) return;
+      var q = (query || '').trim();
+      if (!q) {
+        list.innerHTML = '<div class="empty">Enter a search term to find recipes.</div>';
         return;
       }
-      const handler = Plaid.create({
-        token: data.link_token,
-        onSuccess: async (public_token) => {
-          const ex = await api('POST', '/api/set_access_token', { public_token });
-          if (!ex.ok) { flash(ex.data.error || 'Token exchange failed', 'error'); return; }
-          flash('Bank linked successfully', 'success');
-          await syncBalances();
-          await refreshOverview();
-          updatePlaidStatus(true);
-        },
-        onExit: (err) => { if (err) console.warn('Plaid exit', err); },
-        onEvent: () => { /* console.log(eventName); */ }
-      });
-      handler.open();
-    }
-    [el('linkBankBtn'), el('linkBankBtnSettings')].forEach(btn => {
-      if (btn) btn.addEventListener('click', startPlaidLink);
-    });
-
-    async function syncBalances() {
-      const r = await api('GET', '/api/sync_balances');
-      if (!r.ok && r.status !== 404) {
-        flash(r.data.error || r.data.message || 'Sync failed', 'error');
-      } else if (r.ok) {
-        flash('Balances synced', 'success');
+      list.innerHTML = '<div class="empty">Searching for &quot;' + escapeHtml(q) + '&quot;&hellip;</div>';
+      var resp = await api('GET', '/api/recipes/search?q=' + encodeURIComponent(q));
+      if (!resp.ok) {
+        var errMsg = (resp.data && resp.data.error) ? resp.data.error : 'Search failed.';
+        list.innerHTML = '<div class="empty" style="color:var(--danger);border-color:rgba(244,63,94,.3);">' + escapeHtml(errMsg) + '</div>';
+        return;
       }
-      return r;
-    }
-    el('syncBalancesBtn').addEventListener('click', async () => {
-      await syncBalances();
-      await refreshOverview();
-    });
-
-    function updatePlaidStatus(linked) {
-      const box = el('plaidStatus');
-      const txt = el('plaidStatusText');
-      if (!box || !txt) return;
-      if (linked) {
-        box.classList.add('is-linked');
-        txt.textContent = 'Status: linked — live balances will sync.';
-      } else {
-        box.classList.remove('is-linked');
-        txt.textContent = 'Status: not yet linked';
+      var recipes = Array.isArray(resp.data) ? resp.data : (resp.data.results || []);
+      if (!recipes.length) {
+        list.innerHTML = '<div class="empty">No recipes found for &quot;' + escapeHtml(q) + '&quot;. Try a different search term.</div>';
+        return;
       }
-    }
-
-    // ----- overview data -----
-    async function refreshOverview() {
-      // Pull two sources in parallel: /api/settings has location/balance/ratios,
-      // /summary has the bill aggregates the can-i-buy budget depends on.
-      const [sRes, sumRes] = await Promise.all([
-        api('GET', '/api/settings'),
-        api('GET', '/summary'),
-      ]);
-      if (!sRes.ok) return;
-      const s = sRes.data || {};
-      const loc = s.location || {};
-      const bal = (s.balance && s.balance.checking_balance) || 0;
-      const sum = sumRes.data || {};
-      const unpaid = sum.total_unpaid_bills || 0;
-      const disposable = sum.disposable_cash != null ? sum.disposable_cash : (bal - unpaid);
-      const taxPct = loc.sales_tax_pct != null ? loc.sales_tax_pct : 0;
-
-      el('kpiBalance').textContent     = fmt(bal);
-      el('kpiUnpaid').textContent      = fmt(unpaid);
-      el('kpiDisposable').textContent  = fmt(disposable);
-      el('kpiBillCount').textContent   = sum.recurring_bills_count || 0;
-
-      el('sumBalance').textContent     = fmt(bal);
-      el('sumUnpaid').textContent      = fmt(unpaid);
-      el('sumDisposable').textContent  = fmt(disposable);
-      el('sumRegion').textContent      = loc.city_state || '—';
-      el('sumTax').textContent         = taxPct ? taxPct + '%' : '—';
-      el('sumPaycheck').textContent    = (s.balance && s.balance.expected_paycheck)
-        ? fmt(s.balance.expected_paycheck) : '—';
-
-      el('locationLine').textContent   = (loc.city_state)
-        ? 'Location: ' + loc.city_state + ' · Tax: ' + (taxPct || 0) + '%'
-        : 'Location not yet configured';
-
-      // Budget line in can-i-buy card
-      el('ciBudget').textContent = fmt(Math.max(0, disposable));
-
-      // Allocation bars
-      el('allocUnpaidAmt').textContent = fmt(unpaid);
-      el('allocSafeAmt').textContent   = fmt(Math.max(0, disposable));
-      const total = Math.max(1, unpaid + Math.max(0, disposable));
-      el('allocUnpaidBar').style.width = ((unpaid / total) * 100).toFixed(1) + '%';
-      el('allocSafeBar').style.width   = ((Math.max(0, disposable) / total) * 100).toFixed(1) + '%';
-    }
-
-    // ----- transactions (logged expenses + recurring bills) -----
-        
-        
-    // ----- can-i-buy (POSTs to /api/can-i-buy, reads existing budget) -----
-    el('canIBuyForm').addEventListener('submit', async (e) => {
-      e.preventDefault();
-      const result = el('canIBuyResult');
-      result.style.display = 'none';
-      result.className = 'verdict';
-      const price = parseFloat(el('ciPrice').value);
-      if (!price || price <= 0) { flash('Enter a valid price', 'error'); return; }
-      const { ok, data } = await api('POST', '/api/can-i-buy', {
-        item: el('ciItem').value.trim() || '(unnamed item)',
-        price: price,
-      });
-      if (!ok) { flash(data.error || 'Analysis failed', 'error'); return; }
-      const verdict = data.verdict; // APPROVED | WARNING_OVER_BUDGET | DENIED
-      const cls = (verdict === 'APPROVED') ? 'is-approved'
-                : (verdict === 'WARNING_OVER_BUDGET') ? 'is-warning'
-                : 'is-denied';
-      const label = (verdict === 'APPROVED') ? 'GO'
-                  : (verdict === 'WARNING_OVER_BUDGET') ? 'WARN'
-                  : 'NO';
-      result.className = 'verdict ' + cls;
-      result.style.display = 'flex';
-      const note = data.advisor_note || data.recommendation || JSON.stringify(data);
-      result.innerHTML = `<div class="v-ico">${label}</div><div><strong>${verdict.replace('_', ' ')}</strong> — ${escapeHtml(note)}</div>`;
-    });
-
-    // ----- settings -----
-    function hydrateSettingsForm(s) {
-      const loc = (s && s.location) || {};
-      const bal = (s && s.balance) || {};
-      const rat = (s && s.ratios) || {};
-      if (el('sCity'))  el('sCity').value  = loc.city_state || '';
-      if (el('sZip'))   el('sZip').value   = loc.zip_code || '';
-      if (el('sBal'))   el('sBal').value   = bal.checking_balance != null ? bal.checking_balance : '';
-      if (el('sCheck')) el('sCheck').value = bal.expected_paycheck != null ? bal.expected_paycheck : '';
-      if (el('sSav'))   el('sSav').value   = rat.savings_ratio != null ? rat.savings_ratio : '';
-      if (el('sEss'))   el('sEss').value   = rat.essentials_ratio != null ? rat.essentials_ratio : '';
-      if (el('sDis'))   el('sDis').value   = rat.discretionary_ratio != null ? rat.discretionary_ratio : '';
-    }
-    el('locForm').addEventListener('submit', async (e) => {
-      e.preventDefault();
-      const body = {
-        city_state: el('sCity').value.trim(),
-        zip_code:   el('sZip').value.trim(),
-      };
-      const { ok, data } = await api('POST', '/api/settings', body);
-      if (!ok) { flash(data.error || 'Update failed', 'error'); return; }
-      hydrateSettingsForm(data);
-      flash('Location updated', 'success');
-      refreshOverview();
-    });
-    el('balanceForm').addEventListener('submit', async (e) => {
-      e.preventDefault();
-      const { ok, data } = await api('POST', '/api/settings', { checking_balance: parseFloat(el('sBal').value) });
-      if (!ok) { flash(data.error || 'Update failed', 'error'); return; }
-      hydrateSettingsForm(data);
-      flash('Balance saved', 'success');
-      refreshOverview();
-    });
-    el('ratiosForm').addEventListener('submit', async (e) => {
-      e.preventDefault();
-      const body = {
-        expected_paycheck:   parseFloat(el('sCheck').value),
-        savings_ratio:       parseFloat(el('sSav').value),
-        essentials_ratio:    parseFloat(el('sEss').value),
-        discretionary_ratio: parseFloat(el('sDis').value),
-      };
-      const { ok, data } = await api('POST', '/api/settings', body);
-      if (!ok) { flash(data.error || 'Update failed', 'error'); return; }
-      hydrateSettingsForm(data);
-      flash('Ratios saved', 'success');
-    });
-
-    // ----- recipes -----
-    function updateRecipeSelection() {
-      const ids = Array.from(document.querySelectorAll('input[data-recipe]:checked')).map(c => parseInt(c.dataset.recipe, 10));
-      const counter = el('recipeSelectedCount');
-      if (counter) counter.textContent = String(ids.length);
-      // Persist to window state for the grocery button to read later.
-      window.__rungSelectedRecipes = ids;
-    }
-
-    // ----- grocery -----
-    // ----- IMPORT RECIPE FROM URL -----
-
-// ----- PREPARE-MODE ----- ---------------------------------------------------
-// Splits a recipe's raw `instructions` text into discrete cooking steps.
-// Strategy (in order): numbered/bulleted lines → paragraph breaks → sentences.
-// The server returns one opaque string; all parsing happens client-side.
-
-let prepareState = null;
-
-// One-time attach: native <dialog>.close() fires for BOTH Esc-key
-// dismissal AND our explicit prepareClose(), so we listen for the
-// 'close' event to null out prepareState in either path. Without this,
-// pressing ArrowLeft/ArrowRight after the user closes the modal would
-// invisibly advance the persisted step (the keydown listener at module
-// level only gates on prepareState, not on dialog.open).
-(function attachPrepareDialogCloseListener() {
-  const dlg = el('prepareDialog');
-  if (dlg) {
-    dlg.addEventListener('close', () => {
-      prepareState = null;
-    });
-  }
-})();
-
-// Prepare-mode persistence — a single localStorage entry holding a map
-// keyed by recipe id. Schema (per recipe):
-//   { step: <int 0..totalSteps-1>, totalSteps: <int>, savedAt: <ISO> }
-// Stale handling: on reopen, if saved.step is missing/non-int OR falls
-// outside the freshly-parsed step count, we start at 0 and overwrite
-// the stale entry. Finish clears the entry; X/Esc retain it so the
-// user can come back later.
-/**
- * Prepare-mode progress persistence (localStorage-backed).
- *
- * ON-DISK SHAPE CONTRACT (v1):
- *   {
- *     v: 1,
- *     entries: {
- *       "<recipeId>": { step: <int>, totalSteps: <int>, savedAt: <ISO> },
- *       ...
- *     }
- *   }
- *
- * MIGRATION LADDER:
- *   v0 (legacy, pre-versioning):
- *     { "<recipeId>": {...} } — a bare inner map, no top-level `v`.
- *     `_loadPrepareMap` migrates a v0 payload to v1 in memory; the
- *     next `_savePrepareMap` call writes it back as v1 (write-
- *     through migration — minimal disruption, single source of
- *     truth for the contract).
- *   v1 (current): the wrapped shape above. Reads pass through;
-        inMarker = true;
-      } else if (!line.trim()) {
-        if (cur.trim()) {
-          steps.push(cur.trim());
-          cur = '';
-          inMarker = false;
+      list.innerHTML = '';
+      recipes.forEach(function (r) {
+        var card = document.createElement('div');
+        card.style.cssText = 'padding:14px 16px; border:1px solid var(--border); border-radius:10px; background:var(--bg-sunken); margin-bottom:10px;';
+        var sourceBadge = r.source === 'themealdb'
+          ? '<span style="font-size:0.7rem;padding:2px 8px;border-radius:99px;background:var(--accent-soft);color:var(--accent);border:1px solid rgba(45,191,110,.3);font-weight:600;">TheMealDB</span>'
+          : '<span style="font-size:0.7rem;padding:2px 8px;border-radius:99px;background:var(--bg-sunken);color:var(--text-mute);border:1px solid var(--border);font-weight:600;">Local</span>';
+        var imgHtml = r.image_url
+          ? '<img src="' + escapeHtml(r.image_url) + '" alt="" loading="lazy" style="width:60px;height:60px;border-radius:8px;object-fit:cover;border:1px solid var(--border);flex-shrink:0;"/>'
+          : '';
+        var categoryHtml = r.category
+          ? '<div style="color:var(--text-mute);font-size:0.78rem;margin-top:4px;">' + escapeHtml(r.category) + (r.area ? ' \u00b7 ' + escapeHtml(r.area) : '') + '</div>'
+          : '';
+        var descHtml = r.description
+          ? '<div style="color:var(--text-dim);font-size:0.82rem;margin-top:6px;">' + escapeHtml(r.description.substring(0, 200)) + '</div>'
+          : '';
+        var isLocalRecipe = r.source === 'local' && r.id && !String(r.id).startsWith('themealdb_');
+        card.innerHTML = '<div class="row" style="gap:12px;align-items:flex-start;">'
+          + imgHtml
+          + '<div style="flex:1;min-width:0;">'
+          + '<div class="row" style="justify-content:space-between;gap:8px;flex-wrap:wrap;">'
+          + '<strong style="font-size:0.95rem;">' + escapeHtml(r.title) + '</strong>'
+          + sourceBadge
+          + '</div>'
+          + categoryHtml
+          + descHtml
+          + '<div class="row" style="gap:8px;margin-top:8px;flex-wrap:wrap;">'
+          + (isLocalRecipe
+              ? '<label style="display:inline-flex;align-items:center;gap:4px;cursor:pointer;font-size:0.82rem;color:var(--text-dim);">'
+                + '<input type="checkbox" data-recipe="' + r.id + '" /> Add to Grocery</label>'
+              : '<span style="font-size:0.78rem;color:var(--text-mute);">\u00b7 TheMealDB recipes cannot be added to grocery</span>')
+          + '<button type="button" class="btn-dismiss"'
+            + ' style="background:none;border:none;cursor:pointer;color:var(--danger);font-size:0.78rem;padding:2px 8px;border-radius:4px;transition:background 160ms ease;"'
+            + ' title="Dismiss from view">\u2715 Dismiss</button>'
+          + '</div>'
+          + '</div>'
+          + '</div>';
+        var cb = card.querySelector('input[data-recipe]');
+        if (cb) cb.addEventListener('change', updateRecipeSelection);
+        var dismiss = card.querySelector('.btn-dismiss');
+        if (dismiss) {
+          dismiss.addEventListener('click', function () { card.remove(); });
         }
-      } else if (inMarker) {
-        cur += '\n' + line.trim();
+        list.appendChild(card);
+      });
+    }
+
+    function renderRecipeList(recipes, list) {
+      if (!recipes.length) {
+        list.innerHTML = '<div class="empty">No recipes found.</div>';
+        if (typeof updateRecipeSelection === 'function') updateRecipeSelection();
+        return;
+      }
+      list.innerHTML = '';
+      recipes.forEach(function (r) {
+        var card = document.createElement('div');
+        card.style.cssText = 'padding:14px 16px; border:1px solid var(--border); border-radius:10px; background:var(--bg-sunken); margin-bottom:10px;';
+        var ingHtml = (r.ingredients || []).map(function (i) {
+          return '<div style="margin-top:4px;">\u2022 ' + (i.quantity || 1) + ' ' + escapeHtml(i.unit || 'item') + ' \u2014 <strong>' + escapeHtml(i.product_name || '') + '</strong></div>';
+        }).join('');
+        if (!ingHtml) ingHtml = '<div style="margin-top:4px;color:var(--text-mute);">No ingredients listed.</div>';
+        card.innerHTML = '<div class="row" style="justify-content:space-between;">' +
+          '<label class="row" style="gap:8px;cursor:pointer;">' +
+            '<input type="checkbox" data-recipe="' + r.id + '" />' +
+            '<strong>' + escapeHtml(r.title || '') + '</strong></label>' +
+          '<div class="row" style="gap:4px;">' +
+            '<span style="color:var(--text-mute);font-size:.82rem;">$' + (Number(r.cost_per_serving) || 3.50).toFixed(2) + '/serving</span>' +
+            '<span style="color:var(--text-mute);font-size:.82rem;">\u00b7 ' + (r.servings || 1) + ' servings</span>' +
+            '<button type="button" class="btn-dismiss" style="background:none;border:none;cursor:pointer;color:var(--danger);font-size:.78rem;padding:2px 6px;border-radius:4px;transition:background 160ms ease;" title="Dismiss from view">\u2715</button>' +
+          '</div></div>' +
+          '<div style="margin-top:8px;color:var(--text-dim);font-size:.85rem;">' + ingHtml + '</div>';
+        var cb = card.querySelector('input[data-recipe]');
+        if (cb) cb.addEventListener('change', updateRecipeSelection);
+        var dismiss = card.querySelector('.btn-dismiss');
+        if (dismiss) {
+          dismiss.addEventListener('click', function () { card.remove(); });
+        }
+        list.appendChild(card);
+      });
+      if (typeof updateRecipeSelection === 'function') updateRecipeSelection();
+    }
+
+    /* ================================================================        GROCERY CART BUILDER — calls /api/grocery/generate-pay-period-plan
+    ================================================================ */
+    async function buildCart() {
+      var ids = [];
+      var checked = document.querySelectorAll('input[type="checkbox"][data-recipe]:checked');
+      checked.forEach(function (cb) {
+        var id = parseInt(cb.getAttribute('data-recipe'), 10);
+        if (Number.isFinite(id)) ids.push(id);
+      });
+      if (!ids.length) { flash('Select at least one recipe first', 'error'); return; }
+      var container = document.getElementById('storeCartContainer');
+      if (container) container.innerHTML = '<div class="empty">Building cart\u2026</div>';
+
+      // --- Gather store + budget preferences from the Grocery tab form ---
+      var storeName = (document.getElementById('storeSel') || {}).value || 'kroger';
+      var budgetLimit = parseFloat((document.getElementById('budgetInput') || {}).value) || null;
+
+      // --- Single call to the full pay-period pipeline ---
+      var planResp = await api('POST', '/api/grocery/generate-pay-period-plan', {
+        recipe_ids: ids,
+        store_name: storeName,
+        budget_limit: budgetLimit,
+      });
+
+      // Refresh the Active Recipes expander so the Grocery tab shows
+      // the recipes that are driving this cart.
+      if (typeof refreshActiveRecipesExpander === 'function') refreshActiveRecipesExpander();
+
+      if (!planResp.ok) {
+        flash('Cart build failed: ' + ((planResp.data && planResp.data.error) || planResp.status), 'error');
+        if (container) container.innerHTML = '<div class="empty">Cart build failed.</div>';
+        return;
+      }
+      var d = planResp.data || {};
+      var items = d.cart_items || [];
+      var subtotal = d.subtotal || 0;
+      var totalTax = d.total_cart_cost || subtotal;
+      var pantrySkipped = d.pantry_items_skipped || 0;
+      var stats = d.resolution_stats || {};
+      var budget = d.budget || {};
+
+      // --- Render resolution stats badge ---
+      var meta = document.getElementById('groceryMeta');
+      if (meta) {
+        var parts = ['Pantry: ' + pantrySkipped + ' skipped'];
+        if (stats.total_terms) {
+          parts.push('Resolved: ' + stats.total_terms + ' ingredients');
+          if (stats.cache_hits) parts.push(stats.cache_hits + ' cache');
+          if (stats.api_hits) parts.push(stats.api_hits + ' API');
+          if (stats.rapid_hits) parts.push(stats.rapid_hits + ' RapidAPI');
+          if (stats.fallbacks) parts.push(stats.fallbacks + ' estimated');
+        }
+        parts.push('Tax: ' + (d.grocery_tax_rate || 0) + '%');
+        meta.textContent = parts.join(' \u00b7 ');
+      }
+
+      if (container) {
+        if (!items.length) {
+          container.innerHTML = '<div class="empty">All ingredients covered by pantry!</div>';
+        } else {
+          container.innerHTML = '';
+          items.forEach(function (item) {
+            var row = document.createElement('div');
+            row.className = 'list-item';
+            // Price source badge: color-coded by resolution type
+            var sourceBadge = '';
+            var ps = item.price_source || 'estimated';
+            if (ps === 'cache' || ps === 'kroger_cache') sourceBadge = '<span class="badge" style="background:var(--accent-soft);color:var(--accent);border-color:rgba(45,191,110,.3);">Kroger</span>';
+            else if (ps === 'api' || ps === 'kroger_api') sourceBadge = '<span class="badge" style="background:var(--accent-soft);color:var(--accent);border-color:rgba(45,191,110,.3);">Kroger API</span>';
+            else if (ps === 'rapid_api' || ps === 'rapid_cache') sourceBadge = '<span class="badge" style="background:rgba(59,130,246,.12);color:#3b82f6;border-color:rgba(59,130,246,.25);">RapidAPI</span>';
+            else sourceBadge = '<span class="badge" style="background:rgba(245,158,11,.10);color:var(--warn);border-color:rgba(245,158,11,.25);">Estimate</span>';
+
+            var pkg = item.package_size ? '<div class="li-meta">' + escapeHtml(item.package_size) + '</div>' : '<div class="li-meta"></div>';
+            row.innerHTML = '<div class="li-title"><strong>' + escapeHtml(item.product_label || item.keyword || '') + '</strong></div>' +
+              '<div class="li-amount">' + fmt(item.estimated_price) + '</div>' +
+              '<div class="li-meta">' + (item.net_quantity_needed_oz ? item.net_quantity_needed_oz + ' oz' : '') + '</div>' +
+              pkg +
+              sourceBadge;
+            container.appendChild(row);
+          });
+        }
+      }
+
+      // --- Budget bar ---
+      var budgetVal = budget.food_budget || budgetLimit || 100;
+      if (document.getElementById('cartSubtotal')) document.getElementById('cartSubtotal').textContent = fmt(subtotal);
+      if (document.getElementById('cartBudget')) document.getElementById('cartBudget').textContent = fmt(budgetVal);
+      var bar = document.getElementById('cartBudgetBar');
+      if (bar) {
+        var pct = Math.min(100, (subtotal / budgetVal) * 100);
+        bar.style.width = pct + '%';
+        bar.style.background = subtotal <= budgetVal ? 'var(--accent)' : 'var(--danger)';
+      }
+      var warning = document.getElementById('budgetWarning');
+      if (warning) {
+        warning.style.display = (budget.budget_exceeded || subtotal > budgetVal) ? 'block' : 'none';
+        if (budget.budget_exceeded) warning.textContent = '\u26a0 Over budget by ' + fmt(Math.abs(budget.budget_remaining || 0)) + '. Adjust selections or increase budget.';
+        else if (subtotal > budgetVal) warning.textContent = '\u26a0 Over budget by ' + fmt(subtotal - budgetVal);
+      }
+      var totalEl = document.getElementById('groceryTotal');
+      if (totalEl) totalEl.textContent = 'Total (tax incl.): ' + fmt(totalTax) + (budget.budget_remaining != null ? ' \u00b7 Remaining: ' + fmt(Math.max(0, budget.budget_remaining)) : '');
+      flash('Cart built with ' + items.length + ' items' + (pantrySkipped ? ' (' + pantrySkipped + ' covered by pantry)' : ''), 'success');
+    }
+
+    /* ================================================================
+       RAPIDAPI PRODUCT SEARCH — calls /api/rapid-price/search?q=<keyword>
+    ================================================================ */
+    async function searchProductPrice() {
+      var input = document.getElementById('rapidSearchInput');
+      var storeSel = document.getElementById('rapidStoreFilter');
+      var resultEl = document.getElementById('rapidSearchResult');
+      if (!input || !resultEl) return;
+
+      var query = (input.value || '').trim();
+      if (!query) {
+        resultEl.innerHTML = '<div class="empty">Enter a product name to search.</div>';
+        return;
+      }
+
+      var storeName = (storeSel ? storeSel.value : '') || '';
+      var url = '/api/rapid-price/search?q=' + encodeURIComponent(query);
+      if (storeName) url += '&store_name=' + encodeURIComponent(storeName);
+
+      resultEl.innerHTML = '<div class="empty">Searching…</div>';
+
+      var resp = await api('GET', url);
+      if (!resp.ok) {
+        resultEl.innerHTML = '<div class="empty" style="color:var(--danger);">Search failed: ' + escapeHtml(resp.data.error || resp.status) + '</div>';
+        return;
+      }
+
+      var d = resp.data;
+      if (!d.found || !d.product) {
+        resultEl.innerHTML = '<div class="empty">No product found for "' + escapeHtml(query) + '".</div>';
+        return;
+      }
+
+      var p = d.product;
+      var sourceIcon = p.source === 'rapid_cache' ? '\ud83d\udd04' : p.source === 'rapid_api' ? '\ud83c\udf10' : '\ud83d\udce6';
+      var sourceLabel = p.source === 'rapid_cache' ? 'Cached' : p.source === 'rapid_api' ? 'RapidAPI' : 'Fallback';
+
+      resultEl.innerHTML = '';
+      var card = document.createElement('div');
+      card.style.cssText = 'display:flex;align-items:center;gap:14px;padding:14px 16px;background:var(--bg-sunken);border:1px solid var(--border);border-radius:var(--radius-md);';
+      card.innerHTML =
+        '<div style="flex:1;min-width:0;">' +
+          '<div style="font-weight:600;font-size:0.95rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' + escapeHtml(p.title) + '</div>' +
+          '<div style="display:flex;gap:12px;margin-top:4px;font-size:0.82rem;color:var(--text-mute);">' +
+            '<span>' + escapeHtml(p.store_name || '') + '</span>' +
+            '<span>' + sourceIcon + ' ' + sourceLabel + '</span>' +
+          '</div>' +
+        '</div>' +
+        '<div style="font-size:1.3rem;font-weight:800;white-space:nowrap;color:var(--accent);">' + fmt(p.price) + '</div>';
+      resultEl.appendChild(card);
+    }
+
+    /* ================================================================
+       SETTINGS HANDLERS
+    ================================================================ */
+    function initSettings() {
+      var $ = function (id) { return document.getElementById(id); };
+
+      var locBtn = $('updateLocationBtn');
+      if (locBtn) {
+        locBtn.addEventListener('click', async function () {
+          var zipVal = ($('settingsZip') || {}).value || '65084';
+          var resp = await api('POST', '/api/location/update', {
+            zip_code: zipVal,
+            sales_tax_rate: parseFloat(($('settingsSalesTax') || {}).value || 8.25) / 100,
+            grocery_tax_rate: parseFloat(($('settingsGroceryTax') || {}).value || 1.25) / 100
+          });
+          if (resp.ok) {
+            flash('Location updated', 'success');
+            await refreshOverview();
+            // Show the auto-detected store name
+            var storeInfo = resp.data.store;
+            var storeNameEl = $('settingsStoreName');
+            if (storeInfo && storeInfo.found && storeNameEl) {
+              storeNameEl.textContent = storeInfo.name + ' (#' + storeInfo.location_id + ')';
+            } else if (storeNameEl) {
+              storeNameEl.textContent = 'Searching\u2026 (Kroger API may be unavailable)';
+            }
+          } else {
+            flash('Failed: ' + (resp.data.error || ''), 'error');
+          }
+        });
+      }
+
+      var ratioBtn = $('updateRatiosBtn');
+      if (ratioBtn) {
+        ratioBtn.addEventListener('click', async function () {
+          var resp = await api('POST', '/api/account/update', {
+            food_allocation_pct: parseFloat(($('settingsFoodPct') || {}).value || 40),
+            pay_period_days: parseInt(($('settingsPayPeriod') || {}).value || 14),
+            meals_per_day: parseInt(($('settingsMealsPerDay') || {}).value || 3)
+          });
+          if (resp.ok) { flash('Ratios saved', 'success'); await refreshOverview(); }
+          else flash('Failed: ' + (resp.data.error || ''), 'error');
+        });
+      }
+
+      var balBtn = $('updateBalanceBtn');
+      if (balBtn) {
+        balBtn.addEventListener('click', async function () {
+          var resp = await api('POST', '/api/account/update', {
+            checking_balance: parseFloat(($('settingsBalance') || {}).value || 1250)
+          });
+          if (resp.ok) { flash('Balance updated', 'success'); await refreshOverview(); }
+          else flash('Failed: ' + (resp.data.error || ''), 'error');
+        });
+      }
+
+      var sweepBtn = $('sweepVaultBtn');
+      if (sweepBtn) {
+        sweepBtn.addEventListener('click', async function () {
+          var amt = parseFloat(($('sweepAmount') || {}).value || 10) || 10;
+          var resp = await api('POST', '/api/vault/sweep', { amount: amt });
+          if (resp.ok) { flash('Swept ' + fmt(amt) + ' to vault', 'success'); await refreshOverview(); }
+          else flash(resp.data.error || 'Sweep failed', 'error');
+        });
       }
     }
-    if (cur.trim()) steps.push(cur.trim());
-    if (steps.length >= 2) return steps;
-  }
 
-  // Paragraph split (blank-line separator), markers pre-stripped.
-  const paras = norm.split(/\n{2,}/).map(stripMarker).filter(Boolean);
-  if (paras.length >= 2) return paras;
+    /* ================================================================
+       WIRE INIT
+    ================================================================ */
+    function init() {
+      initTabs();
+      initTheme();
+      initCanIBuy();
+      initSettings();
+      refreshOverview();
 
-  // Sentence fallback (single-paragraph prose). Strip markers BEFORE
-  // sentence splitting so a "• Cream butter. ..." line splits cleanly.
-  if (paras.length === 1) {
-    const cleaned = stripMarker(paras[0]);
-    const sents = cleaned
-      .split(/(?<=[.!?])\s+(?=[A-Z])/)
-      .map(s => s.trim())
-      .filter(Boolean);
-    if (sents.length >= 2) return sents;
-    return [cleaned];
-  }
-  return paras;
-}
+      // Prime the Active Recipes expander on first load (harmless no-op
+      // if the Grocery tab isn't visible yet — the initTabs click handler
+      // will re-trigger when the user navigates there).
+      if (typeof refreshActiveRecipesExpander === 'function') refreshActiveRecipesExpander();
 
-function openPrepareMode(recipe) {
-  if (!recipe || !recipe.instructions) {
-    flash('No instructions to prepare.', 'error');
-    return;
-  }
-  const steps = splitInstructionsToSteps(recipe.instructions);
-  if (!steps.length) {
-    flash('Could not parse instructions into steps.', 'error');
-    return;
-  }
-  // Resume from localStorage if a valid step is recorded for this recipe.
-  let startStep = 0;
-  const saved = _loadPrepareProgress(recipe.id);
-  if (saved && Number.isInteger(saved.step)
-      && saved.step > 0 && saved.step < steps.length) {
-    startStep = saved.step;
-  }
-  prepareState = { recipe, steps, step: startStep };
-  // Persist the (possibly resumed) starting step so a quick open-then-close
-  // still lands on the same step next time.
-  _savePrepareProgress(recipe.id, startStep, steps.length);
-  const dlg = el('prepareDialog');
-  if (!dlg) return;
-  dlg.showModal();
-  renderPrepareStep();
-  if (startStep > 0) {
-    flash(`Resumed at step ${startStep + 1} of ${steps.length}.`, 'success');
-  }
-  const nxt = dlg.querySelector('.prepare-next');
-  if (nxt) nxt.focus();
-}
+      var searchBtn = document.getElementById('refreshRecipesBtn');
+      if (searchBtn) searchBtn.addEventListener('click', refreshRecipes);
 
-function renderPrepareStep() {
-  if (!prepareState) return;
-  const s = prepareState;
-  const dlg = el('prepareDialog');
-  if (!dlg) return;
-  const total = s.steps.length;
-  const idx = s.step;
-  const pct = total === 1 ? 100 : Math.round((idx / Math.max(1, total - 1)) * 100);
-  const isFirst = idx === 0;
-  const isLast = idx === total - 1;
+      // Keyword search button + Enter key
+      var kwSearchBtn = document.getElementById('searchRecipesBtn');
+      var kwSearchInput = document.getElementById('recipeSearchInput');
+      if (kwSearchBtn && kwSearchInput) {
+        function doSearch() { searchRecipesByKeyword(kwSearchInput.value); }
+        kwSearchBtn.addEventListener('click', doSearch);
+        kwSearchInput.addEventListener('keypress', function (e) {
+          if (e.key === 'Enter') doSearch();
+        });
+      }
 
-  const ingHtml = (s.recipe.ingredients && s.recipe.ingredients.length > 0)
-    ? `<div class="prepare-ingredients">
-        ${s.recipe.ingredients.map(i => {
-          const raw = (i.raw_text && String(i.raw_text).trim())
-            || (`${i.quantity || ''} ${i.unit || ''} ${i.product_name || ''}`
-                  .replace(/\s+/g, ' ').trim())
-            || '?';
-          return `<span class="prepare-ingredient-chip">${escapeHtml(raw)}</span>`;
-        }).join('')}
-       </div>`
-    : '';
+      var genBtn = document.getElementById('generateRecipesBtn');
+      if (genBtn) genBtn.addEventListener('click', function () { buildCart(false); });
+      var cartBtn = document.getElementById('buildCartBtn');
+      if (cartBtn) cartBtn.addEventListener('click', function () { buildCart(false); });
 
-  dlg.innerHTML = `
-    <div class="prepare-card">
-      <div class="prepare-progress"><span style="width:${pct}%"></span></div>
-      <div class="prepare-header">
-        <span class="prepare-step-label">Step ${idx + 1} of ${total}</span>
-        <h2 id="prepare-title" class="prepare-step-title">${escapeHtml(s.recipe.title || 'Recipe')}</h2>
-      </div>
-      <div class="prepare-body">
-        <div class="prepare-instruction">${escapeHtml(s.steps[idx])}</div>
-      </div>
-      ${ingHtml}
-      <div class="prepare-foot">
-        <button type="button" class="btn is-ghost" data-prepare-action="close" aria-label="Close prepare mode">Close ✕</button>
-        <div class="row" style="gap:8px;">
-          <button type="button" class="btn is-ghost" data-prepare-action="prev" ${isFirst ? 'disabled' : ''}
-                  aria-label="Previous step">← Previous</button>
-          <button type="button" class="btn is-primary prepare-next" data-prepare-action="next"
-                  aria-label="${isLast ? 'Finish cooking' : 'Next step'}">${isLast ? 'Finish ✓' : 'Next →'}</button>
-        </div>
-      </div>
-    </div>
-  `;
-  dlg.querySelectorAll('[data-prepare-action]').forEach(btn => {
-    btn.addEventListener('click', () => handlePrepareAction(btn.dataset.prepareAction));
-  });
-}
+      // RapidAPI product search button + Enter key
+      var rapidBtn = document.getElementById('rapidSearchBtn');
+      var rapidInput = document.getElementById('rapidSearchInput');
+      if (rapidBtn && rapidInput) {
+        rapidBtn.addEventListener('click', searchProductPrice);
+        rapidInput.addEventListener('keypress', function (e) {
+          if (e.key === 'Enter') searchProductPrice();
+        });
+      }
 
-function handlePrepareAction(action) {
-  if (!prepareState) return;
-  if (action === 'close') return prepareClose();
-  if (action === 'next') {
-    if (prepareState.step < prepareState.steps.length - 1) {
-      prepareState.step += 1;
-      renderPrepareStep();
-      _savePrepareProgress(prepareState.recipe.id, prepareState.step, prepareState.steps.length);
-      el('prepareDialog').querySelector('.prepare-next')?.focus();
+      var prevBtn = document.getElementById('preparePrevBtn');
+      if (prevBtn) {
+        prevBtn.addEventListener('click', function () {
+          if (prepareState && prepareState.index > 0) { prepareState.index--; renderPrepareStep(); }
+        });
+      }
+      var nextBtn = document.getElementById('prepareNextBtn');
+      if (nextBtn) {
+        nextBtn.addEventListener('click', function () {
+          if (!prepareState) return;
+          if (prepareState.index >= prepareState.steps.length - 1) {
+            if (typeof _clearPrepareProgress === 'function') _clearPrepareProgress(prepareState.recipeId);
+            document.getElementById('prepareDialog').close();
+            prepareState = null;
+            flash('Meal cooked! \ud83c\udf7d\ufe0f', 'success');
+            return;
+          }
+          prepareState.index++;
+          if (typeof _savePrepareProgress === 'function') {
+            _savePrepareProgress(prepareState.recipeId, prepareState.index, prepareState.steps.length);
+          }
+          renderPrepareStep();
+        });
+      }
+      var dialog = document.getElementById('prepareDialog');
+      if (dialog) dialog.addEventListener('click', function (e) { if (e.target === dialog) dialog.close(); });
+
+      var logForm = document.getElementById('logExpenseForm');
+      if (logForm) {
+        logForm.addEventListener('submit', async function (e) {
+          e.preventDefault();
+          var resp = await api('POST', '/api/transactions', {
+            description: (document.getElementById('tDesc') || {}).value || '',
+            amount: parseFloat((document.getElementById('tAmt') || {}).value || 0),
+            category: (document.getElementById('tCat') || {}).value || 'discretionary'
+          });
+          if (resp.ok) {
+            flash('Expense posted', 'success');
+            var descEl = document.getElementById('tDesc');
+            if (descEl) descEl.value = '';
+            if (typeof refreshTransactions === 'function') await refreshTransactions();
+            await refreshOverview();
+          } else { flash(resp.data.error || 'Failed', 'error'); }
+        });
+      }
+
+      var billForm = document.getElementById('addBillForm');
+      if (billForm) {
+        billForm.addEventListener('submit', async function (e) {
+          e.preventDefault();
+          var resp = await api('POST', '/bills', {
+            name: (document.getElementById('bName') || {}).value || '',
+            amount: parseFloat((document.getElementById('bAmt') || {}).value || 0),
+            due_date: (document.getElementById('bDate') || {}).value || ''
+          });
+          if (resp.ok) {
+            flash('Bill added', 'success');
+            ['bName', 'bAmt', 'bDate'].forEach(function (id) {
+              var el = document.getElementById(id); if (el) el.value = '';
+            });
+            if (typeof refreshBills === 'function') await refreshBills();
+            await refreshOverview();
+          } else { flash(resp.data.error || 'Failed', 'error'); }
+        });
+      }
+
+      var linkBtn = document.getElementById('linkBankBtn');
+      if (linkBtn) linkBtn.addEventListener('click', function () { flash('Plaid Link coming soon', 'success'); });
+
+      if (typeof refreshTransactions === 'function') refreshTransactions();
+      if (typeof refreshBills === 'function') refreshBills();
+
+      // Load recipes on first visit
+      if (typeof refreshRecipes === 'function') refreshRecipes();
+
+      if (typeof setupRecipesInit === 'function') {
+        setupRecipesInit({
+          api: api, flash: flash, escapeHtml: escapeHtml,
+          openPrepareMode: openPrepareMode,
+          updateRecipeSelection: updateRecipeSelection,
+          refreshRecipes: refreshRecipes
+        });
+      }
+      if (typeof setupTransactionsInit === 'function') {
+        setupTransactionsInit({
+          flash: flash,
+          refreshTransactions: typeof refreshTransactions === 'function' ? refreshTransactions : undefined,
+          refreshOverview: refreshOverview
+        });
+      }
+      if (typeof setupBillsInit === 'function') {
+        setupBillsInit({
+          flash: flash,
+          refreshBills: typeof refreshBills === 'function' ? refreshBills : undefined,
+          refreshOverview: refreshOverview
+        });
+      }
+      // setupGroceryInit is intentionally NOT called — the inline
+      // buildCart() handles cart building directly.
+    }
+
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', init);
     } else {
-      // Last step → recipe complete: clear the saved progress so the next
-      // open of this recipe starts fresh, not on a finished run.
-      flash('Enjoy your meal! \ud83c\udf7d', 'success');
-      _clearPrepareProgress(prepareState.recipe.id);
-      prepareClose();
+      init();
     }
-    return;
-  }
-  if (action === 'prev') {
-    if (prepareState.step > 0) {
-      prepareState.step -= 1;
-      renderPrepareStep();
-      _savePrepareProgress(prepareState.recipe.id, prepareState.step, prepareState.steps.length);
-      el('prepareDialog').querySelector('[data-prepare-action="prev"]')?.focus();
-    }
-  }
-}
-
-function prepareClose() {
-  const dlg = el('prepareDialog');
-  if (dlg && dlg.open) dlg.close();
-  prepareState = null;
-}
-
-document.addEventListener('keydown', (e) => {
-  if (!prepareState) return;
-  if (e.key === 'ArrowRight') {
-    e.preventDefault();
-    handlePrepareAction('next');
-  } else if (e.key === 'ArrowLeft') {
-    e.preventDefault();
-    handlePrepareAction('prev');
-  }
-});
-
-    
-    // ----- health probe on boot, then full hydration -----
-    (async function init() {
-      // /api/health only proves the server is up — it does NOT confirm a Plaid
-      // link. Start the status pill as 'not linked' and only flip to 'linked'
-      // inside the real Plaid onSuccess callback (after /api/set_access_token).
-      const h = await api('GET', '/api/health').catch(() => null);
-      updatePlaidStatus(false);
-      if (!h || !h.ok) flash('Backend unreachable. Some data may be stale.', 'error');
-
-      const s = await api('GET', '/api/settings').catch(() => null);
-      if (s && s.ok) hydrateSettingsForm(s.data);
-
-      await refreshOverview();
-      await refreshTransactions();
-      await refreshBills();
-      await refreshRecipes();
-      await refreshGrocery();
-    })();
-  </script>
-
-  <!-- PREPARE-MODE DIALOG host. showModal() gives us aria-modal +
-       focus trap + Esc-to-close + body scroll lock for free. -->
-  <dialog id="prepareDialog" class="prepare-dialog" aria-labelledby="prepare-title"></dialog>
-</body>
+  </script></body>
 </html>

@@ -1,0 +1,39 @@
+# Example ConfigMap for the Rung ingest CronJob.
+#
+# Apply:
+#   kubectl apply -f deploy/k8s/rung-ingest-configmap.yaml
+#
+# The `ingest.json` key holds the JSON config that the CLI reads via
+# --config /etc/rung/ingest.json. The current value is a small
+# representative example; in production you would render this from
+# your store/location-id inventory (Helm/Kustomize templating is
+# the typical path).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: rung-ingest-config
+  labels:
+    app: rung
+    component: store-cache-ingest
+data:
+  ingest.json: |
+    {
+      "stores": [
+        {
+          "store_name": "Kroger",
+          "location_id": "14100943",
+          "terms": [
+            "milk",
+            "eggs",
+            "cheddar cheese",
+            "ground beef",
+            "chicken breast",
+            "white rice",
+            "all-purpose flour",
+            "sugar",
+            "butter"
+          ],
+          "limit": 5
+        }
+      ]
+    }

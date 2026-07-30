@@ -1,0 +1,112 @@
+# Catch-up K8s CronJob for the Rung ingest pipeline.
+#
+# Companion to deploy/k8s/rung-ingest-cronjob.yaml. Together they
+# reproduce the cron + systemd schedule:
+#   Mon-Fri  03:15 (rung-ingest)         06:15 (THIS)         15:15 (rung-ingest)
+#   Sat-Sun  03:15 (rung-ingest)                                  15:15 (rung-ingest)
+#
+# K8s CronJob only supports a single schedule string per object, so
+# a second CronJob is the idiomatic way to model the catch-up. Both
+# CronJobs share the same Secret / ConfigMap / PVC so the only thing
+# distinguishing them is the schedule + a `role: catchup` label.
+#
+# Apply AFTER rung-ingest-cronjob.yaml and the supporting Secret /
+# ConfigMap / PVC are already in place:
+#   kubectl apply -f deploy/k8s/rung-ingest-catchup-cronjob.yaml
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: rung-ingest-catchup
+  labels:
+    app: rung
+    component: store-cache-ingest
+    role: catchup
+  # SYNC HAZARD: this file is ~95% identical to
+  # rung-ingest-cronjob.yaml. If you change the image, env,
+  # securityContext, volumeMounts, or resources here you MUST
+  # mirror the change in rung-ingest-cronjob.yaml or the two jobs
+  # will silently diverge. See deploy/README.md.
+spec:
+  schedule: "15 6 * * 1-5"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 5
+  startingDeadlineSeconds: 600
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      activeDeadlineSeconds: 1800
+      template:
+        metadata:
+          labels:
+            app: rung
+            component: store-cache-ingest
+            role: catchup
+        spec:
+          restartPolicy: OnFailure
+          automountServiceAccountToken: false
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 10001
+            runAsGroup: 10001
+            fsGroup: 10001
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: ingest
+              image: rung/ingest:latest
+              imagePullPolicy: IfNotPresent
+              command:
+                - /usr/local/bin/python3
+                - /opt/rung/scripts/ingest_store_prices.py
+                - --config
+                - /etc/rung/ingest.json
+                - --verbose
+              env:
+                - name: PYTHONUNBUFFERED
+                  value: "1"
+                - name: INGEST_LOG_LEVEL
+                  value: "INFO"
+                - name: DATABASE_URL
+                  valueFrom:
+                    secretKeyRef:
+                      name: rung-ingest-secret
+                      key: DATABASE_URL
+                - name: KROGER_CLIENT_ID
+                  valueFrom:
+                    secretKeyRef:
+                      name: rung-ingest-secret
+                      key: KROGER_CLIENT_ID
+                - name: KROGER_CLIENT_SECRET
+                  valueFrom:
+                    secretKeyRef:
+                      name: rung-ingest-secret
+                      key: KROGER_CLIENT_SECRET
+              volumeMounts:
+                - name: ingest-config
+                  mountPath: /etc/rung
+                  readOnly: true
+                - name: rung-data
+                  mountPath: /var/lib/rung
+              resources:
+                requests:
+                  cpu: 100m
+                  memory: 256Mi
+                limits:
+                  cpu: 500m
+                  memory: 512Mi
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop: ["ALL"]
+          volumes:
+            - name: ingest-config
+              configMap:
+                name: rung-ingest-config
+                items:
+                  - key: ingest.json
+                    path: ingest.json
+            - name: rung-data
+              persistentVolumeClaim:
+                claimName: rung-data-pvc

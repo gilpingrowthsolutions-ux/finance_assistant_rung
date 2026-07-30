@@ -1,0 +1,131 @@
+# Kubernetes CronJob for the Rung StorePriceCache ingest pipeline.
+#
+# Apply:
+#   kubectl apply -f deploy/k8s/rung-ingest-cronjob.yaml
+#   kubectl apply -f deploy/k8s/rung-ingest-secret.yaml   # see secret.example
+#   kubectl apply -f deploy/k8s/rung-ingest-configmap.yaml  # see configmap.example
+#
+# Verify:
+#   kubectl get cronjob rung-ingest
+#   kubectl get jobs --sort-by=.metadata.creationTimestamp
+#
+# Trigger a manual run:
+#   kubectl create job --from=cronjob/rung-ingest rung-ingest-manual-$(date +%s)
+#
+# This manifest expects a Secret named `rung-ingest-secret` containing
+# KROGER_CLIENT_ID and KROGER_CLIENT_SECRET keys, and a ConfigMap named
+# `rung-ingest-config` whose `ingest.json` key holds the JSON config.
+# Both have .example siblings checked into source control.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: rung-ingest
+  labels:
+    app: rung
+    component: store-cache-ingest
+  # SYNC HAZARD: this file is ~95% identical to
+  # rung-ingest-catchup-cronjob.yaml. If you change the image,
+  # env, securityContext, volumeMounts, or resources here you MUST
+  # mirror the change in rung-ingest-catchup-cronjob.yaml or the
+  # two jobs will silently diverge. See deploy/README.md.
+spec:
+  # Twice-daily schedule: 03:15 and 15:15 UTC. Times are kept in UTC
+  # to avoid confusion when pods run in any timezone. The weekday
+  # 06:15 catch-up run lives in deploy/k8s/rung-ingest-catchup-cronjob.yaml
+  # (K8s CronJob has a single schedule field per object; the second
+  # CronJob gives the same Mon-Fri 03:15, 06:15, 15:15 cadence as
+  # the cron + systemd manifests).
+  schedule: "15 3,15 * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 5
+  startingDeadlineSeconds: 600
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      activeDeadlineSeconds: 1800
+      template:
+        metadata:
+          labels:
+            app: rung
+            component: store-cache-ingest
+        spec:
+          restartPolicy: OnFailure
+          # No API access required; disable token mount to minimise
+          # the credential surface area in the pod.
+          automountServiceAccountToken: false
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 10001
+            runAsGroup: 10001
+            fsGroup: 10001
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: ingest
+              image: rung/ingest:latest
+              imagePullPolicy: IfNotPresent
+              command:
+                - /usr/local/bin/python3
+                - /opt/rung/scripts/ingest_store_prices.py
+                - --config
+                - /etc/rung/ingest.json
+                - --verbose
+              env:
+                - name: PYTHONUNBUFFERED
+                  value: "1"
+                - name: INGEST_LOG_LEVEL
+                  value: "INFO"
+                # DATABASE_URL is provided via Secret so the same
+                # CronJob can target dev/staging/prod clusters.
+                - name: DATABASE_URL
+                  valueFrom:
+                    secretKeyRef:
+                      name: rung-ingest-secret
+                      key: DATABASE_URL
+                - name: KROGER_CLIENT_ID
+                  valueFrom:
+                    secretKeyRef:
+                      name: rung-ingest-secret
+                      key: KROGER_CLIENT_ID
+                - name: KROGER_CLIENT_SECRET
+                  valueFrom:
+                    secretKeyRef:
+                      name: rung-ingest-secret
+                      key: KROGER_CLIENT_SECRET
+              volumeMounts:
+                - name: ingest-config
+                  mountPath: /etc/rung
+                  readOnly: true
+                # Writable home for the SQLite database. In production
+                # the PVC backed by a StorageClass (e.g. gp3 / standard)
+                # provides durability across pod restarts. For dev /
+                # smoke jobs you can replace this with `emptyDir` and
+                # accept the loss-on-restart trade-off.
+                - name: rung-data
+                  mountPath: /var/lib/rung
+              resources:
+                requests:
+                  cpu: 100m
+                  memory: 256Mi
+                limits:
+                  cpu: 500m
+                  memory: 512Mi
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop: ["ALL"]
+          volumes:
+            - name: ingest-config
+              configMap:
+                name: rung-ingest-config
+                items:
+                  - key: ingest.json
+                    path: ingest.json
+            # Replace `claimName: rung-data-pvc` with your own PVC
+            # before applying. To create one quickly:
+            #   kubectl apply -f deploy/k8s/rung-ingest-pvc.yaml.example
+            - name: rung-data
+              persistentVolumeClaim:
+                claimName: rung-data-pvc

@@ -1459,6 +1459,24 @@ def init_db():
             ri2 = RecipeIngredient(recipe_id=r1.id, product_name="White Rice", clean_keyword="rice", quantity=8.0, unit="oz")
             db.session.add_all([ri1, ri2])
             
+            # Seed demo StorePriceCache entries so the cart resolves real
+            # products out-of-the-box without requiring API credentials.
+            demo_prices = [
+                # (store, keyword, title, price, is_store_brand, package, retailer)
+                ('Kroger', 'chicken', 'Simple Truth Chicken Breast Family Pack', 8.99, 1, '2.5 lb', 'kroger'),
+                ('Kroger', 'chicken', 'Kroger Boneless Skinless Chicken Breast',  9.49, 1, '2 lb',   'kroger'),
+                ('Kroger', 'chicken', 'Tyson Fresh Chicken Breast',               11.99, 0, '2.5 lb', 'kroger'),
+                ('Kroger', 'rice',    'Kroger Long Grain White Rice',              2.99, 1, '2 lb',   'kroger'),
+                ('Kroger', 'rice',    'Kroger Enriched White Rice',                1.89, 1, '1 lb',   'kroger'),
+                ('Kroger', 'rice',    'Uncle Ben White Rice Original',             4.49, 0, '2 lb',   'kroger'),
+            ]
+            for store, kw, title, price, is_sb, pkg, rtlr in demo_prices:
+                db.session.add(StorePriceCache(
+                    store_name=store, item_keyword=kw, product_title=title,
+                    price=price, package_size=pkg, retailer=rtlr,
+                    is_store_brand=is_sb,
+                ))
+            
             db.session.commit()
 
 if __name__ == "__main__":

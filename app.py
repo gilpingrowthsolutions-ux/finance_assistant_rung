@@ -1089,15 +1089,14 @@ def copilot_parse():
       "_fallback": false
     }
     """
-    from services.copilot_service import parse_copilot_prompt
-
     data = request.json or {}
     user_text = data.get("text", "").strip()
     if not user_text:
         return jsonify({"error": "Provide 'text' field with your request"}), 400
 
-    # ---- Parse ----
-    parsed = parse_copilot_prompt(user_text)
+    # ---- Parse (pass BYOK key from DB, falls back to env var if empty) ----
+    groq_key = get_setting("groq_api_key")
+    parsed = parse_copilot_prompt(user_text, groq_api_key=groq_key)
 
     actions = {
         "bills_added": [],

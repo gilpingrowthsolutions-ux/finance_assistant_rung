@@ -79,37 +79,15 @@ Rules:
 # Provider: Groq (cloud-hosted open-weights LLM)
 # ---------------------------------------------------------------------------
 
-def _get_groq_key() -> str:
-    """Resolve the Groq API key from DB first, then env var.
-
-    Priority:
-      1. ``user_settings`` table (key = ``groq_api_key``) — BYOK
-      2. ``GROQ_API_KEY`` environment variable
-    """
-    # 1. DB (BYOK)
-    try:
-        from app import app as _app, get_setting
-        with _app.app_context():
-            db_key = get_setting("groq_api_key")
-            if db_key:
-                LOGGER.debug("Using Groq API key from user_settings (BYOK)")
-                return db_key
-    except ImportError:
-        LOGGER.debug("Cannot import app — running outside Flask context")
-    except Exception:
-        LOGGER.warning("Failed to read Groq key from DB, falling back to env var", exc_info=True)
-
-    # 2. Environment variable
-    return (os.environ.get("GROQ_API_KEY") or "").strip()
-
-
-def _call_groq(prompt: str) -> Optional[Dict[str, Any]]:
+def _call_groq(prompt: str, api_key: str = "") -> Optional[Dict[str, Any]]:
     """Send *prompt* to the Groq API and return the parsed JSON response.
 
     Uses the ``llama-3.1-8b-instant`` model for low-latency parsing.
+    *api_key* overrides the ``GROQ_API_KEY`` environment variable.
     Returns ``None`` on any failure (network, auth, bad response).
     """
-    api_key = _get_groq_key()
+    if not api_key:
+        api_key = (os.environ.get("GROQ_API_KEY") or "").strip()
     if not api_key:
         return None
 
@@ -328,7 +306,7 @@ def _regex_fallback(user_text: str) -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-def parse_copilot_prompt(user_text: str) -> Dict[str, Any]:
+def parse_copilot_prompt(user_text: str, groq_api_key: str = "") -> Dict[str, Any]:
     """Parse free-form user text into structured Rung actions.
 
     Provider priority: Groq → Ollama → regex fallback.
@@ -339,6 +317,9 @@ def parse_copilot_prompt(user_text: str) -> Dict[str, Any]:
     user_text : str
         Natural-language description of what the user wants to do
         (e.g., "Cook chicken rice bowl. Add Netflix $22.99/mo. I need dish soap.")
+    groq_api_key : str, optional
+        Groq API key from the BYOK settings. If empty, falls back to
+        the ``GROQ_API_KEY`` environment variable.
 
     Returns
     -------
@@ -357,8 +338,8 @@ def parse_copilot_prompt(user_text: str) -> Dict[str, Any]:
 
     prompt = user_text.strip()
 
-    # 1. Try Groq
-    result = _call_groq(prompt)
+    # 1. Try Groq (with explicit key, falling back to env var)
+    result = _call_groq(prompt, api_key=groq_api_key)
     if result is not None:
         result["_fallback"] = False
         return result

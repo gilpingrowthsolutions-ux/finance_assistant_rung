@@ -1463,12 +1463,56 @@ def init_db():
             # products out-of-the-box without requiring API credentials.
             demo_prices = [
                 # (store, keyword, title, price, is_store_brand, package, retailer)
-                ('Kroger', 'chicken', 'Simple Truth Chicken Breast Family Pack', 8.99, 1, '2.5 lb', 'kroger'),
-                ('Kroger', 'chicken', 'Kroger Boneless Skinless Chicken Breast',  9.49, 1, '2 lb',   'kroger'),
-                ('Kroger', 'chicken', 'Tyson Fresh Chicken Breast',               11.99, 0, '2.5 lb', 'kroger'),
-                ('Kroger', 'rice',    'Kroger Long Grain White Rice',              2.99, 1, '2 lb',   'kroger'),
-                ('Kroger', 'rice',    'Kroger Enriched White Rice',                1.89, 1, '1 lb',   'kroger'),
-                ('Kroger', 'rice',    'Uncle Ben White Rice Original',             4.49, 0, '2 lb',   'kroger'),
+                # --- Proteins ---
+                ('Kroger', 'chicken',   'Simple Truth Chicken Breast Family Pack',  8.99,  1, '2.5 lb', 'kroger'),
+                ('Kroger', 'chicken',   'Kroger Boneless Skinless Chicken Breast',   9.49,  1, '2 lb',   'kroger'),
+                ('Kroger', 'chicken',   'Tyson Fresh Chicken Breast',               11.99,  0, '2.5 lb', 'kroger'),
+                ('Kroger', 'chicken_breast', 'Simple Truth Chicken Breast Family Pack',  8.99,  1, '2.5 lb', 'kroger'),
+                ('Kroger', 'chicken_breast', 'Kroger Boneless Skinless Chicken Breast',   9.49,  1, '2 lb',   'kroger'),
+                ('Kroger', 'chicken_breast', 'Tyson Fresh Chicken Breast',               11.99,  0, '2.5 lb', 'kroger'),
+                ('Kroger', 'beef',      'Kroger Ground Beef 85/15',                  5.49,  1, '1 lb',   'kroger'),
+                ('Kroger', 'beef',      'Simple Truth Grass-Fed Ground Beef',        7.99,  1, '1 lb',   'kroger'),
+                ('Kroger', 'bacon',     'Kroger Hickory Smoked Bacon',               5.99,  1, '16 oz',  'kroger'),
+                ('Kroger', 'eggs',      'Kroger Grade A Large Eggs',                 2.99,  1, '12 ct',  'kroger'),
+                ('Kroger', 'eggs',      'Simple Truth Cage-Free Large Eggs',         4.49,  1, '12 ct',  'kroger'),
+                ('Kroger', 'eggs',      'Eggland Best Large Eggs',                   5.29,  0, '12 ct',  'kroger'),
+                # --- Grains & Baking ---
+                ('Kroger', 'rice',      'Kroger Long Grain White Rice',              2.99,  1, '2 lb',   'kroger'),
+                ('Kroger', 'rice',      'Kroger Enriched White Rice',                1.89,  1, '1 lb',   'kroger'),
+                ('Kroger', 'rice',      'Uncle Ben White Rice Original',             4.49,  0, '2 lb',   'kroger'),
+                ('Kroger', 'pasta',     'Kroger Penne Pasta',                        1.29,  1, '16 oz',  'kroger'),
+                ('Kroger', 'pasta',     'Kroger Spaghetti Pasta',                    1.29,  1, '16 oz',  'kroger'),
+                ('Kroger', 'pasta',     'Barilla Penne Pasta',                       1.99,  0, '16 oz',  'kroger'),
+                ('Kroger', 'flour',     'Kroger All-Purpose Flour',                  2.49,  1, '5 lb',   'kroger'),
+                ('Kroger', 'flour',     'Gold Medal All-Purpose Flour',              3.49,  0, '5 lb',   'kroger'),
+                ('Kroger', 'bread',     'Kroger White Sandwich Bread',               1.49,  1, '20 oz',  'kroger'),
+                ('Kroger', 'bread',     'Sara Lee Classic White Bread',              3.99,  0, '20 oz',  'kroger'),
+                ('Kroger', 'sugar',     'Kroger Granulated Sugar',                   3.29,  1, '4 lb',   'kroger'),
+                # --- Dairy ---
+                ('Kroger', 'milk',      'Kroger Whole Milk',                         3.49,  1, '1 gal',  'kroger'),
+                ('Kroger', 'milk',      'Horizon Organic Whole Milk',                6.49,  0, '1 gal',  'kroger'),
+                ('Kroger', 'cheese',    'Kroger Sharp Cheddar Cheese',               2.99,  1, '8 oz',   'kroger'),
+                ('Kroger', 'cheese',    'Kroger Mozzarella Cheese',                  2.99,  1, '8 oz',   'kroger'),
+                ('Kroger', 'cheese',    'Sargento Sharp Cheddar Slices',             4.49,  0, '8 oz',   'kroger'),
+                ('Kroger', 'butter',    'Kroger Unsalted Butter',                    4.29,  1, '1 lb',   'kroger'),
+                ('Kroger', 'butter',    'Land O Lakes Unsalted Butter',              5.99,  0, '1 lb',   'kroger'),
+                ('Kroger', 'cream',     'Kroger Heavy Whipping Cream',               3.99,  1, '16 oz',  'kroger'),
+                ('Kroger', 'cream',     'Organic Valley Heavy Cream',                5.49,  0, '16 oz',  'kroger'),
+                # --- Produce ---
+                ('Kroger', 'broccoli',  'Fresh Broccoli Crowns',                     1.99,  0, '1 lb',   'kroger'),
+                ('Kroger', 'banana',    'Fresh Bananas',                             0.29,  0, '1 ct',   'kroger'),
+                ('Kroger', 'onion',     'Yellow Onions',                             0.89,  0, '1 lb',   'kroger'),
+                ('Kroger', 'garlic',    'Fresh Garlic',                              0.69,  0, '1 head', 'kroger'),
+                ('Kroger', 'tomato',    'Roma Tomatoes',                             1.49,  0, '1 lb',   'kroger'),
+                ('Kroger', 'tomato',    'Kroger Diced Tomatoes Canned',              0.99,  1, '14.5 oz','kroger'),
+                ('Kroger', 'potato',    'Russet Potatoes',                           3.99,  0, '5 lb',   'kroger'),
+                ('Kroger', 'carrot',    'Whole Carrots',                             1.49,  0, '2 lb',   'kroger'),
+                ('Kroger', 'mushroom',  'White Mushrooms',                           2.49,  0, '8 oz',   'kroger'),
+                # --- Oils & Condiments ---
+                ('Kroger', 'olive_oil', 'Kroger Extra Virgin Olive Oil',             5.99,  1, '16.9 oz','kroger'),
+                ('Kroger', 'olive_oil', 'Bertolli Extra Virgin Olive Oil',           9.49,  0, '16.9 oz','kroger'),
+                ('Kroger', 'salt',      'Kroger Iodized Salt',                       0.89,  1, '26 oz',  'kroger'),
+                ('Kroger', 'pepper',    'Kroger Ground Black Pepper',                2.49,  1, '3 oz',   'kroger'),
             ]
             for store, kw, title, price, is_sb, pkg, rtlr in demo_prices:
                 db.session.add(StorePriceCache(

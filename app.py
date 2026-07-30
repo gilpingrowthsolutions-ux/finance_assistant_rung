@@ -15,6 +15,7 @@ load_dotenv()
 from services.store_api import resolve_terms, pick_best
 from services.kroger_api import find_nearest_kroger
 from services.rapidapi_search import search_local_product, rapid_result_to_product_dict
+from services.copilot_service import parse_copilot_prompt
 
 app = Flask(__name__)
 db_path = os.path.join(os.path.dirname(__file__), "rung_finance.db")
@@ -130,6 +131,36 @@ class StorePriceCache(db.Model):
     retailer = db.Column(db.String(50), default='kroger')
     is_store_brand = db.Column(db.Boolean, default=False)
     last_updated = db.Column(db.DateTime, default=datetime.utcnow)
+
+
+class UserSetting(db.Model):
+    """Key-value store for per-user settings (API keys, preferences, etc.).
+
+    Each row stores one setting. Values are plain strings — callers are
+    responsible for serialising/deserialising (e.g. ``json.loads`` for lists).
+    """
+    __tablename__ = 'user_settings'
+    key = db.Column(db.String(80), primary_key=True)
+    value = db.Column(db.Text, default='')
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+
+def get_setting(key: str, default: str = '') -> str:
+    """Read a user setting from the DB, returning *default* if not found."""
+    row = UserSetting.query.get(key)
+    return row.value if row else default
+
+
+def set_setting(key: str, value: str) -> None:
+    """Upsert a user setting."""
+    row = UserSetting.query.get(key)
+    if row:
+        row.value = value
+        row.updated_at = datetime.utcnow()
+    else:
+        db.session.add(UserSetting(key=key, value=value))
+    db.session.commit()
+
 
 # =============================================================================
 # UNIT CONVERSION & HELPER ENGINES
@@ -797,6 +828,70 @@ def delete_bill(bid):
     db.session.commit()
     return jsonify({"message": f"Bill {bid} deleted"})
 
+@app.route("/api/settings/groq-key", methods=["GET", "POST", "DELETE"])
+def groq_key_settings():
+    """Manage the user's Groq API key for AI Copilot.
+
+    GET  — return ``{"configured": true, "key_preview": "gsk_...XXXX"}``
+    POST — validate the key against the Groq API, then save it.
+    DELETE — remove the saved key.
+    """
+    if request.method == "GET":
+        key = get_setting("groq_api_key")
+        if key:
+            preview = key[:4] + "..." + key[-4:] if len(key) > 8 else "****"
+            return jsonify({"configured": True, "key_preview": preview})
+        return jsonify({"configured": False, "key_preview": None})
+
+    if request.method == "DELETE":
+        set_setting("groq_api_key", "")
+        return jsonify({"configured": False, "message": "Key removed"})
+
+    # POST — validate then save
+    data = request.json or {}
+    api_key = (data.get("api_key") or "").strip()
+    if not api_key:
+        return jsonify({"error": "API key is required"}), 400
+    if not api_key.startswith("gsk_"):
+        return jsonify({"error": "Invalid key format — Groq keys start with 'gsk_'"}), 400
+
+    # Lightweight validation: call the Groq models list endpoint
+    try:
+        import requests as _req
+        resp = _req.get(
+            "https://api.groq.com/openai/v1/models",
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            },
+            timeout=10,
+        )
+        if resp.status_code == 200:
+            set_setting("groq_api_key", api_key)
+            preview = api_key[:4] + "..." + api_key[-4:]
+            return jsonify({
+                "configured": True,
+                "key_preview": preview,
+                "message": "✅ Key validated and saved! The AI Copilot is ready.",
+            })
+        elif resp.status_code == 401:
+            return jsonify({"error": "Invalid API key — Groq rejected it. Check console.groq.com/keys"}), 401
+        elif resp.status_code == 429:
+            return jsonify({"error": "Groq rate limit — wait a minute and try again."}), 429
+        else:
+            return jsonify({"error": f"Groq API returned HTTP {resp.status_code}. Check your key."}), 502
+    except Exception as exc:
+        # If we can't reach Groq (network issue), still save the key —
+        # the user can test later. Warn them.
+        set_setting("groq_api_key", api_key)
+        preview = api_key[:4] + "..." + api_key[-4:]
+        return jsonify({
+            "configured": True,
+            "key_preview": preview,
+            "warning": f"Key saved but could not be validated (network issue: {exc}). It will be used for the next Copilot request.",
+        })
+
+
 # ----- ACCOUNT UPDATE (balance + ratios) ------------------------------------
 
 @app.route("/api/account/update", methods=["POST"])
@@ -961,6 +1056,118 @@ def can_i_buy():
         "impact_text": impact,
         "free_cash": round(free_cash, 2),
     })
+
+@app.route("/api/copilot/parse", methods=["POST"])
+def copilot_parse():
+    """AI Copilot — parse natural language and dispatch database actions.
+
+    Calls ``services.copilot_service.parse_copilot_prompt()`` to extract
+    structured actions from free-form text, then executes them:
+      - Adds/removes bill_updates
+      - Logs discretionary_events as ExpenseTransaction rows
+      - Creates GroceryItem rows for grocery_additions
+
+    Recipe selection (selected_recipes) is returned to the frontend
+    so the user can confirm before adding to the cart — no DB writes
+    for recipes until the user clicks "Auto-Fill Cart".
+
+    Request body
+    ------------
+    {"text": "Cook chicken rice bowl. Add Netflix $22.99/mo. I need dish soap."}
+
+    Returns (200)
+    -------------
+    {
+      "parsed": { <structured intent from LLM/regex> },
+      "actions_taken": {
+        "bills_added": [{"name": "netflix", "amount": 22.99}],
+        "bills_removed": [],
+        "expenses_logged": [...],
+        "grocery_items_added": ["dish soap"],
+        "recipes_suggested": [{"title": "chicken rice bowl", "action": "add"}]
+      },
+      "_fallback": false
+    }
+    """
+    from services.copilot_service import parse_copilot_prompt
+
+    data = request.json or {}
+    user_text = data.get("text", "").strip()
+    if not user_text:
+        return jsonify({"error": "Provide 'text' field with your request"}), 400
+
+    # ---- Parse ----
+    parsed = parse_copilot_prompt(user_text)
+
+    actions = {
+        "bills_added": [],
+        "bills_removed": [],
+        "expenses_logged": [],
+        "grocery_items_added": [],
+        "recipes_suggested": parsed.get("selected_recipes", []),
+    }
+
+    account = Account.query.first()
+
+    # ---- Dispatch bill_updates ----
+    for bill in parsed.get("bill_updates", []):
+        name = (bill.get("name") or "").strip()
+        try:
+            amount = float(bill.get("amount", 0))
+        except (ValueError, TypeError):
+            continue
+        action = bill.get("action", "add")
+        if not name or amount <= 0:
+            continue
+        if action == "remove":
+            existing = Bill.query.filter(
+                Bill.name.ilike(f"%{name}%")
+            ).first()
+            if existing:
+                db.session.delete(existing)
+                actions["bills_removed"].append({"name": name, "amount": amount})
+        else:
+            due_date = datetime.utcnow() + timedelta(days=14)
+            b = Bill(name=name.title(), amount=amount, due_date=due_date)
+            db.session.add(b)
+            actions["bills_added"].append({"name": name, "amount": amount})
+
+    # ---- Dispatch discretionary_events ----
+    for event in parsed.get("discretionary_events", []):
+        desc = (event.get("description") or "").strip()
+        try:
+            amount = float(event.get("amount", 0))
+        except (ValueError, TypeError):
+            continue
+        if not desc or amount <= 0:
+            continue
+        t = ExpenseTransaction(description=desc, amount=amount, category="discretionary")
+        db.session.add(t)
+        if account:
+            account.checking_balance -= amount
+        actions["expenses_logged"].append({"description": desc, "amount": amount})
+
+    # ---- Dispatch grocery_additions ----
+    for item_name in parsed.get("grocery_additions", []):
+        name = str(item_name).strip().lower()
+        if not name:
+            continue
+        gi = GroceryItem(
+            item_name=name.title(),
+            estimated_price=3.50,
+            store_name=account.kroger_store_name if account else "Local Store",
+        )
+        db.session.add(gi)
+        actions["grocery_items_added"].append(name)
+
+    db.session.commit()
+
+    return jsonify({
+        "parsed": parsed,
+        "actions_taken": actions,
+        "_fallback": parsed.get("_fallback", False),
+    })
+
 
 @app.route("/api/recipes/search", methods=["GET"])
 def search_recipes():
@@ -1514,6 +1721,10 @@ def init_db():
                 db.session.execute(db.text("ALTER TABLE rapid_price_cache ADD COLUMN package_size VARCHAR(100)"))
             if "image_url" not in rapid_cols:
                 db.session.execute(db.text("ALTER TABLE rapid_price_cache ADD COLUMN image_url VARCHAR(500)"))
+            # Ensure user_settings table exists
+            existing_tables = {t for t in inspector.get_table_names()}
+            if "user_settings" not in existing_tables:
+                UserSetting.__table__.create(db.engine)
             db.session.commit()
         except Exception:
             pass  # Fresh database — columns already exist

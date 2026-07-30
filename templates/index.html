@@ -415,6 +415,100 @@
       font-weight: 800; font-size: 0.72rem; letter-spacing: 0.05em;
     }
 
+    /* AI COPILOT */
+    .copilot-wrap { display: grid; place-items: center; padding: 24px 0; }
+    .copilot-chat-card {
+      width: 100%; max-width: 680px;
+      background: var(--bg-elev); border: 1px solid var(--border);
+      border-radius: var(--radius-lg); padding: 28px; box-shadow: var(--shadow-md);
+    }
+    .copilot-input-row {
+      display: flex; gap: 10px; align-items: center;
+    }
+    .copilot-text-input {
+      flex: 1;
+      padding: 12px 16px;
+      border: 1px solid var(--border);
+      border-radius: var(--radius-md);
+      background: var(--bg-sunken); color: var(--text);
+      font-size: 0.95rem; font-family: inherit;
+      outline: none; transition: border-color .2s ease;
+    }
+    .copilot-text-input:focus {
+      border-color: var(--accent); box-shadow: 0 0 0 3px rgba(45,191,110,.15);
+    }
+    .copilot-send-btn {
+      padding: 12px 24px; white-space: nowrap;
+    }
+    .copilot-status {
+      margin-top: 16px; padding: 10px 14px;
+      border-radius: var(--radius-md); font-size: 0.85rem;
+      display: flex; align-items: center; gap: 8px;
+    }
+    .copilot-status.is-loading {
+      background: var(--bg-sunken); color: var(--text-mute);
+    }
+    .copilot-status.is-done {
+      background: rgba(45,191,110,.10); color: var(--accent);
+      border: 1px solid rgba(45,191,110,.3);
+    }
+    .copilot-status.is-error {
+      background: rgba(244,63,94,.10); color: var(--danger);
+      border: 1px solid rgba(244,63,94,.3);
+    }
+    .copilot-spin {
+      display: inline-block; animation: copilot-pulse 1s ease-in-out infinite;
+    }
+    @keyframes copilot-pulse {
+      0%,100% { opacity: 1; }
+      50% { opacity: 0.3; }
+    }
+    .copilot-result {
+      margin-top: 16px; padding: 16px;
+      background: var(--bg-sunken); border: 1px solid var(--border);
+      border-radius: var(--radius-md); font-size: 0.88rem;
+    }
+    .copilot-fallback-banner {
+      padding: 8px 12px; margin-bottom: 12px;
+      background: rgba(245,158,11,.12); border: 1px solid rgba(245,158,11,.25);
+      border-radius: var(--radius-md); color: var(--warn);
+      font-size: 0.82rem;
+    }
+    .copilot-section {
+      margin-bottom: 12px;
+    }
+    .copilot-section:last-child {
+      margin-bottom: 0;
+    }
+    .copilot-section strong {
+      display: block; margin-bottom: 4px; color: var(--text);
+    }
+    .copilot-section ul {
+      margin: 0; padding-left: 20px; color: var(--text-dim);
+    }
+    .copilot-section li {
+      margin-bottom: 3px;
+    }
+    .copilot-empty {
+      color: var(--text-mute); font-style: italic; text-align: center;
+      padding: 12px 0;
+    }
+    .copilot-nokey-banner {
+      display: flex; justify-content: center; padding: 0 0 16px 0;
+    }
+    .copilot-nokey-card {
+      display: flex; align-items: flex-start; gap: 14px;
+      max-width: 680px; width: 100%;
+      padding: 16px 20px;
+      background: rgba(245,158,11,.10);
+      border: 1px solid rgba(245,158,11,.25);
+      border-radius: var(--radius-md);
+      font-size: 0.85rem; color: var(--text-dim);
+    }
+    .copilot-nokey-card strong { display: block; margin-bottom: 4px; color: var(--warn); }
+    .copilot-nokey-card p { margin: 2px 0; }
+    .copilot-nokey-icon { font-size: 1.5rem; flex-shrink: 0; margin-top: 2px; }
+
     /* SETTINGS cards */
     .settings-grid { display: grid; grid-template-columns: repeat(3, minmax(0,1fr)); gap: 16px; }
     @media (max-width: 1000px) { .settings-grid { grid-template-columns: 1fr; } }
@@ -686,6 +780,9 @@
         <a href="#overview"   class="tab-btn nav-link is-active" data-target="overview" data-tab="overview">
           <span class="nav-ico">◉</span> Overview
         </a>
+        <a href="#copilot"   class="tab-btn nav-link" data-target="copilot" data-tab="copilot">
+          <span class="nav-ico">🤖</span> Copilot
+        </a>
         <a href="#canibuy"   class="tab-btn nav-link" data-target="canibuy" data-tab="canibuy">
           <span class="nav-ico">?</span> Can I Buy?
         </a>
@@ -783,6 +880,49 @@
             <li>• Sales tax rate: <strong id="sumTax">—</strong></li>
             <li>• Paycheck assumption: <strong id="sumPaycheck">—</strong></li>
           </ul>
+        </div>
+      </div>
+    </section>
+
+    <!-- AI COPILOT ------------------------------------------------------- -->
+    <section id="copilot" class="page tab-content" aria-labelledby="copilot-title">
+      <header class="page-head">
+        <div>
+          <h1 id="copilot-title">AI Copilot</h1>
+          <div class="subtitle">Type or speak your plans — the AI will parse and execute them.</div>
+        </div>
+      </header>
+
+      <!-- No-key banner (hidden when key is configured) -->
+      <div id="copilotNoKeyBanner" class="copilot-nokey-banner" style="display:none;">
+        <div class="copilot-nokey-card">
+          <span class="copilot-nokey-icon">🔑</span>
+          <div>
+            <strong>No Groq API key configured</strong>
+            <p>The AI Copilot works best with a free Groq API key. Get one at
+            <a href="https://console.groq.com/keys" target="_blank" rel="noopener" style="color:var(--accent);font-weight:600;">console.groq.com/keys</a>,
+            then save it in <a href="#settings" onclick="document.querySelector('[data-tab=settings]').click()" style="color:var(--accent);font-weight:600;">Settings → AI Copilot BYOK</a>.</p>
+            <p style="font-size:0.75rem;color:var(--text-mute);margin-top:4px;">Without a key, the Copilot uses basic keyword matching (regex fallback).</p>
+          </div>
+        </div>
+      </div>
+
+      <div class="copilot-wrap">
+        <div class="copilot-chat-card">
+          <div class="copilot-input-row">
+            <input
+              type="text"
+              id="copilotInput"
+              class="copilot-text-input"
+              placeholder="e.g. Cook chicken rice bowl and fajitas. Add Netflix $22.99/mo. I need dish soap and paper towels."
+              autocomplete="off"
+            />
+            <button id="copilotSendBtn" class="btn is-primary copilot-send-btn" type="button">
+              Send
+            </button>
+          </div>
+          <div class="copilot-status" id="copilotStatus" style="display:none;"></div>
+          <div class="copilot-result" id="copilotResult" style="display:none;"></div>
         </div>
       </div>
     </section>
@@ -1074,6 +1214,28 @@
       </header>
 
       <div class="settings-grid">
+        <!-- Groq API Key -->
+        <div class="panel">
+          <h2>🤖 AI Copilot BYOK</h2>
+          <div class="panel-sub">
+            Bring your own free Groq API key to unlock the AI Copilot.
+            <a href="https://console.groq.com/keys" target="_blank" rel="noopener" style="color:var(--accent);text-decoration:underline;">
+              Get a free key →
+            </a>
+          </div>
+          <div id="groqKeyStatus" style="font-size:0.82rem;color:var(--text-mute);margin-bottom:10px;padding:6px 10px;background:var(--bg-sunken);border-radius:6px;">
+            Checking key status…
+          </div>
+          <div class="field">
+            <label for="groqApiKey">Groq API Key</label>
+            <input type="password" id="groqApiKey" placeholder="gsk_..." autocomplete="off" />
+          </div>
+          <div class="row row-end" style="gap:8px;">
+            <button class="btn is-ghost" id="groqTestBtn" type="button">Test &amp; Save</button>
+            <button class="btn is-ghost is-danger" id="groqRemoveBtn" type="button" style="display:none;">Remove Key</button>
+          </div>
+        </div>
+
         <div class="panel">
           <h2>Location &amp; Tax</h2>
           <div class="panel-sub">Set your shopping region and local rates.</div>
@@ -1363,6 +1525,122 @@
           ingC.appendChild(chip);
         });
       }
+    }
+
+    /* ================================================================
+       CAN I BUY FORM
+    ================================================================ */
+    /* ================================================================
+       AI COPILOT
+    ================================================================ */
+    function initCopilot() {
+      var input = document.getElementById('copilotInput');
+      var btn = document.getElementById('copilotSendBtn');
+      var status = document.getElementById('copilotStatus');
+      var result = document.getElementById('copilotResult');
+      if (!input || !btn) return;
+
+      function send() {
+        var text = input.value.trim();
+        if (!text) return;
+        input.disabled = true;
+        btn.disabled = true;
+        status.style.display = 'block';
+        status.innerHTML = '<span class="copilot-spin">⏳</span> Parsing your request…';
+        status.className = 'copilot-status is-loading';
+        result.style.display = 'none';
+
+        api('POST', '/api/copilot/parse', { text: text })
+          .then(function (resp) {
+            input.disabled = false;
+            btn.disabled = false;
+            if (!resp.ok) {
+              status.style.display = 'block';
+              status.className = 'copilot-status is-error';
+              status.innerHTML = '❌ ' + (resp.data && resp.data.error ? resp.data.error : 'Unknown error');
+              return;
+            }
+            input.value = '';
+            var d = resp.data || {};
+            var a = d.actions_taken || {};
+            var fb = d._fallback;
+
+            // Build summary HTML
+            var html = '';
+            var hasActions = false;
+
+            if (fb) {
+              html += '<div class="copilot-fallback-banner">⚠️ Running in offline mode (no LLM configured). Results are keyword-based.</div>';
+            }
+
+            if ((a.bills_added || []).length) {
+              hasActions = true;
+              html += '<div class="copilot-section"><strong>📋 Bills Added</strong><ul>';
+              a.bills_added.forEach(function (b) {
+                html += '<li>' + escapeHtml(b.name) + ' — $' + b.amount.toFixed(2) + '/mo</li>';
+              });
+              html += '</ul></div>';
+            }
+            if ((a.bills_removed || []).length) {
+              hasActions = true;
+              html += '<div class="copilot-section"><strong>🗑️ Bills Removed</strong><ul>';
+              a.bills_removed.forEach(function (b) {
+                html += '<li>' + escapeHtml(b.name) + ' — $' + b.amount.toFixed(2) + '/mo</li>';
+              });
+              html += '</ul></div>';
+            }
+            if ((a.expenses_logged || []).length) {
+              hasActions = true;
+              html += '<div class="copilot-section"><strong>💳 Expenses Logged</strong><ul>';
+              a.expenses_logged.forEach(function (e) {
+                html += '<li>' + escapeHtml(e.description) + ' — $' + e.amount.toFixed(2) + '</li>';
+              });
+              html += '</ul></div>';
+            }
+            if ((a.grocery_items_added || []).length) {
+              hasActions = true;
+              html += '<div class="copilot-section"><strong>🛒 Grocery Additions</strong><ul>';
+              a.grocery_items_added.forEach(function (g) {
+                html += '<li>' + escapeHtml(g) + '</li>';
+              });
+              html += '</ul></div>';
+            }
+            if ((a.recipes_suggested || []).length) {
+              hasActions = true;
+              html += '<div class="copilot-section"><strong>🍳 Recipes Suggested</strong> <span style="color:var(--text-mute);font-size:0.75rem;">(go to Recipes tab to add)</span><ul>';
+              a.recipes_suggested.forEach(function (r) {
+                html += '<li>' + escapeHtml(r.title || '') + ' (' + (r.action || 'add') + ')</li>';
+              });
+              html += '</ul></div>';
+            }
+
+            if (!hasActions) {
+              html += '<div class="copilot-empty">🤔 I didn\'t detect any actions in your message. Try something like "Add Netflix $22.99/mo" or "I need dish soap and paper towels".</div>';
+            }
+
+            status.style.display = 'block';
+            status.className = 'copilot-status is-done';
+            status.innerHTML = '✅ Processed!';
+
+            result.style.display = 'block';
+            result.innerHTML = html;
+
+            // Refresh overview to reflect new bills/expenses
+            if (hasActions && typeof refreshOverview === 'function') refreshOverview();
+          })
+          .catch(function () {
+            input.disabled = false;
+            btn.disabled = false;
+            status.style.display = 'block';
+            status.className = 'copilot-status is-error';
+            status.innerHTML = '❌ Network error — try again.';
+          });
+      }
+
+      btn.addEventListener('click', send);
+      input.addEventListener('keypress', function (e) {
+        if (e.key === 'Enter') send();
+      });
     }
 
     /* ================================================================
@@ -1722,6 +2000,62 @@
     function initSettings() {
       var $ = function (id) { return document.getElementById(id); };
 
+      // ---- Groq API Key (BYOK) ----
+      (async function initGroqKeyPanel() {
+        var statusEl = $('groqKeyStatus');
+        var inputEl = $('groqApiKey');
+        var testBtn = $('groqTestBtn');
+        var removeBtn = $('groqRemoveBtn');
+        var copilotBanner = $('copilotNoKeyBanner');
+
+        // Load current status
+        var statusResp = await api('GET', '/api/settings/groq-key');
+        if (statusResp.ok && statusResp.data.configured) {
+          if (statusEl) statusEl.innerHTML = '✅ Key configured: <code>' + (statusResp.data.key_preview || '****') + '</code>';
+          if (inputEl) inputEl.placeholder = 'Key saved — enter new key to replace';
+          if (removeBtn) removeBtn.style.display = '';
+          if (copilotBanner) copilotBanner.style.display = 'none';
+        } else {
+          if (statusEl) statusEl.innerHTML = '⚠️ No key configured. <a href="https://console.groq.com/keys" target="_blank" rel="noopener" style="color:var(--accent);">Get a free key →</a>';
+          if (removeBtn) removeBtn.style.display = 'none';
+          if (copilotBanner) copilotBanner.style.display = '';
+        }
+
+        if (testBtn) {
+          testBtn.addEventListener('click', async function () {
+            var key = (inputEl && inputEl.value || '').trim();
+            if (!key) { flash('Enter a Groq API key first', 'error'); return; }
+            testBtn.disabled = true;
+            testBtn.textContent = 'Testing…';
+            var resp = await api('POST', '/api/settings/groq-key', { api_key: key });
+            testBtn.disabled = false;
+            testBtn.textContent = 'Test & Save';
+            if (resp.ok) {
+              flash(resp.data.message || 'Key saved!', 'success');
+              if (statusEl) statusEl.innerHTML = '✅ Key configured: <code>' + (resp.data.key_preview || '****') + '</code>';
+              if (inputEl) { inputEl.value = ''; inputEl.placeholder = 'Key saved — enter new key to replace'; }
+              if (removeBtn) removeBtn.style.display = '';
+              if (copilotBanner) copilotBanner.style.display = 'none';
+            } else {
+              flash(resp.data.error || 'Validation failed', 'error');
+            }
+          });
+        }
+
+        if (removeBtn) {
+          removeBtn.addEventListener('click', async function () {
+            var resp = await api('DELETE', '/api/settings/groq-key');
+            if (resp.ok) {
+              flash('Key removed', 'success');
+              if (statusEl) statusEl.innerHTML = '⚠️ No key configured. <a href="https://console.groq.com/keys" target="_blank" rel="noopener" style="color:var(--accent);">Get a free key →</a>';
+              if (inputEl) { inputEl.value = ''; inputEl.placeholder = 'gsk_...'; }
+              if (removeBtn) removeBtn.style.display = 'none';
+              if (copilotBanner) copilotBanner.style.display = '';
+            }
+          });
+        }
+      })();
+
       var locBtn = $('updateLocationBtn');
       if (locBtn) {
         locBtn.addEventListener('click', async function () {
@@ -1789,6 +2123,7 @@
     function init() {
       initTabs();
       initTheme();
+      initCopilot();
       initCanIBuy();
       initSettings();
       refreshOverview();

@@ -5,6 +5,31 @@ lint-html:  ## Lint templates/index.html for structural HTML bugs
 .PHONY: lint
 lint: lint-html  ## Run all linters
 
+# ---------------------------------------------------------------------------
+# Tests — every suite runs in one command.  All Python suites are isolated
+# to an in-memory SQLite DB (RUNG_DB_PATH=:memory:) so they can NEVER touch
+# the real rung_finance.db or .env (regression-guarded by
+# tests/test_test_isolation.py).
+# ---------------------------------------------------------------------------
+.PHONY: test
+test: test-py test-js  ## Run the full test suite (Python + JS)
+
+.PHONY: test-py
+test-py:  ## Run all Python test suites (.venv/bin/python)
+	@set -e; for t in tests/test_*.py; do \
+		echo "== $$t =="; \
+		.venv/bin/python "$$t"; \
+		echo; \
+	done
+
+.PHONY: test-js
+test-js:  ## Run all Node.js test suites
+	@set -e; for t in tests/test_*.js; do \
+		echo "== $$t =="; \
+		node "$$t"; \
+		echo; \
+	done
+
 .PHONY: ingest
 ingest:  ## Run Kroger ingest against scripts/ingest_store_prices.config.example.json
 	python3 scripts/ingest_store_prices.py \

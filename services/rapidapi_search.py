@@ -228,23 +228,30 @@ def _save_to_cache(app, keyword: str, product: Dict[str, Any]) -> None:
         db.session.commit()
 
 
-def _fallback_to_local_cache(app, keyword: str) -> Optional[Dict[str, Any]]:
+def _fallback_to_local_cache(
+    app,
+    keyword: str,
+    store_name_hint: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
     """Fall back to the ``StorePriceCache`` table when RapidAPI is unavailable.
 
-    Returns the cheapest cached product for *keyword*, or ``None``.
+    Returns the cheapest cached product for *keyword*, optionally preferring
+    rows whose store name matches *store_name_hint*.
     """
     from app import StorePriceCache
 
     with app.app_context():
         kw = keyword.lower().strip()
-        rows = (
-            StorePriceCache.query.filter(
-                StorePriceCache.item_keyword == kw,
-                StorePriceCache.price > 0,
-            )
-            .order_by(StorePriceCache.price.asc())
-            .all()
+        query = StorePriceCache.query.filter(
+            StorePriceCache.item_keyword == kw,
+            StorePriceCache.price > 0,
         )
+        if store_name_hint:
+            query = query.filter(
+                StorePriceCache.store_name.ilike(f"%{store_name_hint}%")
+            )
+
+        rows = query.order_by(StorePriceCache.price.asc()).all()
         if rows:
             best = rows[0]
             return {
@@ -254,6 +261,26 @@ def _fallback_to_local_cache(app, keyword: str) -> Optional[Dict[str, Any]]:
                 "product_url": "",
                 "source": "store_cache_fallback",
             }
+
+        if store_name_hint:
+            rows = (
+                StorePriceCache.query.filter(
+                    StorePriceCache.item_keyword == kw,
+                    StorePriceCache.price > 0,
+                )
+                .order_by(StorePriceCache.price.asc())
+                .all()
+            )
+            if rows:
+                best = rows[0]
+                return {
+                    "title": best.product_title,
+                    "price": best.price,
+                    "store_name": best.store_name,
+                    "product_url": "",
+                    "source": "store_cache_fallback",
+                }
+
         return None
 
 
@@ -400,7 +427,7 @@ def search_local_product(
             LOGGER.warning("RapidAPI parse error for '%s': %s", kw, exc)
 
     # --- Stage 3: StorePriceCache fallback ---
-    fallback = _fallback_to_local_cache(app, kw)
+    fallback = _fallback_to_local_cache(app, kw, store_name_hint=store_name)
     if fallback:
         LOGGER.debug("StorePriceCache fallback for '%s': %s", kw, fallback["title"])
         return fallback

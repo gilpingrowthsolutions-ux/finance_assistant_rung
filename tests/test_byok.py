@@ -6,6 +6,11 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
+# Isolate tests from the user's real database: use an in-memory SQLite DB
+# so db.drop_all()/create_all() can never wipe rung_finance.db (which
+# previously destroyed the saved Groq API key on every test run).
+os.environ["RUNG_DB_PATH"] = ":memory:"
+
 from app import app, db, UserSetting
 
 client = app.test_client()
@@ -15,11 +20,32 @@ _fail = 0
 
 
 def _setup():
-    """Reset database to a clean state."""
+    """Reset database to a clean state (and hide any env-var key)."""
+    # app.py runs load_dotenv() at import, so GROQ_API_KEY from .env can
+    # leak into os.environ and make the DB-only tests see a "configured"
+    # key.  Remove it so these tests exercise the DB state in isolation.
+    os.environ.pop("GROQ_API_KEY", None)
     with app.app_context():
         db.drop_all()
         db.create_all()
         db.session.commit()
+
+
+def _stub_validation():
+    """Return a context manager that stubs live Groq validation (no network)."""
+    import contextlib
+    import app as appmod
+
+    @contextlib.contextmanager
+    def _cm():
+        orig = appmod._validate_groq_key
+        appmod._validate_groq_key = lambda k: (None, "no network in test")
+        try:
+            yield
+        finally:
+            appmod._validate_groq_key = orig
+
+    return _cm()
 
 
 def _assert_eq(a, b, msg=""):
@@ -87,34 +113,22 @@ def test_post_missing_body():
 def test_post_save_key():
     """Save a key with valid format.
 
-    On a machine with internet access, Groq will reject this fake key
-    with HTTP 401 (correct behavior). On an isolated machine, the
-    network call fails and the key is saved with a warning.
-    Both are valid outcomes for this test."""
+    The endpoint saves the key first, then validates best-effort; the
+    validation call is stubbed so this test is hermetic (no network).
+    """
     _setup()
-    resp = client.post(
-        "/api/settings/groq-key",
-        json={"api_key": "gsk_test1234567890abcdef"},
-    )
+    with _stub_validation():
+        resp = client.post(
+            "/api/settings/groq-key",
+            json={"api_key": "gsk_test1234567890abcdef"},
+        )
     d = resp.get_json() or {}
-
-    # Accept either:
-    #   200 = network down, key saved with warning
-    #   401 = Groq rejected the fake key (correct behavior)
-    if resp.status_code == 200:
-        _assert_eq(d.get("configured"), True, "key marked as configured")
-        with app.app_context():
-            row = UserSetting.query.get("groq_api_key")
-            _assert_truthy(row is not None, "key persisted to DB")
-            _assert_eq(row.value, "gsk_test1234567890abcdef")
-    elif resp.status_code == 401:
-        _assert_truthy("Invalid" in d.get("error", ""), "401 rejects invalid key")
-        # Key should NOT be saved when Groq explicitly rejects it
-        with app.app_context():
-            row = UserSetting.query.get("groq_api_key")
-            _assert_truthy(row is None or row.value == "", "key not saved on rejection")
-    else:
-        _assert_eq(resp.status_code, 200, f"unexpected status {resp.status_code}")
+    _assert_eq(resp.status_code, 200, "save-first returns 200")
+    _assert_eq(d.get("configured"), True, "key marked as configured")
+    with app.app_context():
+        row = UserSetting.query.get("groq_api_key")
+        _assert_truthy(row is not None, "key persisted to DB")
+        _assert_eq(row.value, "gsk_test1234567890abcdef")
 
 
 # ---------------------------------------------------------------------------
@@ -128,7 +142,8 @@ def test_get_with_key():
         db.session.add(UserSetting(key="groq_api_key", value="gsk_abcdefgh12345678"))
         db.session.commit()
 
-    resp = client.get("/api/settings/groq-key")
+    with _stub_validation():
+        resp = client.get("/api/settings/groq-key")
     d = resp.get_json() or {}
     _assert_eq(d.get("configured"), True, "configured is True")
     preview = d.get("key_preview", "")

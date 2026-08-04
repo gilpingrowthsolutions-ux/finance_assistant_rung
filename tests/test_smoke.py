@@ -25,6 +25,10 @@ import sys
 os.environ['RECIPE_CACHE_DISABLED'] = '1'
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+# Isolate tests from the user's real database: use an in-memory SQLite DB
+# so these tests can never wipe the user's real rung_finance.db rows.
+os.environ['RUNG_DB_PATH'] = ':memory:'
+
 from app import (
     app, db, Account, Recipe, RecipeIngredient, BrandPreference,
     StorePriceCache, PantryItem,
@@ -63,6 +67,7 @@ def check(condition, label, expected=None, actual=None):
 # SETUP — clear state, seed deterministic scenario
 # ===========================================================================
 with app.app_context():
+    db.create_all()  # in-memory DB starts empty — build the schema first
     # Wipe all relevant tables
     BrandPreference.query.delete()
     StorePriceCache.query.delete()
@@ -197,7 +202,7 @@ check(all_have_pkg, 'every cart item has a non-empty package_size',
 # SECTION 3: price_source per item
 # ===========================================================================
 print('\n3. price_source per cart item')
-valid_sources = {'cache', 'api', 'estimated', 'rapid_api', 'rapid_cache', 'kroger_cache', 'kroger_api'}
+valid_sources = {'cache', 'api', 'estimated', 'rapid_api', 'rapid_cache', 'kroger_cache', 'kroger_api', 'store_cache_fallback'}
 all_valid = True
 for item in cart:
     ps = item.get('price_source', '')

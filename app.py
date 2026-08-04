@@ -1,4 +1,5 @@
 import os
+import re
 import urllib.parse
 from datetime import datetime, timedelta
 
@@ -15,10 +16,14 @@ load_dotenv()
 from services.store_api import resolve_terms, pick_best
 from services.kroger_api import find_nearest_kroger
 from services.rapidapi_search import search_local_product, rapid_result_to_product_dict
-from services.copilot_service import parse_copilot_prompt
+from services.copilot_service import parse_copilot_prompt, chat_copilot_prompt
 
 app = Flask(__name__)
-db_path = os.path.join(os.path.dirname(__file__), "rung_finance.db")
+# The SQLite file is overridable via RUNG_DB_PATH so the test suite can
+# run against an isolated in-memory DB instead of wiping the user's real
+# rung_finance.db (which previously destroyed the saved Groq API key and
+# other user data on every test run).
+db_path = os.environ.get("RUNG_DB_PATH") or os.path.join(os.path.dirname(__file__), "rung_finance.db")
 app.config["SQLALCHEMY_DATABASE_URI"] = f"sqlite:///{db_path}"
 app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
 db = SQLAlchemy(app)
@@ -162,9 +167,133 @@ def set_setting(key: str, value: str) -> None:
     db.session.commit()
 
 
+class MealPlanItem(db.Model):
+    """A recipe selected for the current pay period (the active meal plan).
+
+    This is the server-side source of truth for the Grocery tab's
+    "Active Pay-Period Recipes" expander. The Copilot writes matched
+    recipes here (source='copilot'), auto-fill recommendations
+    (source='autofill'), and the user's manual checkbox selection can
+    replace it entirely (source='user').
+    """
+    __tablename__ = 'meal_plan'
+    id = db.Column(db.Integer, primary_key=True)
+    recipe_id = db.Column(db.Integer, db.ForeignKey('recipe.id'), nullable=False, unique=True)
+    source = db.Column(db.String(20), default='user')
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+
 # =============================================================================
 # UNIT CONVERSION & HELPER ENGINES
 # =============================================================================
+
+
+def _coerce_amount(value):
+    """Coerce a money value to float, tolerating '$', commas, and strings.
+
+    Handles ``60``, ``"$60"``, ``"60.00"``, ``"60/mo"``, ``"60 per month"``.
+    Returns ``0.0`` when unparseable (callers treat ``<= 0`` as no-op).
+    """
+    if value is None or isinstance(value, bool):
+        return 0.0
+    if isinstance(value, (int, float)):
+        return float(value)
+    s = str(value).strip()
+    # Strip monthly/period suffixes: "60/mo", "60 per month", "$60 monthly"
+    s = re.sub(r'(?i)(/mo|per\s+month|monthly|/month|/yr|per\s+year|annually).*$', '', s).strip()
+    s = s.replace('$', '').replace(',', '')
+    try:
+        return float(s)
+    except ValueError:
+        return 0.0
+
+
+def _serialize_recipe(r):
+    """Serialize a Recipe row into the standard API payload shape."""
+    return {
+        "id": r.id,
+        "title": r.title,
+        "servings": r.servings,
+        "estimated_cost_per_serving": r.estimated_cost_per_serving,
+        "source_url": r.source_url or "",
+        "instructions": r.instructions,
+        "ingredients": [{
+            "id": i.id,
+            "product_name": i.product_name,
+            "clean_keyword": i.clean_keyword,
+            "quantity": i.quantity,
+            "unit": i.unit,
+        } for i in r.ingredients],
+    }
+
+
+def _match_recipe_by_title(title):
+    """Fuzzy-match a natural-language recipe title against the local DB.
+
+    Token overlap scoring: "chicken rice bowl" matches "Chicken Rice Bowl"
+    (1.0); "flank steak fajitas" does NOT match "Chicken Rice Bowl" (0.0).
+    Returns the best ``Recipe`` with score >= 0.5, else ``None``.
+    """
+    t = (title or "").strip().lower()
+    if not t:
+        return None
+    t_tokens = set(re.sub(r'[^a-z0-9 ]', '', t).split())
+    if not t_tokens:
+        return None
+    best, best_score = None, 0.0
+    for r in Recipe.query.all():
+        rt_tokens = set(re.sub(r'[^a-z0-9 ]', '', (r.title or '').lower()).split())
+        if not rt_tokens:
+            continue
+        overlap = len(t_tokens & rt_tokens)
+        if overlap == 0:
+            continue
+        score = overlap / max(1, len(rt_tokens))
+        if score > best_score:
+            best_score, best = score, r
+    if best and best_score >= 0.5:
+        return best
+    return None
+
+
+def _recommend_recipes(exclude_ids, limit=14, seed_ids=None):
+    """Recommend recipes the user will likely like.
+
+    Scores every candidate by ingredient overlap with the already-selected
+    meal-plan recipes (*seed_ids*), the user's pantry and brand preferences,
+    and cheaper per-serving costs. Excludes *exclude_ids* (already in plan).
+    Returns up to *limit* Recipe rows, best-first.
+    """
+    seed_kws = set()
+    if seed_ids:
+        for r in Recipe.query.filter(Recipe.id.in_(seed_ids)).all():
+            for ing in r.ingredients:
+                seed_kws.add(ing.clean_keyword.lower())
+
+    pantry_kws = {i.clean_keyword.lower() for i in PantryItem.query.all()}
+    brand_prefs = {b.clean_keyword.lower(): b for b in BrandPreference.query.all()}
+
+    q = Recipe.query
+    if exclude_ids:
+        q = q.filter(~Recipe.id.in_(exclude_ids))
+    scored = []
+    for r in q.all():
+        kw = {i.clean_keyword.lower() for i in r.ingredients}
+        overlap = len(kw & seed_kws) if seed_kws else 0
+        pantry_overlap = len(kw & pantry_kws)
+        brand_match = sum(1 for k in kw if k in brand_prefs)
+        cost = r.estimated_cost_per_serving or 5.0
+        score = (overlap * 3.0) + (pantry_overlap * 2.5) + (brand_match * 1.5) - (cost * 0.25)
+        scored.append((score, r))
+    scored.sort(key=lambda x: x[0], reverse=True)
+    return [r for _, r in scored[:limit]]
+
+
+# =============================================================================
+# UNIT CONVERSION & HELPER ENGINES
+# =============================================================================
+
+
 UNIT_TO_OZ = {
     'oz': 1.0, 'ounce': 1.0, 'ounces': 1.0,
     'lb': 16.0, 'lbs': 16.0, 'pound': 16.0, 'pounds': 16.0,
@@ -223,7 +352,9 @@ def compute_liquidity_metrics(account):
             "city_state": getattr(account, 'city_state', 'Versailles, MO') or "Versailles, MO",
             "sales_tax_rate": account.sales_tax_rate or 0.0825,
             "sales_tax_pct": round((account.sales_tax_rate or 0.0825) * 100, 3),
-            "grocery_tax_rate": account.grocery_tax_rate or 0.0125
+            "grocery_tax_rate": account.grocery_tax_rate or 0.0125,
+            "store_name": account.kroger_store_name or "",
+            "location_id": account.kroger_location_id or ""
         }
     }
 
@@ -740,6 +871,94 @@ def generate_recipes():
         "total_meals": len(recipes)
     })
 
+# ----- ACTIVE PAY-PERIOD MEAL PLAN -------------------------------------------
+
+MEAL_PLAN_MAX = 14  # cap: Active Pay-Period Recipes expander shows at most 14
+
+
+def _serialize_meal_plan():
+    """Serialize the persisted meal plan (ordered by insertion)."""
+    items = MealPlanItem.query.order_by(MealPlanItem.created_at.asc()).all()
+    ids = [m.recipe_id for m in items]
+    recipes = []
+    by_id = {r.id: r for r in Recipe.query.filter(Recipe.id.in_(ids)).all()} if ids else {}
+    for rid in ids:
+        r = by_id.get(rid)
+        if r:
+            recipes.append(_serialize_recipe(r))
+    return {
+        "recipe_ids": ids,
+        "recipes": recipes,
+        "count": len(ids),
+        "max": MEAL_PLAN_MAX,
+    }
+
+
+@app.route("/api/meal-plan", methods=["GET", "POST"])
+def meal_plan():
+    """Persisted active pay-period meal plan (server-side source of truth).
+
+    GET
+        Returns ``{recipe_ids, recipes, count, max}`` where each recipe
+        carries full ingredient data for the Grocery tab expander.
+
+    POST
+        Body supports:
+          ``{"recipe_ids": [1, 2, 3]}``  — replace the whole plan (capped)
+          ``{"add": [4], "remove": [5]}`` — incremental updates
+
+    Returns the updated plan with the same shape as GET.
+    """
+    if request.method == "GET":
+        return jsonify(_serialize_meal_plan())
+
+    data = request.json or {}
+    if data.get("recipe_ids") is not None:
+        # Replace semantics: wipe existing plan, insert new IDs in order.
+        ids = data["recipe_ids"]
+        if not isinstance(ids, list):
+            return jsonify({"error": "recipe_ids must be a list"}), 400
+        MealPlanItem.query.delete()
+        for rid in ids[:MEAL_PLAN_MAX]:
+            try:
+                rid = int(rid)
+            except (ValueError, TypeError):
+                continue
+            if MealPlanItem.query.filter_by(recipe_id=rid).first():
+                continue
+            db.session.add(MealPlanItem(recipe_id=rid, source="user"))
+        db.session.commit()
+        return jsonify(_serialize_meal_plan())
+
+    add_ids = data.get("add") or []
+    remove_ids = data.get("remove") or []
+    for rid in remove_ids:
+        try:
+            rid = int(rid)
+        except (ValueError, TypeError):
+            continue
+        MealPlanItem.query.filter_by(recipe_id=rid).delete()
+    for rid in add_ids:
+        try:
+            rid = int(rid)
+        except (ValueError, TypeError):
+            continue
+        if MealPlanItem.query.filter_by(recipe_id=rid).first():
+            continue
+        if MealPlanItem.query.count() >= MEAL_PLAN_MAX:
+            break
+        db.session.add(MealPlanItem(recipe_id=rid, source="user"))
+    db.session.commit()
+    return jsonify(_serialize_meal_plan())
+
+
+@app.route("/api/meal-plan/clear", methods=["POST"])
+def clear_meal_plan():
+    """Empty the active meal plan (start a new pay period)."""
+    MealPlanItem.query.delete()
+    db.session.commit()
+    return jsonify(_serialize_meal_plan())
+
 # ----- TRANSACTIONS CRUD -----------------------------------------------------
 
 @app.route("/api/transactions", methods=["GET", "POST"])
@@ -828,6 +1047,87 @@ def delete_bill(bid):
     db.session.commit()
     return jsonify({"message": f"Bill {bid} deleted"})
 
+
+def _validate_groq_key(api_key: str):
+    """Best-effort live validation of a Groq key against the models endpoint.
+
+    Returns
+    -------
+    (valid, note)
+        ``valid`` is True/False when Groq answers, None when the check
+        couldn't complete (network issue/timeout).  ``note`` is a
+        human-readable string for the Settings panel.
+    """
+    try:
+        import requests as _req
+        resp = _req.get(
+            "https://api.groq.com/openai/v1/models",
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            },
+            timeout=5,
+        )
+        if resp.status_code == 200:
+            return True, "Key validated!"
+        if resp.status_code == 401:
+            return False, "Groq rejected this key — check console.groq.com/keys"
+        if resp.status_code == 429:
+            return None, "Groq rate-limited — validation will retry on next use."
+        return None, f"Groq returned HTTP {resp.status_code}."
+    except Exception as exc:
+        return None, f"Could not reach Groq (network issue: {exc})."
+
+
+def _write_env_var(key: str, value: str) -> None:
+    """Write, update, or remove a single variable in the .env file.
+
+    If the key already exists in .env, its value is replaced in-place.
+    If the key doesn't exist, it's appended to the end of the file.
+    If the file doesn't exist, it's created.
+    If ``value`` is empty, the key's line is removed entirely (used by
+    the DELETE endpoint so a removed Groq key doesn't linger as an
+    env-var fallback and keep reporting "configured").
+
+    This is used so the Groq API key survives test suite DB wipes
+    (which destroy the ``user_settings`` table).
+    """
+    # Never write to the real .env from tests.  test_byok.py POSTs a fake
+    # placeholder key through the real endpoint, which would otherwise
+    # clobber the user's actual GROQ_API_KEY with "gsk_test123...".
+    if getattr(app, "testing", False):
+        return
+    if not key:
+        return
+    env_path = os.path.join(os.path.dirname(__file__), ".env")
+    try:
+        if os.path.exists(env_path):
+            with open(env_path, "r+") as f:
+                lines = f.readlines()
+                new_lines = []
+                for line in lines:
+                    if line.strip().startswith(f"{key}="):
+                        if value:
+                            new_lines.append(f'{key}="{value}"\n')
+                        # empty value → drop the line entirely
+                        continue
+                    new_lines.append(line)
+                if value and not any(
+                    l.strip().startswith(f"{key}=") for l in new_lines
+                ):
+                    new_lines.append(f'{key}="{value}"\n')
+                f.seek(0)
+                f.writelines(new_lines)
+                f.truncate()
+        else:
+            if value:
+                with open(env_path, "w") as f:
+                    f.write(f'{key}="{value}"\n')
+    except Exception as exc:
+        import logging
+        logging.getLogger("app").warning("Could not write %s to .env: %s", key, exc)
+
+
 @app.route("/api/settings/groq-key", methods=["GET", "POST", "DELETE"])
 def groq_key_settings():
     """Manage the user's Groq API key for AI Copilot.
@@ -837,17 +1137,33 @@ def groq_key_settings():
     DELETE — remove the saved key.
     """
     if request.method == "GET":
-        key = get_setting("groq_api_key")
+        key = get_setting("groq_api_key") or os.environ.get("GROQ_API_KEY", "")
         if key:
             preview = key[:4] + "..." + key[-4:] if len(key) > 8 else "****"
-            return jsonify({"configured": True, "key_preview": preview})
-        return jsonify({"configured": False, "key_preview": None})
+            # Live best-effort validation so the panel shows the truth
+            # ("saved but rejected") instead of claiming it works.
+            valid, note = _validate_groq_key(key)
+            return jsonify({
+                "configured": True,
+                "key_preview": preview,
+                "valid": valid,
+                "validation": note,
+            })
+        return jsonify({"configured": False, "key_preview": None, "valid": None, "validation": None})
 
     if request.method == "DELETE":
         set_setting("groq_api_key", "")
+        _write_env_var("GROQ_API_KEY", "")  # clear the .env fallback too
+        # load_dotenv() set the key in the running process at import —
+        # clear it so GET stops reporting "configured" immediately.
+        os.environ.pop("GROQ_API_KEY", None)
         return jsonify({"configured": False, "message": "Key removed"})
 
-    # POST — validate then save
+    # POST — save first, then validate.
+    # We always save the key so the user can use it even if the Groq
+    # validation endpoint is unreachable or rate-limiting.  The
+    # validation is a best-effort check that returns a warning, not a
+    # failure.
     data = request.json or {}
     api_key = (data.get("api_key") or "").strip()
     if not api_key:
@@ -855,41 +1171,25 @@ def groq_key_settings():
     if not api_key.startswith("gsk_"):
         return jsonify({"error": "Invalid key format — Groq keys start with 'gsk_'"}), 400
 
-    # Lightweight validation: call the Groq models list endpoint
-    try:
-        import requests as _req
-        resp = _req.get(
-            "https://api.groq.com/openai/v1/models",
-            headers={
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json",
-            },
-            timeout=10,
-        )
-        if resp.status_code == 200:
-            set_setting("groq_api_key", api_key)
-            preview = api_key[:4] + "..." + api_key[-4:]
-            return jsonify({
-                "configured": True,
-                "key_preview": preview,
-                "message": "✅ Key validated and saved! The AI Copilot is ready.",
-            })
-        elif resp.status_code == 401:
-            return jsonify({"error": "Invalid API key — Groq rejected it. Check console.groq.com/keys"}), 401
-        elif resp.status_code == 429:
-            return jsonify({"error": "Groq rate limit — wait a minute and try again."}), 429
-        else:
-            return jsonify({"error": f"Groq API returned HTTP {resp.status_code}. Check your key."}), 502
-    except Exception as exc:
-        # If we can't reach Groq (network issue), still save the key —
-        # the user can test later. Warn them.
-        set_setting("groq_api_key", api_key)
-        preview = api_key[:4] + "..." + api_key[-4:]
-        return jsonify({
-            "configured": True,
-            "key_preview": preview,
-            "warning": f"Key saved but could not be validated (network issue: {exc}). It will be used for the next Copilot request.",
-        })
+    # Save immediately — the key is always persisted.
+    set_setting("groq_api_key", api_key)
+
+    # Also write to .env so it survives test suite DB wipes.
+    _write_env_var("GROQ_API_KEY", api_key)
+
+    preview = api_key[:4] + "..." + api_key[-4:]
+
+    # Best-effort validation against the Groq models endpoint.
+    valid, validation_note = _validate_groq_key(api_key)
+
+    return jsonify({
+        "configured": True,
+        "key_preview": preview,
+        "message": "Key saved!",
+        "validation": validation_note,
+        "valid": valid,
+        "env_updated": True,
+    })
 
 
 # ----- ACCOUNT UPDATE (balance + ratios) ------------------------------------
@@ -1057,74 +1357,82 @@ def can_i_buy():
         "free_cash": round(free_cash, 2),
     })
 
-@app.route("/api/copilot/parse", methods=["POST"])
-def copilot_parse():
-    """AI Copilot — parse natural language and dispatch database actions.
 
-    Calls ``services.copilot_service.parse_copilot_prompt()`` to extract
-    structured actions from free-form text, then executes them:
-      - Adds/removes bill_updates
-      - Logs discretionary_events as ExpenseTransaction rows
-      - Creates GroceryItem rows for grocery_additions
+def _dispatch_parsed(parsed: dict, user_text: str = "") -> dict:
+    """Execute a parsed Copilot result against the database and report actions.
 
-    Recipe selection (selected_recipes) is returned to the frontend
-    so the user can confirm before adding to the cart — no DB writes
-    for recipes until the user clicks "Auto-Fill Cart".
+    Shared by ``/api/copilot/parse`` (single-turn) and ``/api/copilot/chat``
+    (multi-turn hybrid).  Handles both the native tool-calling path
+    (``tool_results`` — actions already persisted by ``execute_app_function``)
+    and the legacy flat-list path (``bill_updates``, ``discretionary_events``,
+    ``grocery_additions``, ``selected_recipes`` — dispatched here).
 
-    Request body
-    ------------
-    {"text": "Cook chicken rice bowl. Add Netflix $22.99/mo. I need dish soap."}
-
-    Returns (200)
-    -------------
-    {
-      "parsed": { <structured intent from LLM/regex> },
-      "actions_taken": {
-        "bills_added": [{"name": "netflix", "amount": 22.99}],
-        "bills_removed": [],
-        "expenses_logged": [...],
-        "grocery_items_added": ["dish soap"],
-        "recipes_suggested": [{"title": "chicken rice bowl", "action": "add"}]
-      },
-      "_fallback": false
-    }
+    Returns the ``actions_taken`` dict for the API response.
     """
     from sqlalchemy import or_
-
-    data = request.json or {}
-    user_text = data.get("text", "").strip()
-    if not user_text:
-        return jsonify({"error": "Provide 'text' field with your request"}), 400
-
-    # ---- Parse (pass BYOK key from DB, falls back to env var if empty) ----
-    groq_key = get_setting("groq_api_key")
-    parsed = parse_copilot_prompt(user_text, groq_api_key=groq_key)
 
     actions = {
         "bills_added": [],
         "bills_removed": [],
         "expenses_logged": [],
         "grocery_items_added": [],
-        "recipes_suggested": parsed.get("selected_recipes", []),
+        "recipes_added": [],        # recipes actually persisted to the meal plan
+        "recipes_auto_filled": [],  # recommendation engine fills the gap
+        "recipes_removed": [],
+        "recipes_suggested": [],    # requested titles with NO local match
+        "target_meals": parsed.get("target_meals"),
     }
 
     account = Account.query.first()
 
-    # ---- Dispatch bill_updates ----
+    # ---- Process tool_results (Groq native tool-calling path) ----
+    # When the LLM uses native tool calling, the actions were already
+    # persisted by execute_app_function — we just report them.
+    tool_results = parsed.get("tool_results", [])
+    for tr in tool_results:
+        tool_name = tr.get("tool", "")
+        status = tr.get("status", "")
+        data = tr.get("data") or {}
+        if status != "ok":
+            continue
+        if tool_name == "add_recurring_bill":
+            actions["bills_added"].append({
+                "name": data.get("name", ""),
+                "amount": data.get("amount", 0),
+            })
+        elif tool_name == "add_grocery_item":
+            item = data.get("item_name", "").lower()
+            if item:
+                actions["grocery_items_added"].append(item)
+        elif tool_name == "select_active_recipe":
+            act = data.get("action", "")
+            if act == "added":
+                actions["recipes_added"].append({
+                    "id": data.get("id"),
+                    "title": data.get("title", ""),
+                })
+            elif act == "removed":
+                actions["recipes_removed"].append({
+                    "id": data.get("id"),
+                    "title": data.get("title", ""),
+                })
+        elif tool_name == "log_discretionary_expense":
+            actions["expenses_logged"].append({
+                "description": data.get("description", ""),
+                "amount": data.get("amount", 0),
+            })
+        elif tool_name == "set_target_meals":
+            target_meals = data.get("target_meals", parsed.get("target_meals"))
+            actions["target_meals"] = target_meals
+
+    # ---- Dispatch bill_updates (legacy flat-list path) ----
     for bill in parsed.get("bill_updates", []):
         name = (bill.get("name") or "").strip()
-        try:
-            amount = float(bill.get("amount", 0))
-        except (ValueError, TypeError):
-            continue
+        amount = _coerce_amount(bill.get("amount", 0))
         action = bill.get("action", "add")
         if not name:
             continue
         if action == "remove":
-            # Fuzzy bidirectional match: "Hulu subscription" should match
-            # a bill named "Hulu".  Split the LLM name into words and
-            # find a bill whose name contains any non-trivial word.
-            # Skip generic stop words to avoid false matches.
             _STOP = {"subscription", "monthly", "bill", "service", "account",
                      "remove", "cancel", "delete", "the", "and", "for"}
             words = [w for w in name.split() if len(w) > 2 and w.lower() not in _STOP]
@@ -1147,13 +1455,10 @@ def copilot_parse():
             db.session.add(b)
             actions["bills_added"].append({"name": name, "amount": amount})
 
-    # ---- Dispatch discretionary_events ----
+    # ---- Dispatch discretionary_events (legacy flat-list path) ----
     for event in parsed.get("discretionary_events", []):
         desc = (event.get("description") or "").strip()
-        try:
-            amount = float(event.get("amount", 0))
-        except (ValueError, TypeError):
-            continue
+        amount = _coerce_amount(event.get("amount", 0))
         if not desc or amount <= 0:
             continue
         t = ExpenseTransaction(description=desc, amount=amount, category="discretionary")
@@ -1162,7 +1467,7 @@ def copilot_parse():
             account.checking_balance -= amount
         actions["expenses_logged"].append({"description": desc, "amount": amount})
 
-    # ---- Dispatch grocery_additions ----
+    # ---- Dispatch grocery_additions (legacy flat-list path) ----
     for item_name in parsed.get("grocery_additions", []):
         name = str(item_name).strip().lower()
         if not name:
@@ -1175,12 +1480,150 @@ def copilot_parse():
         db.session.add(gi)
         actions["grocery_items_added"].append(name)
 
+    # ---- Dispatch selected_recipes → active pay-period meal plan (legacy flat-list path) ----
+    # (Only runs if the tool-calling path didn't already handle this.)
+    existing_plan = set(m.recipe_id for m in MealPlanItem.query.all())
+    removed_ids = set()
+
+    def _add_to_plan(rid, source):
+        if rid in existing_plan:
+            return False
+        if len(existing_plan) >= MEAL_PLAN_MAX:
+            return False
+        db.session.add(MealPlanItem(recipe_id=rid, source=source))
+        existing_plan.add(rid)
+        return True
+
+    for sel in parsed.get("selected_recipes", []):
+        title = (sel.get("title") or "").strip()
+        action = (sel.get("action") or "add").lower()
+        if not title:
+            continue
+        recipe = _match_recipe_by_title(title)
+        if not recipe:
+            actions["recipes_suggested"].append({"title": title, "action": action})
+            continue
+        if action == "remove":
+            removed_ids.add(recipe.id)
+            if recipe.id in existing_plan:
+                MealPlanItem.query.filter_by(recipe_id=recipe.id).delete()
+                existing_plan.discard(recipe.id)
+                actions["recipes_removed"].append({"id": recipe.id, "title": recipe.title})
+            continue
+        if _add_to_plan(recipe.id, "copilot"):
+            actions["recipes_added"].append({"id": recipe.id, "title": recipe.title})
+
+    # ---- Auto-fill: user asked for N meals but only named some ----
+    target_meals = actions.get("target_meals") or parsed.get("target_meals")
+    if target_meals is None:
+        m = re.search(r'(\d+)\s*(?:meals?|dinners?|dishes?|recipes?)', user_text, re.IGNORECASE)
+        if m:
+            target_meals = int(m.group(1))
+    if target_meals:
+        try:
+            target_meals = int(target_meals)
+        except (ValueError, TypeError):
+            target_meals = None
+    if target_meals and target_meals > len(existing_plan) and len(existing_plan) < MEAL_PLAN_MAX:
+        fill = min(target_meals - len(existing_plan), MEAL_PLAN_MAX - len(existing_plan))
+        exclude = list(existing_plan) + list(removed_ids)
+        for rec in _recommend_recipes(exclude, limit=fill, seed_ids=list(existing_plan)):
+            if _add_to_plan(rec.id, "autofill"):
+                actions["recipes_auto_filled"].append({"id": rec.id, "title": rec.title})
+    actions["target_meals"] = target_meals
+
     db.session.commit()
+    return actions
+
+
+@app.route("/api/copilot/parse", methods=["POST"])
+def copilot_parse():
+    """AI Copilot — parse a single natural-language message and dispatch actions.
+
+    Legacy single-turn endpoint (no conversation history).  The multi-turn
+    hybrid chat lives at ``/api/copilot/chat``.
+
+    Request body
+    ------------
+    {"text": "Cook chicken rice bowl. Add Netflix $22.99/mo. I need dish soap."}
+
+    Returns (200)
+    -------------
+    {
+      "parsed": { <structured intent from LLM/regex> },
+      "actions_taken": { ... },
+      "tool_results": [...],
+      "_fallback": bool,
+      "llm_error": str|null
+    }
+    """
+    data = request.json or {}
+    user_text = data.get("text", "").strip()
+    if not user_text:
+        return jsonify({"error": "Provide 'text' field with your request"}), 400
+
+    # ---- Parse (pass BYOK key from DB, falls back to env var if empty) ----
+    groq_key = get_setting("groq_api_key") or os.environ.get("GROQ_API_KEY", "")
+    parsed = parse_copilot_prompt(user_text, groq_api_key=groq_key)
+
+    actions = _dispatch_parsed(parsed, user_text)
 
     return jsonify({
         "parsed": parsed,
         "actions_taken": actions,
+        "tool_results": parsed.get("tool_results", []),
         "_fallback": parsed.get("_fallback", False),
+        "llm_error": parsed.get("_llm_error"),
+    })
+
+
+@app.route("/api/copilot/chat", methods=["POST"])
+def copilot_chat():
+    """Multi-turn hybrid chat: conversational replies + action execution.
+
+    Request body
+    ------------
+    {
+      "messages": [
+        {"role": "user", "content": "How much can I spend on food?"},
+        {"role": "assistant", "content": "You have about $X left..."},
+        {"role": "user", "content": "Add Netflix $22.99/mo"}
+      ]
+    }
+
+    Returns (200)
+    -------------
+    {
+      "reply": str,               # the assistant's conversational response
+      "actions_taken": { ... },   # what was executed (bills, groceries, ...)
+      "tool_results": [...],
+      "_fallback": bool,
+      "llm_error": str|null
+    }
+    """
+    data = request.json or {}
+    messages = data.get("messages") or []
+    if not isinstance(messages, list) or not messages:
+        return jsonify({"error": "Provide 'messages' (non-empty list of {role, content})"}), 400
+    for m in messages:
+        if not isinstance(m, dict) or m.get("role") not in ("user", "assistant"):
+            return jsonify({"error": "Each message needs role 'user' or 'assistant'"}), 400
+    if messages[-1].get("role") != "user":
+        return jsonify({"error": "Last message must be from the user"}), 400
+
+    # ---- Chat (pass BYOK key from DB, falls back to env var if empty) ----
+    groq_key = get_setting("groq_api_key") or os.environ.get("GROQ_API_KEY", "")
+    result = chat_copilot_prompt(messages, groq_api_key=groq_key)
+
+    user_text = messages[-1].get("content", "")
+    actions = _dispatch_parsed(result, user_text)
+
+    return jsonify({
+        "reply": result.get("reply", ""),
+        "actions_taken": actions,
+        "tool_results": result.get("tool_results", []),
+        "_fallback": result.get("_fallback", False),
+        "llm_error": result.get("_llm_error"),
     })
 
 
@@ -1383,6 +1826,8 @@ def generate_pay_period_plan():
     for kw, products in resolved.items():
         for p in products:
             if p.get("source") == "cache":
+                cache_hits += 1
+            elif p.get("source") == "store_cache_fallback":
                 cache_hits += 1
             elif p.get("source") == "api":
                 api_hits += 1

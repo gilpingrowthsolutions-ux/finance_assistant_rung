@@ -289,6 +289,22 @@
       outline-offset: 2px;
       border-color: var(--accent);
     }
+    /* Password show/hide toggle (e.g. Groq API key field) */
+    .input-with-toggle { position: relative; }
+    .input-with-toggle input { width: 100%; padding-right: 44px; }
+    .input-toggle {
+      position: absolute; right: 4px; top: 50%; transform: translateY(-50%);
+      background: transparent; border: none; cursor: pointer;
+      color: var(--text-mute); font-size: 1.05rem; line-height: 1;
+      padding: 8px 10px; border-radius: var(--radius-sm);
+      transition: color var(--transition), background var(--transition), transform var(--transition);
+    }
+    .input-toggle:hover { color: var(--text); background: var(--bg-elev); }
+    .input-toggle:focus-visible {
+      outline: 2px solid var(--accent-soft); outline-offset: 1px;
+      border-radius: var(--radius-sm);
+    }
+    .input-toggle:active { transform: translateY(-50%) scale(.92); }
     /* Recipe-selection checkboxes (Recipes tab) + any future checkbox
        / radio: native browser checkboxes get a 2px accent ring on
        keyboard focus (otherwise they have only a thin browser-default
@@ -417,6 +433,50 @@
 
     /* AI COPILOT */
     .copilot-wrap { display: grid; place-items: center; padding: 24px 0; }
+    .copilot-thread {
+      display: flex; flex-direction: column; gap: 10px;
+      max-height: 440px; overflow-y: auto; padding: 4px 2px 14px;
+      margin-bottom: 14px; scroll-behavior: smooth;
+    }
+    .copilot-msg {
+      max-width: 82%; padding: 10px 14px; border-radius: 14px;
+      font-size: 0.9rem; line-height: 1.55; white-space: pre-wrap; word-wrap: break-word;
+    }
+    .copilot-msg.is-user {
+      align-self: flex-end; background: var(--accent-soft);
+      border: 1px solid rgba(45,191,110,.3); border-bottom-right-radius: 4px;
+    }
+    .copilot-msg.is-assistant {
+      align-self: flex-start; background: var(--bg-sunken);
+      border: 1px solid var(--border); border-bottom-left-radius: 4px;
+    }
+    .copilot-msg strong { color: var(--text); }
+    .copilot-msg ul { margin: 4px 0 0; padding-left: 18px; }
+    .copilot-msg ul li { margin-bottom: 2px; }
+    .copilot-msg code {
+      background: var(--bg-elev); border: 1px solid var(--border);
+      border-radius: 4px; padding: 0 4px; font-size: 0.82em;
+    }
+    .copilot-typing { display: inline-flex; gap: 4px; align-items: center; padding: 2px 4px; }
+    .copilot-typing i {
+      width: 6px; height: 6px; border-radius: 50%;
+      background: var(--text-mute); display: inline-block;
+      animation: copilot-bounce 1.2s ease-in-out infinite;
+    }
+    .copilot-typing i:nth-child(2) { animation-delay: .15s; }
+    .copilot-typing i:nth-child(3) { animation-delay: .3s; }
+    @keyframes copilot-bounce {
+      0%, 60%, 100% { transform: translateY(0); opacity: .4; }
+      30% { transform: translateY(-4px); opacity: 1; }
+    }
+    .copilot-actions { margin-top: 10px; border-top: 1px solid var(--border); padding-top: 8px; }
+    .copilot-chip {
+      display: inline-block; font-size: .72rem; padding: 2px 9px;
+      border-radius: 999px; background: var(--accent-soft); color: var(--accent);
+      border: 1px solid rgba(45,191,110,.3); margin: 2px 4px 0 0;
+    }
+    .copilot-chip.is-warn { background: rgba(245,158,11,.10); color: var(--warn); border-color: rgba(245,158,11,.3); }
+    .copilot-chip.is-error { background: rgba(244,63,94,.10); color: var(--danger); border-color: rgba(244,63,94,.3); }
     .copilot-chat-card {
       width: 100%; max-width: 680px;
       background: var(--bg-elev); border: 1px solid var(--border);
@@ -473,6 +533,28 @@
       background: rgba(245,158,11,.12); border: 1px solid rgba(245,158,11,.25);
       border-radius: var(--radius-md); color: var(--warn);
       font-size: 0.82rem;
+    }
+    .copilot-fallback-banner.is-error {
+      background: rgba(244,63,94,.10); border-color: rgba(244,63,94,.3);
+      color: var(--danger);
+    }
+    /* Inline 'Fix API Key' button inside the chat error banner — jumps to
+       Settings → AI Copilot BYOK. Styled as a compact pill that inherits
+       the banner's warning/error palette but stands out on hover. */
+    .copilot-fixkey-btn {
+      display: inline-block; margin-left: 8px;
+      padding: 3px 12px; border-radius: 999px;
+      background: var(--bg-elev); color: var(--accent);
+      border: 1px solid var(--border-strong);
+      font-size: 0.76rem; font-weight: 700; font-family: inherit;
+      cursor: pointer; vertical-align: middle;
+      transition: background var(--transition), color var(--transition), border-color var(--transition), transform var(--transition);
+    }
+    .copilot-fixkey-btn:hover {
+      background: var(--accent-soft); border-color: var(--accent); transform: translateY(-1px);
+    }
+    .copilot-fixkey-btn:focus-visible {
+      outline: 2px solid var(--accent); outline-offset: 2px;
     }
     .copilot-section {
       margin-bottom: 12px;
@@ -909,12 +991,13 @@
 
       <div class="copilot-wrap">
         <div class="copilot-chat-card">
+          <div class="copilot-thread" id="copilotThread" aria-live="polite"></div>
           <div class="copilot-input-row">
             <input
               type="text"
               id="copilotInput"
               class="copilot-text-input"
-              placeholder="e.g. Cook chicken rice bowl and fajitas. Add Netflix $22.99/mo. I need dish soap and paper towels."
+              placeholder="Ask about your budget, or tell me what to do — 'How much can I spend on food?' / 'Add Netflix $22.99/mo' / 'cook chicken rice bowl'"
               autocomplete="off"
             />
             <button id="copilotSendBtn" class="btn is-primary copilot-send-btn" type="button">
@@ -922,7 +1005,6 @@
             </button>
           </div>
           <div class="copilot-status" id="copilotStatus" style="display:none;"></div>
-          <div class="copilot-result" id="copilotResult" style="display:none;"></div>
         </div>
       </div>
     </section>
@@ -1228,7 +1310,11 @@
           </div>
           <div class="field">
             <label for="groqApiKey">Groq API Key</label>
-            <input type="password" id="groqApiKey" placeholder="gsk_..." autocomplete="off" />
+            <div class="input-with-toggle">
+              <input type="password" id="groqApiKey" placeholder="gsk_..." autocomplete="off" />
+              <button type="button" class="input-toggle" id="groqKeyToggle"
+                      aria-label="Show API key" title="Show key">👁️</button>
+            </div>
           </div>
           <div class="row row-end" style="gap:8px;">
             <button class="btn is-ghost" id="groqTestBtn" type="button">Test &amp; Save</button>
@@ -1240,8 +1326,15 @@
           <h2>Location &amp; Tax</h2>
           <div class="panel-sub">Set your shopping region and local rates.</div>
           <div class="field">
-            <label for="settingsZip">Zip Code</label>
+            <label for="settingsZip">Shopping ZIP Code</label>
             <input type="text" id="settingsZip" placeholder="65084" />
+            <div style="margin-top:6px;font-size:0.85rem;color:var(--text-mute);">
+              Enter the ZIP where you plan to shop, or use your device location to auto-detect a nearby store.
+            </div>
+          </div>
+          <div class="field" style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;">
+            <button class="btn is-ghost" id="detectLocationBtn" type="button">Use Current Location</button>
+            <span style="font-size:0.85rem;color:var(--text-mute);">Allow GPS access to auto-fill your local store.</span>
           </div>
           <div class="field">
             <label for="settingsSalesTax">Sales Tax Rate (%)</label>
@@ -1463,6 +1556,12 @@
       if ($('sumRegion')) $('sumRegion').textContent = d.location ? (d.location.city_state || '\u2014') : '\u2014';
       if ($('sumTax')) $('sumTax').textContent = d.location ? ((d.location.sales_tax_pct || 0) + '%') : '\u2014';
       if ($('sumPaycheck')) $('sumPaycheck').textContent = d.expected_paycheck ? fmt(d.expected_paycheck) : '\u2014';
+      if ($('settingsZip')) $('settingsZip').value = d.location ? (d.location.zip_code || '') : '';
+      if ($('settingsSalesTax')) $('settingsSalesTax').value = d.location ? ((d.location.sales_tax_rate || 0.0825) * 100).toFixed(2) : '8.25';
+      if ($('settingsGroceryTax')) $('settingsGroceryTax').value = d.location ? ((d.location.grocery_tax_rate || 0.0125) * 100).toFixed(2) : '1.25';
+      if ($('settingsStoreName') && d.location) {
+        $('settingsStoreName').textContent = d.location.store_name ? d.location.store_name + ' (#' + (d.location.location_id || '\u2014') + ')' : 'Not yet detected';
+      }
       var total = d.checking_balance || 1;
       var upct = Math.min(100, ((d.upcoming_bills_total || 0) / total) * 100);
       if ($('allocUnpaidAmt')) $('allocUnpaidAmt').textContent = fmt(d.upcoming_bills_total);
@@ -1482,6 +1581,25 @@
       var checked = document.querySelectorAll('input[type="checkbox"][data-recipe]:checked');
       var count = document.getElementById('recipeSelectedCount');
       if (count) count.textContent = checked.length + ' selected';
+    }
+
+    /* ================================================================
+       MEAL PLAN CHECKBOX SYNC — reflect server-persisted meal plan
+       (/api/meal-plan) in the Recipes-tab checkboxes. The Copilot adds
+       recipes server-side; this re-checks the matching boxes so the
+       user sees their active pay-period recipes selected.
+    ================================================================ */
+    async function syncMealPlanCheckboxes() {
+      try {
+        var resp = await api('GET', '/api/meal-plan');
+        if (!resp.ok || !resp.data || !Array.isArray(resp.data.recipe_ids)) return;
+        var ids = resp.data.recipe_ids.map(function (x) { return parseInt(x, 10); });
+        document.querySelectorAll('input[type="checkbox"][data-recipe]').forEach(function (cb) {
+          var id = parseInt(cb.getAttribute('data-recipe'), 10);
+          cb.checked = ids.indexOf(id) !== -1;
+        });
+        updateRecipeSelection();
+      } catch (_e) { /* ignore — non-fatal */ }
     }
 
     /* ================================================================
@@ -1531,116 +1649,199 @@
        CAN I BUY FORM
     ================================================================ */
     /* ================================================================
-       AI COPILOT
+       AI COPILOT — threaded hybrid chat (conversation + actions)
     ================================================================ */
     function initCopilot() {
       var input = document.getElementById('copilotInput');
       var btn = document.getElementById('copilotSendBtn');
-      var status = document.getElementById('copilotStatus');
-      var result = document.getElementById('copilotResult');
-      if (!input || !btn) return;
+      var thread = document.getElementById('copilotThread');
+      if (!input || !btn || !thread) return;
+
+      // Conversation history sent to /api/copilot/chat (server keeps it
+      // stateless per request; the client owns the full thread).
+      var chatHistory = [];
+      var busy = false;
+
+      function scrollBottom() {
+        thread.scrollTop = thread.scrollHeight;
+      }
+
+      function addBubble(role, html) {
+        var el = document.createElement('div');
+        el.className = 'copilot-msg is-' + role;
+        el.innerHTML = html;
+        thread.appendChild(el);
+        scrollBottom();
+        return el;
+      }
+
+      function addTyping() {
+        var el = document.createElement('div');
+        el.className = 'copilot-msg is-assistant';
+        el.id = 'copilotTyping';
+        el.innerHTML = '<span class="copilot-typing"><i></i><i></i><i></i></span>';
+        thread.appendChild(el);
+        scrollBottom();
+        return el;
+      }
+
+      // Tiny markdown-lite renderer: **bold**, `code`, - bullets, newlines.
+      function formatReply(text) {
+        var s = escapeHtml(text || '');
+        s = s.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+        s = s.replace(/`([^`]+)`/g, '<code>$1</code>');
+        var hasBullets = /(^|\n)\s*[-*]\s+/.test(s);
+        if (hasBullets) {
+          var lines = s.split('\n');
+          var html = '';
+          var inList = false;
+          lines.forEach(function (line) {
+            var m = line.match(/^\s*[-*]\s+(.*)$/);
+            if (m) {
+              if (!inList) { html += '<ul>'; inList = true; }
+              html += '<li>' + m[1] + '</li>';
+            } else {
+              if (inList) { html += '</ul>'; inList = false; }
+              // s is already HTML-escaped at the top of formatReply, so
+              // re-escaping here would double-encode (& → &amp;amp;).
+              html += (line ? line : '&nbsp;') + '<br>';
+            }
+          });
+          if (inList) html += '</ul>';
+          s = html;
+        } else {
+          s = s.replace(/\n/g, '<br>');
+        }
+        return s;
+      }
+
+      // Explicit confirmation pills shown directly under the chat bubble
+      // whenever a tool action was executed (bills, groceries, recipes,
+      // expenses). Rendered from the /api/copilot/chat actions_taken payload.
+      function actionChips(a) {
+        if (!a) return '';
+        var chips = [];
+        (a.bills_added || []).forEach(function (b) {
+          chips.push('<span class="copilot-chip">💳 Added ' + escapeHtml(b.name) + ' ($' + (b.amount || 0).toFixed(2) + ') to Bills</span>');
+        });
+        (a.bills_removed || []).forEach(function (b) {
+          chips.push('<span class="copilot-chip is-warn">🗑️ Removed ' + escapeHtml(b.name) + ' from Bills</span>');
+        });
+        (a.expenses_logged || []).forEach(function (e) {
+          chips.push('<span class="copilot-chip">💳 Logged ' + escapeHtml(e.description) + ' (−$' + (e.amount || 0).toFixed(2) + ')</span>');
+        });
+        (a.grocery_items_added || []).forEach(function (g) {
+          chips.push('<span class="copilot-chip">🛒 Added ' + escapeHtml(g) + ' to Grocery List</span>');
+        });
+        (a.recipes_added || []).forEach(function (r) {
+          chips.push('<span class="copilot-chip">🍳 Selected ' + escapeHtml(r.title || '') + ' for Active Pay Period</span>');
+        });
+        (a.recipes_auto_filled || []).forEach(function (r) {
+          chips.push('<span class="copilot-chip">✨ Auto-filled ' + escapeHtml(r.title || '') + '</span>');
+        });
+        (a.recipes_removed || []).forEach(function (r) {
+          chips.push('<span class="copilot-chip is-warn">🗑️ Removed ' + escapeHtml(r.title || '') + ' from Meal Plan</span>');
+        });
+        (a.recipes_suggested || []).forEach(function (r) {
+          chips.push('<span class="copilot-chip is-warn">🍳 ? No match for: ' + escapeHtml(r.title || '') + '</span>');
+        });
+        if (!chips.length) return '';
+        return '<div class="copilot-actions">' + chips.join('') + '</div>';
+      }
 
       function send() {
         var text = input.value.trim();
-        if (!text) return;
+        if (!text || busy) return;
+        busy = true;
         input.disabled = true;
         btn.disabled = true;
-        status.style.display = 'block';
-        status.innerHTML = '<span class="copilot-spin">⏳</span> Parsing your request…';
-        status.className = 'copilot-status is-loading';
-        result.style.display = 'none';
+        input.value = '';
 
-        api('POST', '/api/copilot/parse', { text: text })
+        // Echo the user message and remember it.
+        addBubble('user', escapeHtml(text));
+        chatHistory.push({ role: 'user', content: text });
+        var typing = addTyping();
+
+        api('POST', '/api/copilot/chat', { messages: chatHistory })
           .then(function (resp) {
+            busy = false;
             input.disabled = false;
             btn.disabled = false;
+            if (typing && typing.parentNode) typing.parentNode.removeChild(typing);
             if (!resp.ok) {
-              status.style.display = 'block';
-              status.className = 'copilot-status is-error';
-              status.innerHTML = '❌ ' + (resp.data && resp.data.error ? resp.data.error : 'Unknown error');
+              addBubble('assistant', '❌ ' + escapeHtml(resp.data && resp.data.error ? resp.data.error : 'Unknown error'));
               return;
             }
-            input.value = '';
             var d = resp.data || {};
             var a = d.actions_taken || {};
-            var fb = d._fallback;
+            var hasActions = !!(a && Object.keys(a).some(function (k) { return Array.isArray(a[k]) && a[k].length; }));
 
-            // Build summary HTML
+            // Inline key-fix banner: when the response indicates a missing or
+            // rejected Groq API key, offer a direct button that jumps to
+            // Settings → AI Copilot BYOK so the user can fix it in place.
+            // showBtn is passed explicitly: the _fallback (offline) branch
+            // always means no key configured, while llm_error only shows the
+            // button for key-related failures (401, rejected, invalid) —
+            // pure network errors get a plain error banner.
+            function keyBanner(text, isError, showBtn) {
+              var btnHtml = showBtn
+                ? ' <button type="button" class="copilot-fixkey-btn" onclick="document.querySelector(\'[data-tab=settings]\').click()">🔑 Open Key Settings</button>'
+                : '';
+              return '<div class="copilot-fallback-banner' + (isError ? ' is-error' : '') + '">⚠️ ' + escapeHtml(text) + btnHtml + '</div>';
+            }
+
             var html = '';
-            var hasActions = false;
+            if (d.llm_error) {
+              html += keyBanner(d.llm_error, true, /key|401|rejected|invalid|auth/i.test(d.llm_error));
+            } else if (d._fallback) {
+              html += keyBanner('Running in offline mode (no LLM configured). Results are keyword-based.', false, true);
+            }
+            html += formatReply(d.reply || '');
+            html += actionChips(a);
+            if (!d.reply && !hasActions) html += '<div class="copilot-empty">🤔 Hmm, nothing came back — try again?</div>';
 
-            if (fb) {
-              html += '<div class="copilot-fallback-banner">⚠️ Running in offline mode (no LLM configured). Results are keyword-based.</div>';
-            }
+            addBubble('assistant', html);
+            chatHistory.push({ role: 'assistant', content: d.reply || '' });
 
-            if ((a.bills_added || []).length) {
-              hasActions = true;
-              html += '<div class="copilot-section"><strong>📋 Bills Added</strong><ul>';
-              a.bills_added.forEach(function (b) {
-                html += '<li>' + escapeHtml(b.name) + ' — $' + b.amount.toFixed(2) + '/mo</li>';
-              });
-              html += '</ul></div>';
-            }
-            if ((a.bills_removed || []).length) {
-              hasActions = true;
-              html += '<div class="copilot-section"><strong>🗑️ Bills Removed</strong><ul>';
-              a.bills_removed.forEach(function (b) {
-                html += '<li>' + escapeHtml(b.name) + ' — $' + b.amount.toFixed(2) + '/mo</li>';
-              });
-              html += '</ul></div>';
-            }
-            if ((a.expenses_logged || []).length) {
-              hasActions = true;
-              html += '<div class="copilot-section"><strong>💳 Expenses Logged</strong><ul>';
-              a.expenses_logged.forEach(function (e) {
-                html += '<li>' + escapeHtml(e.description) + ' — $' + e.amount.toFixed(2) + '</li>';
-              });
-              html += '</ul></div>';
-            }
-            if ((a.grocery_items_added || []).length) {
-              hasActions = true;
-              html += '<div class="copilot-section"><strong>🛒 Grocery Additions</strong><ul>';
-              a.grocery_items_added.forEach(function (g) {
-                html += '<li>' + escapeHtml(g) + '</li>';
-              });
-              html += '</ul></div>';
-            }
-            if ((a.recipes_suggested || []).length) {
-              hasActions = true;
-              html += '<div class="copilot-section"><strong>🍳 Recipes Suggested</strong> <span style="color:var(--text-mute);font-size:0.75rem;">(go to Recipes tab to add)</span><ul>';
-              a.recipes_suggested.forEach(function (r) {
-                html += '<li>' + escapeHtml(r.title || '') + ' (' + (r.action || 'add') + ')</li>';
-              });
-              html += '</ul></div>';
-            }
-
-            if (!hasActions) {
-              html += '<div class="copilot-empty">🤔 I didn\'t detect any actions in your message. Try something like "Add Netflix $22.99/mo" or "I need dish soap and paper towels".</div>';
-            }
-
-            status.style.display = 'block';
-            status.className = 'copilot-status is-done';
-            status.innerHTML = '✅ Processed!';
-
-            result.style.display = 'block';
-            result.innerHTML = html;
-
-            // Refresh overview to reflect new bills/expenses
+            // Reflect meal-plan changes + refreshed totals.
+            if (typeof refreshActiveRecipesExpander === 'function') refreshActiveRecipesExpander();
+            if (typeof syncMealPlanCheckboxes === 'function') syncMealPlanCheckboxes();
             if (hasActions && typeof refreshOverview === 'function') refreshOverview();
+
+            // Re-fetch the views the tools touched so changes appear
+            // immediately across the app (no manual page reload).
+            // refreshGrocery is a guarded no-op when the legacy grocery
+            // list container isn't rendered — safe to call always.
+            var billsChanged = !!((a.bills_added && a.bills_added.length) || (a.bills_removed && a.bills_removed.length));
+            var txChanged = !!(a.expenses_logged && a.expenses_logged.length);
+            var groceryChanged = !!(a.grocery_items_added && a.grocery_items_added.length);
+            if (billsChanged && typeof refreshBills === 'function') refreshBills();
+            if (txChanged && typeof refreshTransactions === 'function') refreshTransactions();
+            if (groceryChanged && typeof refreshGrocery === 'function') refreshGrocery();
           })
           .catch(function () {
+            busy = false;
             input.disabled = false;
             btn.disabled = false;
-            status.style.display = 'block';
-            status.className = 'copilot-status is-error';
-            status.innerHTML = '❌ Network error — try again.';
+            if (typing && typing.parentNode) typing.parentNode.removeChild(typing);
+            addBubble('assistant', '❌ Network error — try again.');
           });
+      }
+
+      // Welcome message (hidden once the user starts a real conversation).
+      var hasGreeted = false;
+      function greet() {
+        if (hasGreeted) return;
+        hasGreeted = true;
+        addBubble('assistant',
+          '👋 Hey! I\'m your financial copilot. Ask me things like <strong>"how much can I spend on food?"</strong>, or tell me to do stuff — <strong>"add Netflix $22.99/mo"</strong>, <strong>"log dinner out $45"</strong>, <strong>"cook chicken rice bowl"</strong>.');
       }
 
       btn.addEventListener('click', send);
       input.addEventListener('keypress', function (e) {
         if (e.key === 'Enter') send();
       });
+      greet();
     }
 
     /* ================================================================
@@ -1847,6 +2048,17 @@
         var id = parseInt(cb.getAttribute('data-recipe'), 10);
         if (Number.isFinite(id)) ids.push(id);
       });
+      // Union with the server-persisted meal plan so Copilot-added
+      // recipes are included even if their boxes aren't rendered yet.
+      try {
+        var planResp = await api('GET', '/api/meal-plan');
+        if (planResp && planResp.ok && planResp.data && Array.isArray(planResp.data.recipe_ids)) {
+          planResp.data.recipe_ids.forEach(function (rid) {
+            var n = parseInt(rid, 10);
+            if (Number.isFinite(n) && ids.indexOf(n) === -1) ids.push(n);
+          });
+        }
+      } catch (_e) { /* fall back to checked boxes only */ }
       if (!ids.length) { flash('Select at least one recipe first', 'error'); return; }
       var container = document.getElementById('storeCartContainer');
       if (container) container.innerHTML = '<div class="empty">Building cart\u2026</div>';
@@ -1905,7 +2117,7 @@
             // Price source badge: color-coded by resolution type
             var sourceBadge = '';
             var ps = item.price_source || 'estimated';
-            if (ps === 'cache' || ps === 'kroger_cache') sourceBadge = '<span class="badge" style="background:var(--accent-soft);color:var(--accent);border-color:rgba(45,191,110,.3);">Kroger</span>';
+            if (ps === 'cache' || ps === 'kroger_cache' || ps === 'store_cache_fallback') sourceBadge = '<span class="badge" style="background:var(--accent-soft);color:var(--accent);border-color:rgba(45,191,110,.3);">Cache</span>';
             else if (ps === 'api' || ps === 'kroger_api') sourceBadge = '<span class="badge" style="background:var(--accent-soft);color:var(--accent);border-color:rgba(45,191,110,.3);">Kroger API</span>';
             else if (ps === 'rapid_api' || ps === 'rapid_cache') sourceBadge = '<span class="badge" style="background:rgba(59,130,246,.12);color:#3b82f6;border-color:rgba(59,130,246,.25);">RapidAPI</span>';
             else sourceBadge = '<span class="badge" style="background:rgba(245,158,11,.10);color:var(--warn);border-color:rgba(245,158,11,.25);">Estimate</span>';
@@ -2008,10 +2220,29 @@
         var removeBtn = $('groqRemoveBtn');
         var copilotBanner = $('copilotNoKeyBanner');
 
+        // Show/hide the API key while typing.
+        var toggleBtn = $('groqKeyToggle');
+        if (toggleBtn && inputEl) {
+          toggleBtn.addEventListener('click', function () {
+            var show = inputEl.type === 'password';
+            inputEl.type = show ? 'text' : 'password';
+            toggleBtn.textContent = show ? '🙈' : '👁️';
+            toggleBtn.setAttribute('aria-label', show ? 'Hide API key' : 'Show API key');
+            toggleBtn.title = show ? 'Hide key' : 'Show key';
+          });
+        }
+
         // Load current status
         var statusResp = await api('GET', '/api/settings/groq-key');
         if (statusResp.ok && statusResp.data.configured) {
-          if (statusEl) statusEl.innerHTML = '✅ Key configured: <code>' + (statusResp.data.key_preview || '****') + '</code>';
+          var valid = statusResp.data.valid;
+          if (valid === false) {
+            if (statusEl) statusEl.innerHTML = '⚠️ Key saved but <strong style="color:var(--danger);">rejected by Groq</strong>: ' + escapeHtml(statusResp.data.validation || 'invalid key') + ' <a href="https://console.groq.com/keys" target="_blank" rel="noopener" style="color:var(--accent);">Get a valid key →</a>';
+          } else if (valid === true) {
+            if (statusEl) statusEl.innerHTML = '✅ Key configured &amp; validated: <code>' + (statusResp.data.key_preview || '****') + '</code>';
+          } else {
+            if (statusEl) statusEl.innerHTML = '✅ Key configured: <code>' + (statusResp.data.key_preview || '****') + '</code>' + (statusResp.data.validation ? ' <span style="opacity:.7">(' + escapeHtml(statusResp.data.validation) + ')</span>' : '');
+          }
           if (inputEl) inputEl.placeholder = 'Key saved — enter new key to replace';
           if (removeBtn) removeBtn.style.display = '';
           if (copilotBanner) copilotBanner.style.display = 'none';
@@ -2031,9 +2262,27 @@
             testBtn.disabled = false;
             testBtn.textContent = 'Test & Save';
             if (resp.ok) {
+              var validationNote = resp.data.validation || '';
+              // Determine tint from validation note content: warn if
+              // the Groq validation wasn't clean (non-empty note means
+              // something went wrong — rate-limit, auth reject, etc.).
+              var isClean = !validationNote || validationNote === 'Key validated!';
+              var noteHtml = validationNote && validationNote !== 'Key validated!'
+                ? '<br/><span style="font-size:0.82rem;color:var(--warn);background:rgba(245,158,11,.10);padding:4px 8px;border-radius:4px;display:inline-block;margin-top:4px;">⚠️ ' + validationNote + '</span>'
+                : validationNote
+                  ? '<br/><span style="font-size:0.82rem;color:var(--accent);">✓ ' + validationNote + '</span>'
+                  : '';
               flash(resp.data.message || 'Key saved!', 'success');
-              if (statusEl) statusEl.innerHTML = '✅ Key configured: <code>' + (resp.data.key_preview || '****') + '</code>';
-              if (inputEl) { inputEl.value = ''; inputEl.placeholder = 'Key saved — enter new key to replace'; }
+              if (statusEl) {
+                statusEl.innerHTML = '✅ Key configured: <code>' + (resp.data.key_preview || '****') + '</code>' + noteHtml;
+                statusEl.style.background = isClean ? 'var(--bg-sunken)' : 'rgba(245,158,11,.08)';
+              }
+              if (inputEl) {
+                inputEl.value = ''; inputEl.placeholder = 'Key saved — enter new key to replace';
+                // Re-hide the field after saving so a revealed key doesn't linger.
+                inputEl.type = 'password';
+                if (toggleBtn) { toggleBtn.textContent = '👁️'; toggleBtn.setAttribute('aria-label', 'Show API key'); toggleBtn.title = 'Show key'; }
+              }
               if (removeBtn) removeBtn.style.display = '';
               if (copilotBanner) copilotBanner.style.display = 'none';
             } else {
@@ -2048,7 +2297,12 @@
             if (resp.ok) {
               flash('Key removed', 'success');
               if (statusEl) statusEl.innerHTML = '⚠️ No key configured. <a href="https://console.groq.com/keys" target="_blank" rel="noopener" style="color:var(--accent);">Get a free key →</a>';
-              if (inputEl) { inputEl.value = ''; inputEl.placeholder = 'gsk_...'; }
+              if (inputEl) {
+                inputEl.value = ''; inputEl.placeholder = 'gsk_...';
+                // Re-hide the field after removal too.
+                inputEl.type = 'password';
+                if (toggleBtn) { toggleBtn.textContent = '👁️'; toggleBtn.setAttribute('aria-label', 'Show API key'); toggleBtn.title = 'Show key'; }
+              }
               if (removeBtn) removeBtn.style.display = 'none';
               if (copilotBanner) copilotBanner.style.display = '';
             }
@@ -2068,17 +2322,45 @@
           if (resp.ok) {
             flash('Location updated', 'success');
             await refreshOverview();
-            // Show the auto-detected store name
-            var storeInfo = resp.data.store;
-            var storeNameEl = $('settingsStoreName');
-            if (storeInfo && storeInfo.found && storeNameEl) {
-              storeNameEl.textContent = storeInfo.name + ' (#' + storeInfo.location_id + ')';
-            } else if (storeNameEl) {
-              storeNameEl.textContent = 'Searching\u2026 (Kroger API may be unavailable)';
-            }
+            updateSettingsStoreDisplay(resp.data.store);
           } else {
             flash('Failed: ' + (resp.data.error || ''), 'error');
           }
+        });
+      }
+
+      var detectBtn = $('detectLocationBtn');
+      if (detectBtn) {
+        detectBtn.addEventListener('click', function () {
+          if (!navigator.geolocation) {
+            flash('Geolocation is not available in this browser', 'error');
+            return;
+          }
+          detectBtn.disabled = true;
+          detectBtn.textContent = 'Detecting…';
+          navigator.geolocation.getCurrentPosition(async function (pos) {
+            detectBtn.disabled = false;
+            detectBtn.textContent = 'Use Current Location';
+            var zipVal = ($('settingsZip') || {}).value || '65084';
+            var resp = await api('POST', '/api/location/update', {
+              zip_code: zipVal,
+              latitude: pos.coords.latitude,
+              longitude: pos.coords.longitude,
+              sales_tax_rate: parseFloat(($('settingsSalesTax') || {}).value || 8.25) / 100,
+              grocery_tax_rate: parseFloat(($('settingsGroceryTax') || {}).value || 1.25) / 100
+            });
+            if (resp.ok) {
+              flash('Location auto-detected', 'success');
+              await refreshOverview();
+              updateSettingsStoreDisplay(resp.data.store);
+            } else {
+              flash('Could not detect store: ' + (resp.data.error || ''), 'error');
+            }
+          }, function (err) {
+            detectBtn.disabled = false;
+            detectBtn.textContent = 'Use Current Location';
+            flash('Geolocation error: ' + (err.message || 'permission denied'), 'error');
+          }, { timeout: 15000, maximumAge: 300000 });
         });
       }
 
@@ -2093,6 +2375,18 @@
           if (resp.ok) { flash('Ratios saved', 'success'); await refreshOverview(); }
           else flash('Failed: ' + (resp.data.error || ''), 'error');
         });
+      }
+
+      function updateSettingsStoreDisplay(storeInfo) {
+        var storeNameEl = $('settingsStoreName');
+        if (!storeNameEl) return;
+        if (storeInfo && storeInfo.found) {
+          storeNameEl.textContent = storeInfo.name + ' (#' + storeInfo.location_id + ')';
+        } else if (storeInfo) {
+          storeNameEl.textContent = storeInfo.name || 'Store detection available';
+        } else {
+          storeNameEl.textContent = 'Not yet detected';
+        }
       }
 
       var balBtn = $('updateBalanceBtn');
@@ -2234,8 +2528,13 @@
       if (typeof refreshTransactions === 'function') refreshTransactions();
       if (typeof refreshBills === 'function') refreshBills();
 
-      // Load recipes on first visit
-      if (typeof refreshRecipes === 'function') refreshRecipes();
+      // Load recipes on first visit; after the list renders, sync the
+      // checkboxes to the server-persisted meal plan (Copilot additions).
+      if (typeof refreshRecipes === 'function') {
+        Promise.resolve(refreshRecipes()).then(function () {
+          if (typeof syncMealPlanCheckboxes === 'function') syncMealPlanCheckboxes();
+        });
+      }
 
       if (typeof setupRecipesInit === 'function') {
         setupRecipesInit({

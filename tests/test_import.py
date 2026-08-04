@@ -24,6 +24,10 @@ from unittest.mock import patch, MagicMock
 os.environ.setdefault('RECIPE_CACHE_DISABLED', '1')
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+# Isolate tests from the user's real database: use an in-memory SQLite DB
+# so these tests can never wipe the user's real rung_finance.db rows.
+os.environ['RUNG_DB_PATH'] = ':memory:'
+
 from app import (
     app, db, Recipe, RecipeIngredient,
     _parse_recipe_yields, _derive_clean_keyword,
@@ -39,6 +43,7 @@ client = app.test_client()
 # test_sync_api.py).
 # ---------------------------------------------------------------------------
 with app.app_context():
+    db.create_all()  # in-memory DB starts empty — build the schema first
     RecipeIngredient.query.delete()
     Recipe.query.delete()
     db.session.commit()

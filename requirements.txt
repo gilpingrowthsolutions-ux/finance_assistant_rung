@@ -3,6 +3,7 @@ SQLAlchemy==2.0.0
 python-dotenv==1.0.0
 plaid-python==27.0.0
 recipe-scrapers==15.11.0
+groq>=1.6.0
 requests==2.34.2
 curl-cffi==0.15.0
 # product_scraper.py retired in favor of the Rung 2-stage engine,

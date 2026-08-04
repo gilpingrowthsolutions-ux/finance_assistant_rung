@@ -17,6 +17,10 @@ import json
 os.environ['RECIPE_CACHE_DISABLED'] = '1'
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+# Isolate tests from the user's real database: use an in-memory SQLite DB
+# so these tests can never wipe the user's real rung_finance.db rows.
+os.environ['RUNG_DB_PATH'] = ':memory:'
+
 from app import (
     app, db, Account, Recipe, RecipeIngredient, BrandPreference,
     StorePriceCache, PantryItem,
@@ -63,6 +67,7 @@ def assert_in(needle, haystack, label):
 # SETUP — clear state, seed deterministic scenario
 # ===========================================================================
 with app.app_context():
+    db.create_all()  # in-memory DB starts empty — build the schema first
     BrandPreference.query.delete()
     StorePriceCache.query.delete()
     PantryItem.query.delete()
@@ -154,7 +159,7 @@ assert_truthy(len(cart_items) >= 4, 'at least 4 items in cart')
 for item in cart_items:
     assert_truthy(item.get('estimated_price', 0) > 0,
                   f'{item.get("keyword", "?")} has a real price > 0')
-    assert_in(item.get('price_source'), ('cache', 'api', 'estimated', 'rapid_api', 'rapid_cache', 'kroger_cache', 'kroger_api'),
+    assert_in(item.get('price_source'), ('cache', 'api', 'estimated', 'rapid_api', 'rapid_cache', 'kroger_cache', 'kroger_api', 'store_cache_fallback'),
               f'{item.get("keyword", "?")} has a valid price_source')
 
 

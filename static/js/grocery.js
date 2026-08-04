@@ -174,8 +174,11 @@ async function refreshGrocery() {
  * Fetch /api/recipes/generate with the selected IDs, then render recipe
  * mini-cards inside the Active Recipes expander on the Grocery tab.
  *
- * Caps display at 14 recipes. When zero recipes are selected the
- * expander shows a helpful prompt linking to the Recipes tab.
+ * The server-persisted meal plan (/api/meal-plan) is the source of truth
+ * — the Copilot writes matched recipes there, so this unions those IDs
+ * with any locally-checked DOM boxes. Caps display at 14 recipes. When
+ * zero recipes are selected the expander shows a helpful prompt linking
+ * to the Recipes tab.
  */
 async function refreshActiveRecipesExpander() {
   const expander = document.getElementById('activeRecipesExpander');
@@ -185,6 +188,16 @@ async function refreshActiveRecipesExpander() {
   if (!grid) return;
 
   const ids = getSelectedRecipeIds();
+  // Union with the server-persisted meal plan (Copilot additions).
+  try {
+    const planResp = await fetchGrocery_('GET', '/api/meal-plan', undefined);
+    if (planResp && planResp.ok && planResp.data && Array.isArray(planResp.data.recipe_ids)) {
+      planResp.data.recipe_ids.forEach(function (rid) {
+        const n = parseInt(rid, 10);
+        if (Number.isFinite(n) && ids.indexOf(n) === -1) ids.push(n);
+      });
+    }
+  } catch (_e) { /* server plan unavailable — fall back to checked boxes */ }
   var max = 14;
   var cappedIds = ids.slice(0, max);
   var truncated = ids.length > max;

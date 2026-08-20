@@ -1,186 +1,1174 @@
+# pyright: reportUnusedFunction=false
+import json
+import logging
 import os
 import re
-import urllib.parse
-from datetime import datetime, timedelta
+import secrets
+import uuid
+import hashlib
+import requests
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
+from datetime import date, datetime, timedelta, timezone
+from typing import Any
 
 from dotenv import load_dotenv
-from flask import Flask, render_template, request, jsonify
-from flask_sqlalchemy import SQLAlchemy
+import click
+from flask import Flask, render_template, request, jsonify, session
+from flask_migrate import Migrate
+from sqlalchemy import text
+from sqlalchemy.engine import make_url
+from sqlalchemy.exc import IntegrityError
+from werkzeug.security import check_password_hash, generate_password_hash
 
-# Load environment variables from .env before anything else.
-# This makes KROGER_CLIENT_ID / KROGER_CLIENT_SECRET (and any other
-# secrets) available via os.environ for the rest of the application.
-load_dotenv()
+def _load_local_env_files() -> None:
+    """Load local dotenv files using explicit project paths.
+
+    This keeps development/beta startup independent from shell `source` quirks,
+    while preserving fail-closed safety by never overriding explicitly supplied
+    environment variables.
+    """
+    root = os.path.dirname(os.path.abspath(__file__))
+    primary = os.path.join(root, ".env")
+    local = os.path.join(root, ".env.local")
+    load_dotenv(dotenv_path=primary, override=False)
+    if os.path.exists(local):
+        load_dotenv(dotenv_path=local, override=False)
+
+
+# Load environment variables before anything else. Explicit process-level env
+# always wins because override=False.
+_load_local_env_files()
+
+# Import the shared SQLAlchemy extension (not yet bound to any app)
+from extensions import db
 
 # Live retail API resolvers (Kroger + RapidAPI + local price cache)
 from services.store_api import resolve_terms, pick_best
 from services.kroger_api import find_nearest_kroger
 from services.rapidapi_search import search_local_product, rapid_result_to_product_dict
+import services.copilot_service as _copilot_service
 from services.copilot_service import parse_copilot_prompt, chat_copilot_prompt
+from services.usage_meter import (
+    check_optional_operation,
+    estimate_usage_cost,
+    get_usage_controls,
+    get_usage_rates,
+    record_usage_event,
+    set_usage_controls,
+    set_usage_rates,
+    summarize_usage,
+)
+from services.household_context import (
+    HouseholdResolutionError,
+    ensure_legacy_household,
+    household_id as current_household_id,
+    household_scope_key,
+    resolve_household_context,
+)
+from services.auth_session import (
+    AuthRequiredError,
+    auth_required_mode,
+    clear_login_failures,
+    clear_session,
+    establish_session,
+    get_current_principal,
+    header_override_allowed,
+    login_is_blocked,
+    record_login_failure,
+    runtime_env,
+)
+from services.financial_state import (
+    FinancialStateError,
+    apply_balance_delta,
+    get_household_account,
+    set_balance_absolute,
+)
+from services.selected_store import get_selected_store, select_store
+from services.recipe_ingredients import coerce_recipe_ingredient
 
 app = Flask(__name__)
-# The SQLite file is overridable via RUNG_DB_PATH so the test suite can
-# run against an isolated in-memory DB instead of wiping the user's real
-# rung_finance.db (which previously destroyed the saved Groq API key and
-# other user data on every test run).
-db_path = os.environ.get("RUNG_DB_PATH") or os.path.join(os.path.dirname(__file__), "rung_finance.db")
-app.config["SQLALCHEMY_DATABASE_URI"] = f"sqlite:///{db_path}"
+LOGGER = logging.getLogger("app")
+
+
+def _resolve_secret_key() -> str:
+    configured = str(os.environ.get("SECRET_KEY") or os.environ.get("FLASK_SECRET_KEY") or "").strip()
+    if configured:
+        return configured
+    if bool(getattr(app, "testing", False)):
+        return "rung-test-secret-key"
+    return secrets.token_urlsafe(48)
+
+
+def _cookie_secure_enabled() -> bool:
+    secure_raw = str(os.environ.get("SESSION_COOKIE_SECURE") or "").strip().lower()
+    https_raw = str(os.environ.get("RUNG_HTTPS_ONLY") or "").strip().lower()
+    return secure_raw in {"1", "true", "yes", "on"} or https_raw in {"1", "true", "yes", "on"}
+
+
+def _resolve_database_uri() -> str:
+    # Keep explicit SQLite override for isolated local tests/dev workflows.
+    db_path = str(os.environ.get("RUNG_DB_PATH") or "").strip()
+    if db_path:
+        if db_path == ":memory:":
+            return "sqlite:///:memory:"
+        return f"sqlite:///{db_path}"
+
+    raw_database_url = str(os.environ.get("DATABASE_URL") or "").strip()
+    if raw_database_url:
+        # SQLAlchemy 2 expects postgresql:// rather than legacy postgres://.
+        if raw_database_url.startswith("postgres://"):
+            raw_database_url = "postgresql://" + raw_database_url[len("postgres://"):]
+        return raw_database_url
+
+    # Backward-compatible default for local single-node runtime.
+    local_default = os.path.join(os.path.dirname(__file__), "rung_finance.db")
+    return f"sqlite:///{local_default}"
+
+
+def _redacted_database_uri(uri: str) -> str:
+    try:
+        return make_url(uri).render_as_string(hide_password=True)
+    except Exception:
+        return "<invalid-database-uri>"
+
+
+app.config["SQLALCHEMY_DATABASE_URI"] = _resolve_database_uri()
 app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
-db = SQLAlchemy(app)
+app.config["SECRET_KEY"] = _resolve_secret_key()
+app.config["SESSION_COOKIE_HTTPONLY"] = True
+app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
+app.config["SESSION_COOKIE_SECURE"] = _cookie_secure_enabled()
+app.config["SESSION_COOKIE_NAME"] = "rung_session"
+app.config.setdefault("SQLALCHEMY_ENGINE_OPTIONS", {})
+app.config["SQLALCHEMY_ENGINE_OPTIONS"].setdefault("pool_pre_ping", True)
+app.config["SQLALCHEMY_ENGINE_OPTIONS"].setdefault("pool_recycle", 1800)
+
+# Initialize the shared SQLAlchemy instance with this Flask app.
+# This must happen BEFORE any model definitions.
+db.init_app(app)
+migrate = Migrate(app, db, compare_type=True)
+
+
+@app.errorhandler(HouseholdResolutionError)
+def handle_household_resolution_error(exc: HouseholdResolutionError):
+    message = str(exc)
+    if "Authentication required" in message:
+        return jsonify({"error": message}), 401
+    return jsonify({"error": message}), 403
+
+
+@app.errorhandler(AuthRequiredError)
+def handle_auth_required_error(exc: AuthRequiredError):
+    return jsonify({"error": str(exc)}), 401
+
+from services.copilot_intent import (
+    StagedActionValidationError,
+    apply_staged_actions,
+    execute_intent_payload,
+    parse_intent_payload,
+    stage_intent_payload,
+)
+
+# Import all ORM models from the authoritative models module
+# This avoids circular imports: models import from extensions,
+# app imports from models, services import from models/app.
+from models import (
+    Account,
+    ActionAudit,
+    BetaFeedback,
+    Bill,
+    BrandPreference,
+    ExpenseTransaction,
+    GroceryItem,
+    MealPlanItem,
+    PantryItem,
+    RapidPriceCache,
+    Recipe,
+    RecipeIngredient,
+    RetailProduct,
+    RetailProductCache,
+    RetailProductPreference,
+    RetailRefreshLease,
+    RetailSearchCache,
+    RetailStoreIdentity,
+    RetailProductSubstitution,
+    PlaidAccount,
+    PlaidItem,
+    PlaidTransaction,
+    ShoppingTripCompletion,
+    TransactionReconciliation,
+    StorePriceCache,
+    StoreProductObservation,
+    HouseholdShoppingDefault,
+    UserPreference,
+    UserSetting,
+    User,
+    HouseholdMembership,
+    LoginThrottle,
+    UsageEvent,
+    Household,
+    StoreTaxProfile,
+    TaxBoundaryAssignment,
+    TaxJurisdiction,
+    TaxRate,
+    TaxSourceDataset,
+    TaxabilityRule,
+    RetailProductTaxClass,
+)
+from services.tax_engine import (
+    TAX_CLASS_GENERAL_MERCHANDISE,
+    TAX_CLASS_GROCERY_FOOD,
+    calculate_cart_tax,
+    cents_to_float as tax_cents_to_float,
+    ensure_bootstrap_tax_dataset,
+    has_paid_provider_tax_keys,
+    resolve_store_tax_profile,
+)
+from services.plaid_foundation import (
+    PlaidFoundationError,
+    create_link_token,
+    exchange_public_token_and_persist,
+    get_plaid_connection_status,
+    sync_plaid_transactions,
+)
+from services.transaction_reconciliation import (
+    decide_reconciliation_pair,
+    list_reconciliation_proposals,
+    project_plaid_transactions,
+)
+from services.household_defaults import (
+    HOUSEHOLD_DEFAULT_ALLOWED_VALUES,
+    SHOPPING_STYLE_ALLOWED_VALUES,
+    household_defaults_schema,
+)
 
 # =============================================================================
-# DATABASE MODELS
+# DATABASE MODELS IMPORTED ABOVE
 # =============================================================================
-class Account(db.Model):
-    id = db.Column(db.Integer, primary_key=True)
-    checking_balance = db.Column(db.Float, default=1250.00)
-    food_allocation_pct = db.Column(db.Float, default=40.0)  # % of safe disposable
-    pay_period_days = db.Column(db.Integer, default=14)
-    meals_per_day = db.Column(db.Integer, default=3)
-    vault_balance = db.Column(db.Float, default=150.00)
-    expected_paycheck = db.Column(db.Float, default=2000.00)
-    
-    # Geolocated Data & Local Taxes
-    latitude = db.Column(db.Float, nullable=True)
-    longitude = db.Column(db.Float, nullable=True)
-    zip_code = db.Column(db.String(10), default="65084")
-    city_state = db.Column(db.String(100), default="Versailles, MO")
-    sales_tax_rate = db.Column(db.Float, default=0.0825)   # 8.25%
-    grocery_tax_rate = db.Column(db.Float, default=0.0125) # 1.25%
-    
-    # Auto-detected nearest Kroger / Gerbes store
-    kroger_location_id = db.Column(db.String(20), nullable=True)
-    kroger_store_name = db.Column(db.String(100), default="Kroger")
-
-class Bill(db.Model):
-    id = db.Column(db.Integer, primary_key=True)
-    name = db.Column(db.String(100), nullable=False)
-    amount = db.Column(db.Float, nullable=False)
-    due_date = db.Column(db.DateTime, nullable=False)
-    is_gas_estimate = db.Column(db.Boolean, default=False)
-    is_paid = db.Column(db.Boolean, default=False)
-
-class PantryItem(db.Model):
-    __tablename__ = 'pantry_inventory'
-    id = db.Column(db.Integer, primary_key=True)
-    clean_keyword = db.Column(db.String(100), nullable=False, unique=True) # e.g. "flour", "chicken"
-    product_name = db.Column(db.String(150), nullable=False)
-    quantity = db.Column(db.Float, default=0.0)
-    unit = db.Column(db.String(30), default="oz") # Standardized base unit
-
-class Recipe(db.Model):
-    id = db.Column(db.Integer, primary_key=True)
-    title = db.Column(db.String(150), nullable=False)
-    servings = db.Column(db.Integer, default=4)
-    estimated_cost_per_serving = db.Column(db.Float, default=3.50)
-    instructions = db.Column(db.Text, nullable=True)
-    source_url = db.Column(db.String(500), nullable=True, unique=True)
-    ingredients = db.relationship('RecipeIngredient', backref='recipe', cascade="all, delete-orphan")
-
-class RecipeIngredient(db.Model):
-    id = db.Column(db.Integer, primary_key=True)
-    recipe_id = db.Column(db.Integer, db.ForeignKey('recipe.id'), nullable=False)
-    product_name = db.Column(db.String(100), nullable=False)
-    clean_keyword = db.Column(db.String(100), nullable=False)
-    quantity = db.Column(db.Float, default=1.0)
-    unit = db.Column(db.String(30), default="oz")
-
-class BrandPreference(db.Model):
-    id = db.Column(db.Integer, primary_key=True)
-    clean_keyword = db.Column(db.String(100), nullable=False, unique=True)
-    prefer_store_brand = db.Column(db.Boolean, default=True)
-    preferred_brand_name = db.Column(db.String(100), nullable=True)
-
-class ExpenseTransaction(db.Model):
-    __tablename__ = 'expense_transactions'
-    id = db.Column(db.Integer, primary_key=True)
-    description = db.Column(db.String(150), nullable=False)
-    amount = db.Column(db.Float, nullable=False)
-    category = db.Column(db.String(50), default='discretionary')
-    date = db.Column(db.DateTime, default=datetime.utcnow)
-
-class GroceryItem(db.Model):
-    __tablename__ = 'grocery_items'
-    id = db.Column(db.Integer, primary_key=True)
-    recipe_ids = db.Column(db.String(200), default='')
-    item_name = db.Column(db.String(150), nullable=False)
-    estimated_price = db.Column(db.Float, default=0.0)
-    store_name = db.Column(db.String(100), default='')
-    location_context = db.Column(db.String(100), default='')
-    is_purchased = db.Column(db.Boolean, default=False)
-
-class RapidPriceCache(db.Model):
-    __tablename__ = 'rapid_price_cache'
-    id = db.Column(db.Integer, primary_key=True)
-    ingredient_keyword = db.Column(db.String(100), nullable=False)
-    title = db.Column(db.String(300), nullable=False)
-    price = db.Column(db.Float, nullable=False, default=0.0)
-    store_name = db.Column(db.String(100), default='')
-    package_size = db.Column(db.String(100), nullable=True)
-    image_url = db.Column(db.String(500), nullable=True)
-    product_url = db.Column(db.String(500), nullable=True)
-    location = db.Column(db.String(100), default='')
-    last_updated = db.Column(db.DateTime, default=datetime.utcnow)
+# All model classes are imported from models.py
+# See models.py for their authoritative definitions
 
 
-class StorePriceCache(db.Model):
-    __tablename__ = 'store_price_cache'
-    id = db.Column(db.Integer, primary_key=True)
-    store_name = db.Column(db.String(100), nullable=False)
-    item_keyword = db.Column(db.String(100), nullable=False)
-    product_title = db.Column(db.String(200), nullable=False)
-    price = db.Column(db.Float, nullable=False, default=0.0)
-    unit = db.Column(db.String(30), default='each')
-    package_size = db.Column(db.String(100), nullable=True)
-    image_url = db.Column(db.String(500), nullable=True)
-    retailer = db.Column(db.String(50), default='kroger')
-    is_store_brand = db.Column(db.Boolean, default=False)
-    last_updated = db.Column(db.DateTime, default=datetime.utcnow)
+DEFAULT_STARTER_RECIPE_TITLES = [
+    "Chicken Rice Bowl",
+    "Ground Beef Tacos",
+    "Vegetable Stir Fry",
+    "Margherita Pizza",
+    "Greek Salad",
+    "Mushroom Risotto",
+    "Thai Green Curry",
+]
 
+DEFAULT_STARTER_GROCERY_ITEMS = [
+    "rice",
+    "tortillas",
+    "pasta",
+    "tomatoes",
+    "chicken breast",
+    "ground beef",
+    "olive oil",
+]
 
-class UserSetting(db.Model):
-    """Key-value store for per-user settings (API keys, preferences, etc.).
-
-    Each row stores one setting. Values are plain strings — callers are
-    responsible for serialising/deserialising (e.g. ``json.loads`` for lists).
-    """
-    __tablename__ = 'user_settings'
-    key = db.Column(db.String(80), primary_key=True)
-    value = db.Column(db.Text, default='')
-    updated_at = db.Column(db.DateTime, default=datetime.utcnow)
+HOUSEHOLD_DEFAULT_OWNER_SCOPE = "household:default"
+HOUSEHOLD_DEFAULT_KIND_CATEGORY = "category_default"
+HOUSEHOLD_DEFAULT_KIND_STYLE = "shopping_style"
+HOUSEHOLD_STYLE_KEY = "shopping_style"
+SAFE_BUFFER_SETTING_KEY = "safe_to_spend_buffer_usd"
+PYF_TARGET_SETTING_KEY = "pyf_long_term_target_percent"
+LOCATION_SHARING_SETTING_KEY = "location_sharing_enabled"
+NEXT_PAYDAY_SETTING_KEY = "next_payday_date"
+APP_SCHEMA_VERSION = "m10-beta-readiness-1"
 
 
 def get_setting(key: str, default: str = '') -> str:
     """Read a user setting from the DB, returning *default* if not found."""
-    row = UserSetting.query.get(key)
+    row = UserSetting.query.filter_by(
+        household_id=current_household_id(),
+        key=key,
+    ).first()
     return row.value if row else default
 
 
-def set_setting(key: str, value: str) -> None:
+def _resolve_request_user_id(data: Any) -> str:
+    principal = get_current_principal()
+    if principal is not None:
+        return f"user:{principal.user_id}"
+    if isinstance(data, dict):
+        explicit = str(data.get("user_id") or "").strip()
+        if explicit:
+            return explicit
+    return household_scope_key()
+
+
+def _current_auth_session_payload() -> dict[str, Any]:
+    principal = get_current_principal()
+    if principal is None:
+        return {"authenticated": False, "user": None, "household": None}
+    return {
+        "authenticated": True,
+        "user": {
+            "id": principal.user_id,
+            "email": principal.email,
+            "role": principal.role,
+        },
+        "household": {
+            "id": principal.household_id,
+        },
+    }
+
+
+def _household_account(create_if_missing: bool = True) -> Account:
+    return get_household_account(current_household_id(), create_if_missing=create_if_missing)
+
+
+def _household_bill_query():
+    return Bill.query.filter_by(household_id=current_household_id())
+
+
+def _household_tx_query():
+    return ExpenseTransaction.query.filter_by(household_id=current_household_id())
+
+
+def _household_grocery_query():
+    return GroceryItem.query.filter_by(household_id=current_household_id())
+
+
+def _household_meal_plan_query():
+    return MealPlanItem.query.filter_by(household_id=current_household_id())
+
+
+def _household_pantry_query():
+    return PantryItem.query.filter_by(household_id=current_household_id())
+
+
+def _household_brand_pref_query():
+    return BrandPreference.query.filter_by(household_id=current_household_id())
+
+
+def _household_trip_query():
+    return ShoppingTripCompletion.query.filter_by(household_id=current_household_id())
+
+
+def _household_audit_query():
+    return ActionAudit.query.filter_by(household_id=current_household_id())
+
+
+def _env_flag(name: str, default: bool = False) -> bool:
+    raw = str(os.environ.get(name, "")).strip().lower()
+    if not raw:
+        return default
+    return raw in {"1", "true", "yes", "on"}
+
+
+def _db_path_from_uri(uri: str) -> str:
+    prefix = "sqlite:///"
+    if not str(uri or "").startswith(prefix):
+        return ""
+    return str(uri)[len(prefix):]
+
+
+def _classify_db_path(path: str) -> str:
+    raw = str(path or "").strip()
+    if raw == ":memory:" or raw.endswith(":memory:"):
+        return "test"
+
+    normalized = os.path.abspath(raw) if raw else ""
+    repo_db = os.path.abspath(os.path.join(os.path.dirname(__file__), "rung_finance.db"))
+    if normalized == repo_db:
+        return "production"
+    if normalized.startswith("/tmp/"):
+        return "disposable"
+    return "custom"
+
+
+def _plaid_runtime_enabled() -> bool:
+    if _env_flag("PLAID_ENABLED", False):
+        return True
+    has_client = bool(str(os.environ.get("PLAID_CLIENT_ID") or "").strip())
+    has_secret = bool(str(os.environ.get("PLAID_SECRET") or "").strip())
+    return has_client and has_secret
+
+
+def _runtime_capabilities() -> dict[str, Any]:
+    plaid_enabled = _plaid_runtime_enabled()
+    plaid_key = bool(str(os.environ.get("PLAID_TOKEN_ENCRYPTION_KEY") or "").strip())
+    plaid_env = str(os.environ.get("PLAID_ENV") or "sandbox").strip().lower() or "sandbox"
+
+    llm_server = bool(str(os.environ.get("GROQ_API_KEY") or "").strip())
+    kroger_cfg = bool(str(os.environ.get("KROGER_CLIENT_ID") or "").strip() and str(os.environ.get("KROGER_CLIENT_SECRET") or "").strip())
+    walmart_cfg = bool(str(os.environ.get("SERPAPI_API_KEY") or "").strip())
+
+    return {
+        "plaid": {
+            "enabled": plaid_enabled,
+            "configured": plaid_enabled and plaid_key,
+            "env": plaid_env,
+            "status": (
+                "available"
+                if plaid_enabled and plaid_key
+                else ("disabled" if not plaid_enabled else "misconfigured")
+            ),
+            "message": (
+                "Bank sync available"
+                if plaid_enabled and plaid_key
+                else ("Bank sync unavailable" if not plaid_enabled else "Bank sync unavailable: missing token encryption key")
+            ),
+        },
+        "llm": {
+            "server_configured": llm_server,
+            "status": "available" if llm_server else "unavailable",
+            "message": "LLM fallback available" if llm_server else "LLM fallback unavailable",
+        },
+        "copilot_deterministic": {
+            "status": "available",
+            "message": "Copilot deterministic commands available",
+        },
+        "retail": {
+            "walmart_live": {
+                "configured": walmart_cfg,
+                "status": "available" if walmart_cfg else "unavailable",
+                "message": "Live Walmart pricing available" if walmart_cfg else "Live Walmart pricing unavailable",
+            },
+            "kroger_live": {
+                "configured": kroger_cfg,
+                "status": "available" if kroger_cfg else "unavailable",
+                "message": "Kroger pricing available" if kroger_cfg else "Kroger pricing unavailable",
+            },
+        },
+    }
+
+
+def _validate_startup_configuration() -> None:
+    uri = str(app.config.get("SQLALCHEMY_DATABASE_URI") or "")
+    try:
+        parsed = make_url(uri)
+    except Exception as exc:
+        raise RuntimeError("Invalid SQLALCHEMY_DATABASE_URI / DATABASE_URL configuration.") from exc
+
+    if parsed.drivername not in {"sqlite", "postgresql", "postgresql+psycopg2", "postgresql+psycopg"}:
+        raise RuntimeError("Unsupported database driver. Use sqlite or postgresql.")
+
+    if parsed.drivername == "sqlite" and not _db_path_from_uri(uri):
+        raise RuntimeError("SQLite database path is missing.")
+
+    mode = runtime_env()
+    if mode in {"production", "beta"}:
+        if _env_flag("FLASK_DEBUG", False) or bool(getattr(app, "debug", False)):
+            raise RuntimeError("Debug mode must be disabled in production/beta mode.")
+        if bool(getattr(app, "testing", False)):
+            raise RuntimeError("Testing mode must be disabled in production/beta mode.")
+        if not str(os.environ.get("DATABASE_URL") or "").strip():
+            raise RuntimeError("DATABASE_URL must be configured in production/beta mode.")
+        if parsed.drivername not in {"postgresql", "postgresql+psycopg2", "postgresql+psycopg"}:
+            raise RuntimeError("PostgreSQL is required in production/beta mode.")
+        configured_secret = str(os.environ.get("SECRET_KEY") or os.environ.get("FLASK_SECRET_KEY") or "").strip()
+        weak = configured_secret.lower() in {"", "dev", "development", "changeme", "secret", "test", "default"}
+        if weak or len(configured_secret) < 32:
+            raise RuntimeError("A secure SECRET_KEY (>=32 chars) is required in production/beta mode.")
+        if header_override_allowed():
+            raise RuntimeError("Household header override must be disabled in production/beta mode.")
+
+    if _plaid_runtime_enabled() and not bool(str(os.environ.get("PLAID_TOKEN_ENCRYPTION_KEY") or "").strip()):
+        raise RuntimeError("Plaid is enabled but PLAID_TOKEN_ENCRYPTION_KEY is not configured.")
+
+
+def _validate_database_connectivity() -> None:
+    try:
+        with db.engine.connect() as conn:
+            conn.execute(text("SELECT 1"))
+    except Exception as exc:
+        safe_uri = _redacted_database_uri(str(app.config.get("SQLALCHEMY_DATABASE_URI") or ""))
+        raise RuntimeError(f"Database is unreachable or misconfigured: {safe_uri}") from exc
+
+
+def _build_confirmation_prompt(actions: dict) -> str:
+    pieces = [
+        "Please confirm these changes before I apply them:",
+    ]
+    if actions.get("pending_actions", {}).get("bills"):
+        pieces.append(f"- Add {len(actions['pending_actions']['bills'])} bill(s)")
+    if actions.get("pending_actions", {}).get("expenses"):
+        pieces.append(f"- Log {len(actions['pending_actions']['expenses'])} expense(s)")
+    if actions.get("grocery_list"):
+        pieces.append(f"- Add {len(actions['grocery_list'])} grocery item(s)")
+    if actions.get("grocery_items_added"):
+        pieces.append(f"- Add {len(actions['grocery_items_added'])} grocery item(s)")
+    pieces.append("Reply with 'confirm' to proceed, or 'cancel' to keep things as-is.")
+    return "\n".join(pieces)
+
+
+def record_action_audit(
+    actions: dict,
+    raw_text: str = '',
+    source: str = 'copilot',
+    user_id: str = 'anonymous',
+    operation_id: str | None = None,
+    undo_token: str | None = None,
+    commit: bool = True,
+) -> str:
+    """Persist a lightweight JSON audit row for executed intent actions.
+
+    Returns the generated undo token for the new audit row.
+    """
+    token = undo_token or secrets.token_urlsafe(24)
+    row = ActionAudit(
+        household_id=current_household_id(),
+        source=source,
+        user_id=(user_id or "anonymous")[:80],
+        raw_text=(raw_text or '')[:2000],
+        actions_json=json.dumps(actions),
+        undo_token=token,
+        operation_id=(operation_id or '').strip() or None,
+    )
+    db.session.add(row)
+    if commit:
+        db.session.commit()
+    return token
+
+
+def _load_audit_by_token(undo_token: str) -> ActionAudit | None:
+    if not undo_token:
+        return None
+    return _household_audit_query().filter_by(undo_token=undo_token).first()
+
+
+def _undo_actions_from_audit(audit: ActionAudit) -> dict:
+    """Reverse actions recorded in an audit row.
+
+    This is intentionally conservative: it only undoes persisted side effects
+    from the confirmed action payload and does not attempt complex repair.
+    """
+    try:
+        actions = json.loads(audit.actions_json or "{}")
+    except Exception:
+        actions = {}
+    if not isinstance(actions, dict):
+        actions = {}
+
+    def _as_action_list(key: str) -> list:
+        rows = actions.get(key, [])
+        return rows if isinstance(rows, list) else []
+
+    def _parse_iso_datetime(value: Any):
+        if not value:
+            return None
+        try:
+            return datetime.fromisoformat(str(value))
+        except Exception:
+            return None
+
+    def _normalize_legacy_grocery_row(row: Any) -> dict:
+        if isinstance(row, dict):
+            return {
+                "id": row.get("id"),
+                "item_name": row.get("item_name") or row.get("name") or "",
+            }
+        return {"id": None, "item_name": str(row or "")}
+
+    def _normalize_legacy_expense_row(row: Any) -> dict:
+        if not isinstance(row, dict):
+            return {"id": None, "description": "", "category": "", "amount": None}
+        return {
+            "id": row.get("id"),
+            "description": row.get("description") or "",
+            "category": row.get("category") or "",
+            "amount": row.get("amount"),
+        }
+
+    def _normalize_legacy_bill_row(row: Any) -> dict:
+        if not isinstance(row, dict):
+            return {
+                "id": None,
+                "name": "",
+                "amount": None,
+                "due_date": None,
+                "is_paid": False,
+                "is_gas_estimate": False,
+            }
+        return {
+            "id": row.get("id"),
+            "name": row.get("name") or "",
+            "amount": row.get("amount"),
+            "due_date": row.get("due_date"),
+            "is_paid": bool(row.get("is_paid", False)),
+            "is_gas_estimate": bool(row.get("is_gas_estimate", False)),
+            "previous_amount": row.get("previous_amount"),
+        }
+
+    undone = {
+        "bills_deleted": [],
+        "bills_restored": [],
+        "bills_reverted": [],
+        "expenses_deleted": [],
+        "income_deleted": [],
+        "balance_reconciliations_reverted": [],
+        "shopping_trip_corrections_reverted": [],
+        "grocery_items_deleted": [],
+        "recipes_removed": [],
+        "recipes_restored": [],
+    }
+    account = _household_account()
+
+    for raw_bill in _as_action_list("bills_added"):
+        bill = _normalize_legacy_bill_row(raw_bill)
+        bill_id = bill.get("id")
+        existing = _household_bill_query().filter_by(id=bill_id).first() if bill_id else None
+        if not existing and bill.get("name"):
+            existing = _household_bill_query().filter(Bill.name.ilike(f"%{bill['name']}%")).first()
+        if existing:
+            db.session.delete(existing)
+            undone["bills_deleted"].append({"id": existing.id, "name": existing.name})
+
+    for raw_bill in _as_action_list("bills_updated"):
+        bill = _normalize_legacy_bill_row(raw_bill)
+        previous_amount = bill.get("previous_amount")
+        if previous_amount is None:
+            continue
+        bill_id = bill.get("id")
+        existing = _household_bill_query().filter_by(id=bill_id).first() if isinstance(bill_id, int) else None
+        if existing is None and bill.get("name"):
+            existing = _household_bill_query().filter(Bill.name.ilike(f"%{bill['name']}%")).first()
+        if existing is None:
+            continue
+        existing.amount = float(previous_amount)
+        db.session.add(existing)
+        undone["bills_reverted"].append({"id": existing.id, "name": existing.name, "amount": existing.amount})
+
+    for raw_bill in _as_action_list("bills_removed"):
+        bill = _normalize_legacy_bill_row(raw_bill)
+        bill_id = bill.get("id")
+        existing = _household_bill_query().filter_by(id=bill_id).first() if isinstance(bill_id, int) else None
+        if existing is not None:
+            continue
+        name = str(bill.get("name") or "").strip()
+        amount = bill.get("amount")
+        if not name or amount is None:
+            continue
+        due_date = _parse_iso_datetime(bill.get("due_date")) or (datetime.utcnow() + timedelta(days=14))
+        restored = Bill(
+            household_id=current_household_id(),
+            id=bill_id if isinstance(bill_id, int) else None,
+            name=name,
+            amount=float(amount),
+            due_date=due_date,
+            is_paid=bool(bill.get("is_paid", False)),
+            is_gas_estimate=bool(bill.get("is_gas_estimate", False)),
+        )
+        db.session.add(restored)
+        db.session.flush()
+        undone["bills_restored"].append({"id": restored.id, "name": restored.name, "amount": restored.amount})
+
+    for raw_txn in _as_action_list("expenses_logged"):
+        txn = _normalize_legacy_expense_row(raw_txn)
+        txn_id = txn.get("id")
+        existing = _household_tx_query().filter_by(id=txn_id).first() if txn_id else None
+        if not existing and txn.get("description") and txn.get("amount") is not None:
+            existing = (
+                _household_tx_query()
+                .filter_by(description=txn["description"], amount=txn["amount"])
+                .order_by(ExpenseTransaction.id.desc())
+                .first()
+            )
+        if existing:
+            apply_balance_delta(current_household_id(), float(existing.amount or 0.0))
+            db.session.delete(existing)
+            undone["expenses_deleted"].append({"id": existing.id, "description": existing.description})
+
+    for raw_income in _as_action_list("income_logged"):
+        if not isinstance(raw_income, dict):
+            continue
+        income_id = raw_income.get("id")
+        existing = _household_tx_query().filter_by(id=income_id).first() if income_id else None
+        if not existing and raw_income.get("description") and raw_income.get("amount") is not None:
+            existing = (
+                _household_tx_query()
+                .filter_by(description=raw_income["description"], amount=raw_income["amount"], category="income")
+                .order_by(ExpenseTransaction.id.desc())
+                .first()
+            )
+        if existing:
+            apply_balance_delta(current_household_id(), -float(existing.amount or 0.0))
+            db.session.delete(existing)
+            undone["income_deleted"].append({"id": existing.id, "description": existing.description})
+
+    for raw_bal in reversed(_as_action_list("balance_reconciliations")):
+        if not isinstance(raw_bal, dict) or account is None:
+            continue
+        prev = raw_bal.get("previous_balance")
+        if prev is None:
+            continue
+        set_balance_absolute(current_household_id(), float(prev))
+        undone["balance_reconciliations_reverted"].append({
+            "previous_balance": float(prev),
+            "new_balance": float(raw_bal.get("new_balance") or prev),
+        })
+
+    for raw_corr in _as_action_list("shopping_trip_corrections"):
+        if not isinstance(raw_corr, dict):
+            continue
+        trip = None
+        if raw_corr.get("id"):
+            trip = _household_trip_query().filter_by(id=raw_corr.get("id")).first()
+        if trip is None and raw_corr.get("operation_id"):
+            trip = _household_trip_query().filter_by(operation_id=str(raw_corr.get("operation_id"))).first()
+        if trip is None and raw_corr.get("trip_token"):
+            trip = _household_trip_query().filter_by(trip_token=str(raw_corr.get("trip_token"))).first()
+        if trip is None:
+            continue
+
+        previous_actual = raw_corr.get("previous_actual_total")
+        if previous_actual is None:
+            continue
+        difference = float(raw_corr.get("difference") or 0.0)
+        trip.actual_total_cents = int(round(float(previous_actual) * 100))
+        txn = _household_tx_query().filter_by(id=trip.transaction_id).first()
+        prev_txn_amount = raw_corr.get("previous_transaction_amount")
+        if txn is not None and prev_txn_amount is not None:
+            txn.amount = float(prev_txn_amount)
+            db.session.add(txn)
+        apply_balance_delta(current_household_id(), difference)
+        db.session.add(trip)
+        undone["shopping_trip_corrections_reverted"].append({
+            "trip_token": trip.trip_token,
+            "reverted_actual_total": float(previous_actual),
+        })
+
+    grocery_rows = _as_action_list("grocery_items_added") + _as_action_list("grocery_list")
+    for raw_grocery in grocery_rows:
+        grocery = _normalize_legacy_grocery_row(raw_grocery)
+        gid = grocery.get("id")
+        item_name = grocery.get("item_name")
+        existing = _household_grocery_query().filter_by(id=gid).first() if gid else None
+        if not existing and item_name:
+            existing = (
+                _household_grocery_query()
+                .filter(GroceryItem.item_name.ilike(f"%{item_name}%"))
+                .order_by(GroceryItem.id.desc())
+                .first()
+            )
+        if existing:
+            db.session.delete(existing)
+            undone["grocery_items_deleted"].append({"id": existing.id, "item_name": existing.item_name})
+
+    for recipe in _as_action_list("recipes_added") + _as_action_list("recipes_auto_filled"):
+        if not isinstance(recipe, dict):
+            continue
+        recipe_id = recipe.get("id")
+        if recipe_id is None:
+            continue
+        plan_item = _household_meal_plan_query().filter_by(recipe_id=recipe_id).first()
+        if plan_item:
+            db.session.delete(plan_item)
+            undone["recipes_removed"].append({"recipe_id": recipe_id})
+
+    for recipe in _as_action_list("recipes_removed"):
+        if not isinstance(recipe, dict):
+            continue
+        recipe_id = recipe.get("id")
+        if recipe_id is None:
+            continue
+        if not _household_meal_plan_query().filter_by(recipe_id=recipe_id).first():
+            db.session.add(MealPlanItem(household_id=current_household_id(), recipe_id=recipe_id, source="copilot"))
+            undone["recipes_restored"].append({"recipe_id": recipe_id})
+
+    audit.undone_at = datetime.now(timezone.utc)
+    db.session.commit()
+    return undone
+
+
+def set_setting(key: str, value: str, *, commit: bool = True) -> None:
     """Upsert a user setting."""
-    row = UserSetting.query.get(key)
+    row = UserSetting.query.filter_by(
+        household_id=current_household_id(),
+        key=key,
+    ).first()
     if row:
         row.value = value
-        row.updated_at = datetime.utcnow()
+        row.updated_at = datetime.now(timezone.utc)
     else:
-        db.session.add(UserSetting(key=key, value=value))
-    db.session.commit()
+        db.session.add(UserSetting(household_id=current_household_id(), key=key, value=value))
+    if commit:
+        db.session.commit()
 
 
-class MealPlanItem(db.Model):
-    """A recipe selected for the current pay period (the active meal plan).
+def get_user_preference(key: str, default: str = '') -> str:
+    """Read an onboarding preference value by key."""
+    row = UserPreference.query.filter_by(
+        household_id=current_household_id(),
+        key=key,
+    ).first()
+    return row.value if row else default
 
-    This is the server-side source of truth for the Grocery tab's
-    "Active Pay-Period Recipes" expander. The Copilot writes matched
-    recipes here (source='copilot'), auto-fill recommendations
-    (source='autofill'), and the user's manual checkbox selection can
-    replace it entirely (source='user').
+
+def set_user_preference(key: str, value: str) -> None:
+    """Upsert an onboarding preference value by key."""
+    row = UserPreference.query.filter_by(
+        household_id=current_household_id(),
+        key=key,
+    ).first()
+    if row:
+        row.value = value
+        row.updated_at = datetime.now(timezone.utc)
+    else:
+        db.session.add(UserPreference(household_id=current_household_id(), key=key, value=value))
+
+
+def _parse_list_pref(raw: str) -> list[str]:
+    """Parse JSON array preferences safely from stored text."""
+    if not raw:
+        return []
+    try:
+        data = json.loads(raw)
+    except (TypeError, ValueError):
+        return []
+    if not isinstance(data, list):
+        return []
+    out = []
+    for item in data:
+        text = str(item or '').strip()
+        if text:
+            out.append(text)
+    return out
+
+
+def _normalize_list_input(values: Any) -> list[str]:
+    """Normalize onboarding list inputs from JSON arrays or CSV text."""
+    if values is None:
+        return []
+    if isinstance(values, str):
+        values = values.split(',')
+    if not isinstance(values, list):
+        values = [values]
+    out = []
+    for item in values:
+        text = str(item or '').strip()
+        if text and text.lower() not in {v.lower() for v in out}:
+            out.append(text)
+    return out
+
+
+def _coerce_positive_float(value: Any) -> float | None:
+    """Coerce onboarding numeric fields to a positive float or None."""
+    if value is None or value == '':
+        return None
+    try:
+        n = float(value)
+    except (TypeError, ValueError):
+        return None
+    if n <= 0:
+        return None
+    return round(n, 2)
+
+
+def _onboarding_state_payload() -> dict:
+    """Build a frontend-friendly onboarding state snapshot."""
+    hid = current_household_id()
+    account = get_household_account(hid)
+
+    favored = _parse_list_pref(get_user_preference('favorite_proteins', ''))
+    restrictions = _parse_list_pref(get_user_preference('dietary_restrictions', ''))
+    allergies = _parse_list_pref(get_user_preference('allergies', ''))
+
+    grocery_baseline_raw = get_user_preference('baseline_grocery_cost', '')
+    fuel_baseline_raw = get_user_preference('baseline_fuel_cost', '')
+    grocery_baseline = _coerce_positive_float(grocery_baseline_raw)
+    fuel_baseline = _coerce_positive_float(fuel_baseline_raw)
+
+    preferred_names = ['Phone', 'Internet', 'Utilities']
+    existing_bills = {b.name.lower(): b for b in _household_bill_query().filter_by(is_gas_estimate=False).all()}
+    bill_templates = []
+    for name in preferred_names:
+        existing = existing_bills.get(name.lower())
+        bill_templates.append({
+            'name': name,
+            'amount': round(existing.amount, 2) if existing else None,
+        })
+
+    gas_bill = _household_bill_query().filter_by(is_gas_estimate=True).first()
+    if fuel_baseline is None and gas_bill:
+        fuel_baseline = round(gas_bill.amount, 2)
+
+    pyf_target = _explicit_household_setting_decimal(PYF_TARGET_SETTING_KEY)
+    buffer = _explicit_household_setting_decimal(SAFE_BUFFER_SETTING_KEY)
+    shopping = _load_household_shopping_defaults()
+
+    return {
+        'is_onboarded': bool(account.is_onboarded),
+        'show_onboarding': not bool(account.is_onboarded),
+        'defaults': {
+            'household_size': int(account.household_size or 4),
+            'favorite_proteins': favored,
+            'dietary_restrictions': restrictions,
+            'allergies': allergies,
+            'baseline_grocery_cost': grocery_baseline,
+            'baseline_fuel_cost': fuel_baseline,
+            'checking_balance': round(float(account.checking_balance), 2) if account.checking_balance is not None else None,
+            'pay_period_days': int(account.pay_period_days or 0),
+            'expected_paycheck': round(float(account.expected_paycheck), 2) if account.expected_paycheck is not None else None,
+            'next_payday': get_setting(NEXT_PAYDAY_SETTING_KEY, '') or None,
+            'long_term_savings_target_percent': float(pyf_target) if pyf_target is not None else None,
+            'protected_buffer': float(buffer) if buffer is not None else None,
+            'shopping_style': shopping.get('shopping_style'),
+            'household_shopping_defaults': shopping.get('preferences'),
+            'location_sharing_enabled': get_setting(LOCATION_SHARING_SETTING_KEY, 'false') == 'true',
+        },
+        'bill_templates': bill_templates,
+        'readiness': _onboarding_readiness(account),
+    }
+
+
+def _onboarding_readiness(account: Account | None) -> dict:
+    """Report canonical readiness so onboarding completion is truthful.
+
+    Readiness is derived from the same canonical Pay Yourself First snapshot
+    used by the rest of the product; it is never faked from the
+    ``is_onboarded`` flag, so a household that only clicked Finish without
+    the critical financial setup still reports what is actually missing.
     """
-    __tablename__ = 'meal_plan'
-    id = db.Column(db.Integer, primary_key=True)
-    recipe_id = db.Column(db.Integer, db.ForeignKey('recipe.id'), nullable=False, unique=True)
-    source = db.Column(db.String(20), default='user')
-    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    if account is not None:
+        account = Account.query.filter_by(id=account.id).first() or account
+    safe = _compute_safe_to_spend_snapshot(account, owner_scope=household_scope_key())
+    missing = safe.get("missing_setup") or []
+    return {
+        "complete": bool(safe.get("complete")),
+        "safe_to_spend_available": bool(safe.get("complete")),
+        "missing_setup": missing,
+    }
+
+
+def _persist_onboarding_financial_basics(account: Account, data: dict[str, Any]) -> list[str]:
+    """Persist optional financial onboarding inputs to canonical authorities.
+
+    Only fields explicitly present are written, so revisiting onboarding never
+    erases existing values. Validation happens before any write; errors are
+    returned to the caller so no partial financial state is persisted.
+    """
+    errors: list[str] = []
+    hid = current_household_id()
+
+    balance_cents = None
+    if "checking_balance" in data and data["checking_balance"] not in (None, ""):
+        try:
+            balance_cents = _money_to_cents(data["checking_balance"], field_name="checking_balance")
+        except ValueError as exc:
+            errors.append(str(exc))
+        else:
+            if balance_cents < 0:
+                errors.append("checking_balance cannot be negative.")
+
+    pay_period_days = None
+    if "pay_period_days" in data and data["pay_period_days"] not in (None, ""):
+        try:
+            pay_period_days = int(data["pay_period_days"])
+        except (TypeError, ValueError):
+            errors.append("pay_period_days must be a whole number of days.")
+        else:
+            if pay_period_days < 1:
+                errors.append("pay_period_days must be at least 1 day.")
+
+    expected_paycheck = None
+    if "expected_paycheck" in data and data["expected_paycheck"] not in (None, ""):
+        try:
+            expected_paycheck = round(float(data["expected_paycheck"]), 2)
+        except (TypeError, ValueError):
+            errors.append("expected_paycheck must be a valid amount.")
+        else:
+            if expected_paycheck < 0:
+                errors.append("expected_paycheck cannot be negative.")
+
+    next_payday = None
+    if "next_payday" in data and data["next_payday"] not in (None, ""):
+        try:
+            next_payday = date.fromisoformat(str(data["next_payday"]))
+        except (TypeError, ValueError):
+            errors.append("next_payday must be a valid YYYY-MM-DD date.")
+
+    pyf_target = None
+    if "long_term_savings_target_percent" in data and data["long_term_savings_target_percent"] not in (None, ""):
+        try:
+            pyf_target = Decimal(str(data["long_term_savings_target_percent"]))
+        except (InvalidOperation, TypeError, ValueError):
+            errors.append("long_term_savings_target_percent must be a valid percentage.")
+        else:
+            if pyf_target < 0:
+                errors.append("long_term_savings_target_percent cannot be negative.")
+
+    buffer_cents = None
+    if "protected_buffer" in data and data["protected_buffer"] not in (None, ""):
+        try:
+            buffer_cents = _money_to_cents(data["protected_buffer"], field_name="protected_buffer")
+        except ValueError as exc:
+            errors.append(str(exc))
+        else:
+            if buffer_cents < 0:
+                errors.append("protected_buffer cannot be negative.")
+
+    if errors:
+        return errors
+
+    if balance_cents is not None:
+        set_balance_absolute(hid, _cents_to_float(balance_cents))
+    if pay_period_days is not None:
+        account.pay_period_days = pay_period_days
+    if expected_paycheck is not None:
+        account.expected_paycheck = expected_paycheck
+    if next_payday is not None:
+        set_setting(NEXT_PAYDAY_SETTING_KEY, next_payday.isoformat(), commit=False)
+    if pyf_target is not None:
+        set_setting(PYF_TARGET_SETTING_KEY, format(pyf_target.normalize(), "f"), commit=False)
+    if buffer_cents is not None:
+        set_setting(SAFE_BUFFER_SETTING_KEY, f"{_cents_to_float(buffer_cents):.2f}", commit=False)
+
+    return []
+
+
+def _normalize_household_default_value(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def _load_household_shopping_defaults(owner_scope: str = HOUSEHOLD_DEFAULT_OWNER_SCOPE) -> dict[str, Any]:
+    rows = HouseholdShoppingDefault.query.filter_by(household_id=current_household_id()).all()
+    category_defaults: dict[str, str] = {}
+    shopping_style = None
+    for row in rows:
+        if row.preference_kind == HOUSEHOLD_DEFAULT_KIND_CATEGORY:
+            category_defaults[row.preference_key] = row.preference_value
+        elif row.preference_kind == HOUSEHOLD_DEFAULT_KIND_STYLE and row.preference_key == HOUSEHOLD_STYLE_KEY:
+            shopping_style = row.preference_value
+    return {
+        "preferences": category_defaults,
+        "shopping_style": shopping_style,
+    }
+
+
+def _save_household_shopping_defaults(
+    payload: dict[str, Any],
+    owner_scope: str = HOUSEHOLD_DEFAULT_OWNER_SCOPE,
+    *,
+    commit: bool = True,
+) -> tuple[bool, list[str]]:
+    errors: list[str] = []
+    if not isinstance(payload, dict):
+        return False, ["Body must be a JSON object."]
+
+    raw_preferences = payload.get("preferences", {})
+    if raw_preferences is None:
+        raw_preferences = {}
+    if not isinstance(raw_preferences, dict):
+        errors.append("preferences must be an object keyed by canonical preference key.")
+        raw_preferences = {}
+
+    invalid_keys = sorted(key for key in raw_preferences.keys() if key not in HOUSEHOLD_DEFAULT_ALLOWED_VALUES)
+    if invalid_keys:
+        errors.append("Unknown preference keys: " + ", ".join(invalid_keys))
+
+    normalized_preferences: dict[str, str | None] = {}
+    for key, value in raw_preferences.items():
+        if key not in HOUSEHOLD_DEFAULT_ALLOWED_VALUES:
+            continue
+        normalized = _normalize_household_default_value(value)
+        if normalized is None:
+            normalized_preferences[key] = None
+            continue
+        if normalized not in HOUSEHOLD_DEFAULT_ALLOWED_VALUES[key]:
+            errors.append(f"Invalid value '{normalized}' for preference key '{key}'.")
+            continue
+        normalized_preferences[key] = normalized
+
+    shopping_style_present = "shopping_style" in payload
+    normalized_style = _normalize_household_default_value(payload.get("shopping_style")) if shopping_style_present else None
+    if shopping_style_present and normalized_style is not None and normalized_style not in SHOPPING_STYLE_ALLOWED_VALUES:
+        errors.append(f"Invalid shopping_style '{normalized_style}'.")
+
+    if errors:
+        return False, errors
+
+    for key, value in normalized_preferences.items():
+        existing = HouseholdShoppingDefault.query.filter_by(
+            household_id=current_household_id(),
+            preference_kind=HOUSEHOLD_DEFAULT_KIND_CATEGORY,
+            preference_key=key,
+        ).first()
+        if value is None:
+            if existing is not None:
+                db.session.delete(existing)
+            continue
+        if existing is None:
+            db.session.add(HouseholdShoppingDefault(
+                household_id=current_household_id(),
+                owner_scope=owner_scope,
+                preference_kind=HOUSEHOLD_DEFAULT_KIND_CATEGORY,
+                preference_key=key,
+                preference_value=value,
+            ))
+        else:
+            existing.preference_value = value
+            existing.updated_at = datetime.now(timezone.utc)
+
+    if shopping_style_present:
+        existing_style = HouseholdShoppingDefault.query.filter_by(
+            household_id=current_household_id(),
+            preference_kind=HOUSEHOLD_DEFAULT_KIND_STYLE,
+            preference_key=HOUSEHOLD_STYLE_KEY,
+        ).first()
+        if normalized_style is None:
+            if existing_style is not None:
+                db.session.delete(existing_style)
+        elif existing_style is None:
+            db.session.add(HouseholdShoppingDefault(
+                household_id=current_household_id(),
+                owner_scope=owner_scope,
+                preference_kind=HOUSEHOLD_DEFAULT_KIND_STYLE,
+                preference_key=HOUSEHOLD_STYLE_KEY,
+                preference_value=normalized_style,
+            ))
+        else:
+            existing_style.preference_value = normalized_style
+            existing_style.updated_at = datetime.now(timezone.utc)
+
+    if commit:
+        db.session.commit()
+    return True, []
+
+
+def seed_default_user_preferences(user_id: str = "anonymous", *, commit: bool = True) -> dict:
+    """Seed a curated starter set of favorites and defaults for a new account.
+
+    The current app stores recipe favorites globally, so this helper marks a
+    small staple set as favorite once and records the seed so onboarding can
+    remain idempotent.
+    """
+    starter_record = get_user_preference("starter_preferences_seeded", "")
+    if starter_record:
+        return {"seeded": False, "titles": [], "user_id": user_id, "already_seeded": True}
+
+    seeded_titles: list[str] = []
+    for title in DEFAULT_STARTER_RECIPE_TITLES:
+        recipe = Recipe.query.filter(Recipe.title.ilike(title)).first()
+        if recipe is None:
+            continue
+        if not bool(getattr(recipe, "is_favorite", False)):
+            recipe.is_favorite = True
+        seeded_titles.append(recipe.title)
+
+    if seeded_titles:
+        set_user_preference(
+            "starter_preferences_seeded",
+            json.dumps({"user_id": user_id, "titles": seeded_titles}),
+        )
+        set_user_preference("starter_grocery_items", json.dumps(DEFAULT_STARTER_GROCERY_ITEMS))
+        if commit:
+            db.session.commit()
+
+    return {
+        "seeded": bool(seeded_titles),
+        "titles": seeded_titles,
+        "user_id": user_id,
+        "already_seeded": False,
+    }
 
 
 # =============================================================================
@@ -208,6 +1196,29 @@ def _coerce_amount(value):
         return 0.0
 
 
+def _serialize_recipe_ingredient(ingredient):
+    """Serialize stored fidelity fields plus a non-fabricated display string."""
+    name = str(ingredient.product_name or "").strip()
+    has_requirement_prefix = bool(re.match(
+        r"^(?:\d|[¼½¾⅓⅔⅛⅜⅝⅞]|one\b|two\b|three\b|four\b|five\b|six\b|seven\b|eight\b|nine\b|ten\b|a\b|an\b)",
+        name,
+        re.IGNORECASE,
+    ))
+    if ingredient.quantity is None or has_requirement_prefix:
+        display_text = name
+    else:
+        quantity = f"{float(ingredient.quantity):g}"
+        display_text = f"{quantity}{f' {ingredient.unit}' if ingredient.unit else ''} {name}".strip()
+    return {
+        "id": ingredient.id,
+        "product_name": ingredient.product_name,
+        "clean_keyword": ingredient.clean_keyword,
+        "quantity": ingredient.quantity,
+        "unit": ingredient.unit,
+        "display_text": display_text,
+    }
+
+
 def _serialize_recipe(r):
     """Serialize a Recipe row into the standard API payload shape."""
     return {
@@ -215,19 +1226,18 @@ def _serialize_recipe(r):
         "title": r.title,
         "servings": r.servings,
         "estimated_cost_per_serving": r.estimated_cost_per_serving,
+        "is_favorite": bool(getattr(r, "is_favorite", False)),
+        "usage_frequency": int(getattr(r, "usage_frequency", 0) or 0),
+        "last_selected_date": (
+            r.last_selected_date.isoformat() if getattr(r, "last_selected_date", None) else None
+        ),
         "source_url": r.source_url or "",
         "instructions": r.instructions,
-        "ingredients": [{
-            "id": i.id,
-            "product_name": i.product_name,
-            "clean_keyword": i.clean_keyword,
-            "quantity": i.quantity,
-            "unit": i.unit,
-        } for i in r.ingredients],
+        "ingredients": [_serialize_recipe_ingredient(i) for i in r.ingredients],
     }
 
 
-def _match_recipe_by_title(title):
+def _match_recipe_by_title(title):  # pyright: ignore[reportUnusedFunction]
     """Fuzzy-match a natural-language recipe title against the local DB.
 
     Token overlap scoring: "chicken rice bowl" matches "Chicken Rice Bowl"
@@ -256,37 +1266,9 @@ def _match_recipe_by_title(title):
     return None
 
 
-def _recommend_recipes(exclude_ids, limit=14, seed_ids=None):
-    """Recommend recipes the user will likely like.
-
-    Scores every candidate by ingredient overlap with the already-selected
-    meal-plan recipes (*seed_ids*), the user's pantry and brand preferences,
-    and cheaper per-serving costs. Excludes *exclude_ids* (already in plan).
-    Returns up to *limit* Recipe rows, best-first.
-    """
-    seed_kws = set()
-    if seed_ids:
-        for r in Recipe.query.filter(Recipe.id.in_(seed_ids)).all():
-            for ing in r.ingredients:
-                seed_kws.add(ing.clean_keyword.lower())
-
-    pantry_kws = {i.clean_keyword.lower() for i in PantryItem.query.all()}
-    brand_prefs = {b.clean_keyword.lower(): b for b in BrandPreference.query.all()}
-
-    q = Recipe.query
-    if exclude_ids:
-        q = q.filter(~Recipe.id.in_(exclude_ids))
-    scored = []
-    for r in q.all():
-        kw = {i.clean_keyword.lower() for i in r.ingredients}
-        overlap = len(kw & seed_kws) if seed_kws else 0
-        pantry_overlap = len(kw & pantry_kws)
-        brand_match = sum(1 for k in kw if k in brand_prefs)
-        cost = r.estimated_cost_per_serving or 5.0
-        score = (overlap * 3.0) + (pantry_overlap * 2.5) + (brand_match * 1.5) - (cost * 0.25)
-        scored.append((score, r))
-    scored.sort(key=lambda x: x[0], reverse=True)
-    return [r for _, r in scored[:limit]]
+# Recipe recommendation now in services.recipe_recommend module
+# Keep explicit reference for _match_recipe_by_title which is still used.
+_ = (_match_recipe_by_title,)
 
 
 # =============================================================================
@@ -309,12 +1291,740 @@ def normalize_to_standard_unit(quantity, unit):
     multiplier = UNIT_TO_OZ.get(clean_u, 1.0)
     return quantity * multiplier
 
+
+def _is_liquid_keyword(keyword):
+    kw = (keyword or '').lower()
+    liquid_tokens = (
+        'milk', 'cream', 'broth', 'stock', 'water', 'juice',
+        'oil', 'vinegar', 'sauce', 'syrup'
+    )
+    return any(tok in kw for tok in liquid_tokens)
+
+
+def infer_unit_dimension(unit, keyword=None):
+    """Classify recipe/pantry units for package-compatibility checks.
+
+    Returns one of: "mass", "volume", "count", or "unknown".
+    """
+    u = (unit or '').strip().lower()
+    kw = (keyword or '').lower()
+
+    # Safe commodity-specific conversion: butter sticks are a standard mass
+    # measure in US packaging (1 stick = 4 oz = 1/4 lb).
+    if u in {'stick', 'sticks'} and 'butter' in kw:
+        return 'mass'
+
+    if u in {'oz', 'ounce', 'ounces', 'lb', 'lbs', 'pound', 'pounds', 'g', 'gram', 'grams', 'kg', 'kilogram', 'kilograms'}:
+        return 'mass'
+    if u in {'cup', 'cups', 'tbsp', 'tablespoon', 'tablespoons', 'tsp', 'teaspoon', 'teaspoons'}:
+        # Do not assume these culinary volume units map safely to mass for
+        # arbitrary ingredients. Only treat as reliable when the ingredient is
+        # clearly liquid-like.
+        return 'volume' if _is_liquid_keyword(keyword) else 'unknown'
+    if u in {'fl oz', 'floz', 'fluid ounce', 'fluid ounces', 'ml', 'milliliter', 'milliliters', 'l', 'liter', 'liters', 'qt', 'quart', 'quarts', 'pt', 'pint', 'pints', 'gal', 'gallon', 'gallons'}:
+        return 'volume'
+    if u in {'unit', 'item', 'ea', 'each', 'can', 'stick', 'sticks', 'count', 'ct', 'box', 'package', 'pack'}:
+        return 'count'
+    return 'unknown'
+
+
+def normalize_requirement_for_selection(quantity, unit, keyword):
+    """Normalize ingredient quantities only when conversion is safe.
+
+    Returns (normalized_quantity, required_dimension, reliable_conversion).
+    """
+    qty = float(quantity or 0)
+    u = (unit or '').strip().lower()
+    kw = (keyword or '').lower()
+
+    # Safe commodity-specific conversion for butter sticks.
+    if u in {'stick', 'sticks'} and 'butter' in kw:
+        return qty * 4.0, 'mass', True
+
+    dim = infer_unit_dimension(unit, keyword=keyword)
+    if dim == 'unknown':
+        return qty, 'unknown', False
+
+    return normalize_to_standard_unit(qty, unit), dim, True
+
+
+def _normalize_manual_grocery_keyword(value: Any) -> str:
+    """Convert a direct grocery request to the same normalized keyword used in recipe ingredients."""
+    text = (value or '').strip()
+    if not text:
+        return ''
+    text = text.lower().replace('_', ' ')
+    text = re.sub(r'[^a-z0-9]+', ' ', text)
+    text = ' '.join(text.split())
+    return text.replace(' ', '_')
+
+
+_MONEY_QUANT = Decimal("0.01")
+
+
+def _to_decimal_money(value: Any, *, field_name: str = "amount", allow_negative: bool = False) -> Decimal:
+    try:
+        dec = Decimal(str(value))
+    except (InvalidOperation, TypeError, ValueError):
+        raise ValueError(f"Invalid {field_name}.")
+    if not allow_negative and dec < Decimal("0"):
+        raise ValueError(f"{field_name} cannot be negative.")
+    return dec.quantize(_MONEY_QUANT, rounding=ROUND_HALF_UP)
+
+
+def _money_to_cents(value: Any, *, field_name: str = "amount") -> int:
+    dec = _to_decimal_money(value, field_name=field_name)
+    cents = (dec * 100).to_integral_value(rounding=ROUND_HALF_UP)
+    return int(cents)
+
+
+def _cents_to_float(cents: int) -> float:
+    return float((Decimal(int(cents)) / Decimal("100")).quantize(_MONEY_QUANT))
+
+
+def _normalize_store_tax_context(
+    *,
+    account: Account,
+    retailer: str,
+    store_name: str,
+    store_id: str,
+    store_address: str,
+    postal_code: str,
+) -> dict[str, Any]:
+    return {
+        "retailer": str(retailer or "").strip().lower() or "unknown",
+        "retailer_store_id": str(store_id or "").strip() or "unknown",
+        "store_name": str(store_name or "").strip(),
+        "store_address": str(store_address or "").strip(),
+        "zip_code": _normalize_zip_code(postal_code or account.zip_code or ""),
+        "city_state": str(account.city_state or "").strip(),
+        "latitude": account.latitude,
+        "longitude": account.longitude,
+    }
+
+
+def _apply_owned_tax_to_cart(
+    *,
+    account: Account,
+    owner_scope: str,
+    cart_items: list[dict[str, Any]],
+    retailer: str,
+    store_name: str,
+    store_id: str,
+    store_address: str,
+    postal_code: str,
+) -> dict[str, Any]:
+    calculation_date = datetime.now(timezone.utc).date()
+    context = _normalize_store_tax_context(
+        account=account,
+        retailer=retailer,
+        store_name=store_name,
+        store_id=store_id,
+        store_address=store_address,
+        postal_code=postal_code,
+    )
+
+    profile = resolve_store_tax_profile(
+        retailer=context["retailer"],
+        retailer_store_id=context["retailer_store_id"],
+        store_name=context["store_name"],
+        store_address=context["store_address"],
+        zip_code=context["zip_code"],
+        city_state=context["city_state"],
+        latitude=context["latitude"],
+        longitude=context["longitude"],
+        calculation_date=calculation_date,
+        owner_scope=owner_scope,
+    )
+
+    tax_result = calculate_cart_tax(
+        store_tax_profile=profile,
+        cart_items=cart_items,
+        calculation_date=calculation_date,
+        owner_scope=owner_scope,
+    )
+
+    weighted_rate = 0.0
+    if tax_result.subtotal_cents > 0:
+        weighted_rate = float(tax_result.tax_cents / tax_result.subtotal_cents)
+
+    configured_grocery_rate = account.grocery_tax_rate
+    if configured_grocery_rate is None:
+        configured_grocery_rate = account.sales_tax_rate
+    if configured_grocery_rate is None:
+        configured_grocery_rate = 0.0
+
+    return {
+        "subtotal": tax_cents_to_float(tax_result.subtotal_cents),
+        "tax_amount": tax_cents_to_float(tax_result.tax_cents),
+        "total_cart_cost": tax_cents_to_float(tax_result.estimated_total_cents),
+        "grocery_tax_rate": round(float(configured_grocery_rate) * 100, 3),
+        "applied_tax_pct": round(weighted_rate * 100, 3),
+        "tax_engine": {
+            "provider": "rung_owned",
+            "precision": tax_result.precision,
+            "confidence": tax_result.confidence,
+            "source_version": tax_result.source_version,
+            "unknown_class_count": tax_result.unknown_class_count,
+            "degraded_reason": tax_result.degraded_reason,
+            "subtotal_by_class_cents": tax_result.subtotal_by_class_cents,
+            "tax_by_class_cents": tax_result.tax_by_class_cents,
+            "effective_rate_bps": tax_result.effective_rate_bps,
+            "unknown_policy": "conservative:" + "unknown_uses_general_merchandise_rate",
+        },
+    }
+
+
+def _parse_iso_datetime(value: Any) -> datetime | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    try:
+        if text.endswith("Z"):
+            text = text[:-1] + "+00:00"
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _get_safe_buffer_cents() -> int:
+    raw = get_setting(SAFE_BUFFER_SETTING_KEY, "0")
+    try:
+        return _money_to_cents(raw, field_name="safe_to_spend_buffer")
+    except ValueError:
+        return 0
+
+
+def _latest_manual_activity_at() -> datetime | None:
+    row = (
+        _household_tx_query()
+        .filter(ExpenseTransaction.source == "manual")
+        .order_by(ExpenseTransaction.date.desc(), ExpenseTransaction.id.desc())
+        .first()
+    )
+    if row is None or row.date is None:
+        return None
+    dt = row.date
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def _planned_grocery_commitment_cents(account: Account, bills_total_cents: int, gas_cents: int) -> tuple[int, str]:
+    """Return the pay-period grocery commitment in cents and its source.
+
+    Commitments should come from the period plan, not from every balance
+    mutation. Prefer expected paycheck as the planning base.
+    """
+    pct = Decimal(str(account.food_allocation_pct or 0))
+    if pct <= 0:
+        return 0, "none"
+
+    expected_paycheck_cents = _money_to_cents(
+        getattr(account, "expected_paycheck", 0) or 0,
+        field_name="expected_paycheck",
+    )
+    if expected_paycheck_cents > 0:
+        planning_base_cents = max(0, expected_paycheck_cents - bills_total_cents - gas_cents)
+        source = "expected_paycheck"
+    else:
+        checking_cents = _money_to_cents(account.checking_balance, field_name="checking_balance")
+        planning_base_cents = max(0, checking_cents - bills_total_cents - gas_cents)
+        source = "checking_balance_fallback"
+
+    commitment_cents = max(
+        0,
+        int(
+            (
+                Decimal(planning_base_cents)
+                * pct
+                / Decimal("100")
+            ).to_integral_value(rounding=ROUND_HALF_UP)
+        ),
+    )
+    return commitment_cents, source
+
+
+def _infer_next_income(account: Account, now_utc: datetime) -> dict[str, Any]:
+    period_days = max(1, int(account.pay_period_days or 0))
+    explicit_payday = get_setting(NEXT_PAYDAY_SETTING_KEY, "")
+    if explicit_payday:
+        try:
+            next_date = date.fromisoformat(explicit_payday)
+        except ValueError:
+            next_date = None
+        if next_date is not None:
+            while next_date < now_utc.date():
+                next_date += timedelta(days=period_days)
+            return {
+                "known": True,
+                "date": datetime.combine(next_date, datetime.min.time(), tzinfo=timezone.utc),
+                "days_until": max(0, (next_date - now_utc.date()).days),
+                "amount": round(float(account.expected_paycheck or 0.0), 2) or None,
+                "source": "user_pay_schedule",
+            }
+    latest_income = (
+        _household_tx_query()
+        .filter(ExpenseTransaction.category == "income")
+        .order_by(ExpenseTransaction.date.desc(), ExpenseTransaction.id.desc())
+        .first()
+    )
+    if latest_income is None or latest_income.date is None:
+        return {
+            "known": False,
+            "date": None,
+            "days_until": None,
+            "amount": round(float(account.expected_paycheck or 0.0), 2) or None,
+            "source": "missing_income_history",
+        }
+
+    base_dt = latest_income.date
+    if base_dt.tzinfo is None:
+        base_dt = base_dt.replace(tzinfo=timezone.utc)
+    else:
+        base_dt = base_dt.astimezone(timezone.utc)
+
+    next_dt = base_dt
+    while next_dt.date() <= now_utc.date():
+        next_dt = next_dt + timedelta(days=period_days)
+
+    amount = float(account.expected_paycheck or 0.0)
+    if amount <= 0:
+        amount = float(latest_income.amount or 0.0)
+
+    return {
+        "known": True,
+        "date": next_dt,
+        "days_until": max(0, (next_dt.date() - now_utc.date()).days),
+        "amount": round(amount, 2),
+        "source": "derived_from_income_history",
+    }
+
+
+def _household_readiness(account: Account | None, owner_scope: str = "anonymous") -> dict[str, Any]:
+    missing_financial: list[str] = []
+    setup_gaps: list[str] = []
+
+    if account is None:
+        missing_financial.append("checking_balance")
+        missing_financial.append("pay_period_or_income_history")
+        return {
+            "ready": False,
+            "safe_to_spend_available": False,
+            "missing_critical": missing_financial,
+            "setup_gaps": setup_gaps,
+        }
+
+    if account.checking_balance is None:
+        missing_financial.append("checking_balance")
+
+    pay_period_days = int(account.pay_period_days or 0)
+    expected_paycheck = float(account.expected_paycheck or 0.0)
+    has_income_history = bool(
+        _household_tx_query()
+        .filter(ExpenseTransaction.category == "income")
+        .first()
+    )
+    if pay_period_days <= 0 or (expected_paycheck <= 0 and not has_income_history):
+        missing_financial.append("pay_period_or_income_history")
+
+    zip_code = str(account.zip_code or "").strip()
+    if not zip_code:
+        setup_gaps.append("zip_code")
+
+    selected_store = get_selected_store(current_household_id(), account=account)
+    retailer = str(selected_store.get("retailer") or "walmart").strip().lower()
+    if retailer == "kroger" and not str(selected_store.get("store_id") or "").strip():
+        setup_gaps.append("kroger_location")
+
+    return {
+        "ready": len(missing_financial) == 0,
+        "safe_to_spend_available": len(missing_financial) == 0,
+        "missing_critical": missing_financial,
+        "setup_gaps": setup_gaps,
+        "retailer": retailer,
+        "owner_scope": owner_scope,
+    }
+
+
+def _build_freshness(owner_scope: str) -> dict[str, Any]:
+    controls = get_usage_controls()
+    switches = controls.get("kill_switches") or {}
+    plaid_sync_enabled = bool(switches.get("plaid_sync_enabled", True))
+    plaid_status = get_plaid_connection_status(owner_scope)
+    items = plaid_status.get("items") or []
+
+    latest_sync: datetime | None = None
+    for item in items:
+        parsed = _parse_iso_datetime((item or {}).get("last_sync_at"))
+        if parsed is not None and (latest_sync is None or parsed > latest_sync):
+            latest_sync = parsed
+
+    if plaid_status.get("connected"):
+        if latest_sync is not None:
+            stamp = latest_sync.strftime("%b %d, %Y %I:%M %p UTC")
+            if plaid_sync_enabled:
+                text = f"Bank updated {stamp}"
+            else:
+                text = f"Bank sync paused; using last bank update {stamp}"
+            return {
+                "source": "bank",
+                "bank_connected": True,
+                "plaid_sync_enabled": plaid_sync_enabled,
+                "last_sync_at": latest_sync.isoformat(),
+                "text": text,
+            }
+        if plaid_sync_enabled:
+            text = "Bank connected; waiting for first sync"
+        else:
+            text = "Bank connected; sync paused"
+        return {
+            "source": "bank",
+            "bank_connected": True,
+            "plaid_sync_enabled": plaid_sync_enabled,
+            "last_sync_at": None,
+            "text": text,
+        }
+
+    manual_at = _latest_manual_activity_at()
+    if manual_at is None:
+        text = "Manual balance mode"
+    else:
+        text = f"Manual balance last confirmed {manual_at.strftime('%b %d, %Y')}"
+    return {
+        "source": "manual",
+        "bank_connected": False,
+        "plaid_sync_enabled": plaid_sync_enabled,
+        "last_sync_at": None,
+        "text": text,
+    }
+
+
+def _compute_legacy_safe_to_spend_snapshot(account: Account, owner_scope: str = "anonymous", now_utc: datetime | None = None) -> dict[str, Any]:
+    readiness = _household_readiness(account, owner_scope=owner_scope)
+    if not readiness.get("safe_to_spend_available", False):
+        return {
+            "state": "needs_setup",
+            "safe_to_spend_cents": None,
+            "safe_to_spend": None,
+            "overcommitted": False,
+            "until_payday_days": None,
+            "next_expected_income": {
+                "known": False,
+                "date": None,
+                "date_display": None,
+                "amount": None,
+                "source": "missing_setup",
+            },
+            "breakdown": {
+                "lines": [],
+                "checks": {"sum_matches_safe_to_spend": False},
+            },
+            "components": {
+                "usable_money": float(account.checking_balance or 0.0),
+                "bills_before_payday": 0.0,
+                "grocery_commitment_total": 0.0,
+                "grocery_spend_to_date": 0.0,
+                "groceries_remaining": 0.0,
+                "other_committed_spending": 0.0,
+                "protected_buffer": _cents_to_float(_get_safe_buffer_cents()),
+                "grocery_commitment_source": "unavailable",
+            },
+            "freshness": _build_freshness(owner_scope),
+            "explanation": "Safe-to-Spend is unavailable until setup is complete.",
+            "window_end": None,
+            "readiness": readiness,
+        }
+
+    now = now_utc or datetime.now(timezone.utc)
+    next_income = _infer_next_income(account, now)
+
+    if next_income.get("known") and isinstance(next_income.get("date"), datetime):
+        window_end = next_income["date"]
+    else:
+        window_end = now + timedelta(days=max(1, int(account.pay_period_days or 14)))
+
+    bills = (
+        _household_bill_query()
+        .filter(
+            Bill.is_paid == False,
+            Bill.is_gas_estimate == False,
+            Bill.due_date <= window_end,
+        )
+        .all()
+    )
+    bills_total_cents = sum(_money_to_cents(row.amount, field_name="bill amount") for row in bills)
+
+    gas_bill = _household_bill_query().filter_by(is_gas_estimate=True, is_paid=False).first()
+    gas_cents = _money_to_cents(gas_bill.amount if gas_bill else 60.0, field_name="gas allocation")
+
+    checking_cents = _money_to_cents(account.checking_balance, field_name="checking_balance")
+    food_budget_cents, food_budget_source = _planned_grocery_commitment_cents(
+        account,
+        bills_total_cents,
+        gas_cents,
+    )
+
+    grocery_spend_cents = _money_to_cents(_sum_grocery_spend_for_period(account, now), field_name="grocery_spend_to_date")
+    grocery_remaining_cents = max(0, food_budget_cents - grocery_spend_cents)
+
+    buffer_cents = _get_safe_buffer_cents()
+    safe_to_spend_cents = checking_cents - bills_total_cents - gas_cents - grocery_remaining_cents - buffer_cents
+
+    if safe_to_spend_cents < 0:
+        state = "overcommitted"
+    elif safe_to_spend_cents <= 5000:
+        state = "tight"
+    else:
+        state = "positive"
+
+    lines = [
+        {"key": "usable_money", "label": "Current usable money", "amount_cents": checking_cents},
+        {"key": "bills_before_payday", "label": "Bills before payday", "amount_cents": -bills_total_cents},
+        {"key": "groceries_remaining", "label": "Groceries remaining", "amount_cents": -grocery_remaining_cents},
+        {"key": "other_committed", "label": "Other committed spending", "amount_cents": -gas_cents},
+        {"key": "protected_buffer", "label": "Protected buffer", "amount_cents": -buffer_cents},
+        {"key": "safe_to_spend", "label": "Safe to Spend", "amount_cents": safe_to_spend_cents},
+    ]
+
+    freshness = _build_freshness(owner_scope)
+    next_income_date = next_income.get("date")
+
+    explanation = None
+    if state == "overcommitted":
+        explanation = (
+            "Your protected bills, grocery needs, and buffer exceed the money "
+            f"available before payday by ${_cents_to_float(abs(safe_to_spend_cents)):.2f}."
+        )
+    elif not next_income.get("known"):
+        explanation = "Next payday is not set. Safe-to-Spend is based on known balances, bills, groceries, and buffer."
+
+    return {
+        "state": state,
+        "safe_to_spend_cents": safe_to_spend_cents,
+        "safe_to_spend": _cents_to_float(safe_to_spend_cents),
+        "overcommitted": state == "overcommitted",
+        "until_payday_days": next_income.get("days_until"),
+        "next_expected_income": {
+            "known": bool(next_income.get("known")),
+            "date": next_income_date.isoformat() if isinstance(next_income_date, datetime) else None,
+            "date_display": next_income_date.strftime("%b %d") if isinstance(next_income_date, datetime) else None,
+            "amount": next_income.get("amount"),
+            "source": next_income.get("source"),
+        },
+        "breakdown": {
+            "lines": [
+                {
+                    "key": row["key"],
+                    "label": row["label"],
+                    "amount_cents": int(row["amount_cents"]),
+                    "amount": _cents_to_float(int(row["amount_cents"])),
+                }
+                for row in lines
+            ],
+            "checks": {
+                "sum_matches_safe_to_spend": (
+                    checking_cents - bills_total_cents - grocery_remaining_cents - gas_cents - buffer_cents
+                ) == safe_to_spend_cents,
+            },
+        },
+        "components": {
+            "usable_money": _cents_to_float(checking_cents),
+            "bills_before_payday": _cents_to_float(bills_total_cents),
+            "grocery_commitment_total": _cents_to_float(food_budget_cents),
+            "grocery_spend_to_date": _cents_to_float(grocery_spend_cents),
+            "groceries_remaining": _cents_to_float(grocery_remaining_cents),
+            "other_committed_spending": _cents_to_float(gas_cents),
+            "protected_buffer": _cents_to_float(buffer_cents),
+            "grocery_commitment_source": food_budget_source,
+        },
+        "freshness": freshness,
+        "explanation": explanation,
+        "window_end": window_end.isoformat(),
+        "readiness": readiness,
+    }
+
+
+def _explicit_household_setting_decimal(key: str) -> Decimal | None:
+    row = UserSetting.query.filter_by(household_id=current_household_id(), key=key).first()
+    if row is None:
+        return None
+    try:
+        value = Decimal(str(row.value))
+    except (InvalidOperation, TypeError, ValueError):
+        return None
+    return value
+
+
+def _explicit_household_preference_cents(key: str) -> int | None:
+    row = UserPreference.query.filter_by(household_id=current_household_id(), key=key).first()
+    if row is None:
+        return None
+    try:
+        cents = _money_to_cents(row.value, field_name=key)
+    except ValueError:
+        return None
+    return cents if cents >= 0 else None
+
+
+def _compute_safe_to_spend_snapshot(account: Account, owner_scope: str = "anonymous", now_utc: datetime | None = None) -> dict[str, Any]:
+    """Build the canonical household Pay Yourself First snapshot."""
+    from services.pyf_financial_state import calculate_pyf_snapshot
+
+    now = now_utc or datetime.now(timezone.utc)
+    missing: list[str] = []
+    checking_cents = None
+    if account is None or account.checking_balance is None:
+        missing.append("checking_balance")
+    else:
+        checking_cents = _money_to_cents(account.checking_balance, field_name="checking_balance")
+
+    pay_period_days = int(getattr(account, "pay_period_days", 0) or 0) if account is not None else 0
+    if pay_period_days <= 0:
+        missing.append("pay_period_days")
+
+    next_income = _infer_next_income(account, now) if account is not None and pay_period_days > 0 else {"known": False}
+    if not next_income.get("known"):
+        missing.append("payday")
+
+    period_income_cents = None
+    if account is not None and float(account.expected_paycheck or 0) > 0:
+        period_income_cents = _money_to_cents(account.expected_paycheck, field_name="expected_paycheck")
+    elif next_income.get("amount") is not None and float(next_income.get("amount") or 0) > 0:
+        period_income_cents = _money_to_cents(next_income["amount"], field_name="period_income")
+    else:
+        missing.append("current_period_income")
+
+    target_pct = _explicit_household_setting_decimal(PYF_TARGET_SETTING_KEY)
+    if target_pct is None or target_pct < 0:
+        target_pct = None
+        missing.append("long_term_savings_target_percent")
+
+    buffer_cents = _explicit_household_setting_decimal(SAFE_BUFFER_SETTING_KEY)
+    if buffer_cents is None or buffer_cents < 0:
+        protected_buffer_cents = None
+        missing.append("protected_checking_buffer")
+    else:
+        protected_buffer_cents = _money_to_cents(buffer_cents, field_name="protected_buffer")
+
+    grocery_baseline_cents = _explicit_household_preference_cents("baseline_grocery_cost")
+    if grocery_baseline_cents is None:
+        missing.append("grocery_need")
+
+    window_end = next_income.get("date") if isinstance(next_income.get("date"), datetime) else None
+    if window_end is None and pay_period_days > 0:
+        window_end = now + timedelta(days=pay_period_days)
+
+    bills_total_cents = 0
+    if window_end is not None:
+        bills = _household_bill_query().filter(
+            Bill.is_paid == False,
+            Bill.is_gas_estimate == False,
+            Bill.due_date <= window_end,
+        ).all()
+        bills_total_cents = sum(_money_to_cents(row.amount, field_name="bill amount") for row in bills)
+
+    fuel_bill = _household_bill_query().filter_by(is_gas_estimate=True, is_paid=False).first()
+    if fuel_bill is None:
+        fuel_cents = None
+        missing.append("fuel_or_transport_need")
+    else:
+        fuel_cents = _money_to_cents(fuel_bill.amount, field_name="fuel need")
+
+    grocery_spend_cents = 0
+    if account is not None:
+        grocery_spend_cents = _money_to_cents(
+            _sum_grocery_spend_for_period(account, now),
+            field_name="grocery_spend_to_date",
+        )
+    grocery_remaining_cents = None if grocery_baseline_cents is None else max(0, grocery_baseline_cents - grocery_spend_cents)
+
+    needs = [
+        {"key": "bills", "label": "Bills before payday", "amount_cents": bills_total_cents, "amount": _cents_to_float(bills_total_cents)},
+    ]
+    if grocery_remaining_cents is not None:
+        needs.append({"key": "groceries_remaining", "label": "Required groceries remaining", "amount_cents": grocery_remaining_cents, "amount": _cents_to_float(grocery_remaining_cents)})
+    if fuel_cents is not None:
+        needs.append({"key": "fuel_transport", "label": "Required fuel / transport", "amount_cents": fuel_cents, "amount": _cents_to_float(fuel_cents)})
+
+    snapshot = calculate_pyf_snapshot(
+        checking_cents=checking_cents,
+        period_income_cents=period_income_cents,
+        savings_target_percent=target_pct,
+        protected_buffer_cents=protected_buffer_cents,
+        needs=needs,
+        missing_setup=missing,
+    )
+    snapshot["until_payday_days"] = next_income.get("days_until")
+    next_date = next_income.get("date")
+    snapshot["next_expected_income"] = {
+        "known": bool(next_income.get("known")),
+        "date": next_date.isoformat() if isinstance(next_date, datetime) else None,
+        "date_display": next_date.strftime("%b %d") if isinstance(next_date, datetime) else None,
+        "amount": next_income.get("amount"),
+        "source": next_income.get("source") or "missing_setup",
+    }
+    snapshot["freshness"] = _build_freshness(owner_scope)
+    snapshot["window_end"] = window_end.isoformat() if isinstance(window_end, datetime) else None
+    snapshot["components"] = {
+        "usable_money": _cents_to_float(checking_cents) if checking_cents is not None else None,
+        "actual_forecast_needs": snapshot.get("needs_total"),
+        "bills_before_payday": _cents_to_float(bills_total_cents),
+        "grocery_commitment_total": _cents_to_float(grocery_baseline_cents) if grocery_baseline_cents is not None else None,
+        "grocery_spend_to_date": _cents_to_float(grocery_spend_cents),
+        "groceries_remaining": _cents_to_float(grocery_remaining_cents) if grocery_remaining_cents is not None else None,
+        "other_committed_spending": _cents_to_float(fuel_cents) if fuel_cents is not None else None,
+        "protected_buffer": _cents_to_float(protected_buffer_cents) if protected_buffer_cents is not None else None,
+        "grocery_commitment_source": "explicit_onboarding_baseline" if grocery_baseline_cents is not None else "missing_setup",
+    }
+    if snapshot.get("complete"):
+        lines = [
+            {"key": "checking", "label": "Current checking", "amount_cents": checking_cents},
+            {"key": "needs", "label": "Actual / forecast Needs", "amount_cents": -int(snapshot["needs_total_cents"])},
+            {"key": "savings", "label": "Current-period savings protection", "amount_cents": -int(snapshot["feasible_savings_cents"])},
+            {"key": "buffer", "label": "Protected checking buffer", "amount_cents": -int(protected_buffer_cents)},
+            {"key": "safe", "label": "Safe to Spend", "amount_cents": int(snapshot["safe_to_spend_cents"])},
+        ]
+        snapshot["breakdown"] = {"lines": [{**row, "amount": _cents_to_float(row["amount_cents"])} for row in lines], "checks": {"sum_matches_safe_to_spend": sum(row["amount_cents"] for row in lines[:-1]) == lines[-1]["amount_cents"]}}
+        if snapshot["feasibility"] == "partial_target_feasible":
+            snapshot["explanation"] = "The full long-term savings target does not fit this period. Rung is preserving Needs and your checking buffer and showing the maximum temporary contribution."
+        elif snapshot["feasibility"] == "no_contribution_feasible":
+            snapshot["explanation"] = "No savings contribution is feasible this period without using money needed for required expenses or the protected checking buffer."
+        else:
+            snapshot["explanation"] = "The full long-term savings target is feasible after current Needs and the protected checking buffer."
+    else:
+        snapshot["breakdown"] = {"lines": [], "checks": {"sum_matches_safe_to_spend": False}}
+        snapshot["explanation"] = "Safe-to-Spend needs setup before Rung can calculate it truthfully."
+    snapshot["readiness"] = {"ready": bool(snapshot.get("complete")), "safe_to_spend_available": bool(snapshot.get("complete")), "missing_critical": snapshot.get("missing_setup") or [], "setup_gaps": []}
+    return snapshot
+
+
+def _sum_grocery_spend_for_period(account: Account, now_utc: datetime | None = None) -> float:
+    now = now_utc or datetime.now(timezone.utc)
+    start = now - timedelta(days=int(account.pay_period_days or 14))
+    rows = _household_tx_query().filter(
+        ExpenseTransaction.category == "grocery",
+        ExpenseTransaction.date >= start,
+        ExpenseTransaction.date <= now,
+    ).all()
+    total_cents = sum(_money_to_cents(row.amount, field_name="transaction amount") for row in rows)
+    return _cents_to_float(total_cents)
+
+
 def compute_liquidity_metrics(account):
     """Core Pay Period Liquidity Engine."""
-    pay_period_end = datetime.utcnow() + timedelta(days=account.pay_period_days)
+    now_utc = datetime.now(timezone.utc)
+    pay_period_days = max(0, int(account.pay_period_days or 0))
+    pay_period_end = now_utc + timedelta(days=pay_period_days)
+    checking_balance = float(account.checking_balance or 0.0)
     
     # 1. Unpaid bills due within current pay period
-    upcoming_bills = Bill.query.filter(
+    upcoming_bills = _household_bill_query().filter(
         Bill.is_paid == False,
         Bill.due_date <= pay_period_end,
         Bill.is_gas_estimate == False
@@ -322,45 +2032,896 @@ def compute_liquidity_metrics(account):
     bills_total = sum(b.amount for b in upcoming_bills)
     
     # 2. Gas Allocation
-    gas_bill = Bill.query.filter_by(is_gas_estimate=True, is_paid=False).first()
+    gas_bill = _household_bill_query().filter_by(is_gas_estimate=True, is_paid=False).first()
     gas_allocation = gas_bill.amount if gas_bill else 60.00
     
     # 3. True Disposable Cash
-    safe_disposable = account.checking_balance - bills_total - gas_allocation
+    safe_disposable = checking_balance - bills_total - gas_allocation
     
     # 4. Food Budget Allocation
     food_budget = max(0.0, safe_disposable * (account.food_allocation_pct / 100.0))
-    total_meals = account.pay_period_days * account.meals_per_day
+    total_meals = pay_period_days * int(account.meals_per_day or 0)
     per_meal_budget = food_budget / total_meals if total_meals > 0 else 0.0
     
-    # 5. Non-Food Unallocated Free Cash
+    # 5. Grocery spend progress for current pay period
+    grocery_spend_to_date = _sum_grocery_spend_for_period(account)
+    grocery_budget_remaining = max(0.0, food_budget - grocery_spend_to_date)
+
+    # 6. Non-Food Unallocated Free Cash
     free_cash = safe_disposable - food_budget
     
+    safe_snapshot = _compute_safe_to_spend_snapshot(account)
+
+    bootstrap_location = _is_bootstrap_location(account)
+    location_zip = "" if bootstrap_location else str(account.zip_code or "").strip()
+    location_city_state = "" if bootstrap_location else str(getattr(account, 'city_state', "") or "").strip()
+
+    selected_store = get_selected_store(current_household_id(), account=account)
     return {
+        "authority": "legacy_liquidity_compatibility_only",
+        "authoritative": False,
         "checking_balance": account.checking_balance,
-        "expected_paycheck": account.expected_paycheck if hasattr(account, 'expected_paycheck') else 2000.00,
+        "food_allocation_pct": float(account.food_allocation_pct or 0.0),
+        "pay_period_days": pay_period_days,
+        "meals_per_day": int(account.meals_per_day or 3),
+        "expected_paycheck": account.expected_paycheck,
         "vault_balance": account.vault_balance if hasattr(account, 'vault_balance') else 150.00,
         "upcoming_bills_total": round(bills_total, 2),
         "gas_allocation": round(gas_allocation, 2),
         "safe_disposable_cash": round(safe_disposable, 2),
         "food_budget": round(food_budget, 2),
+        "grocery_spend_to_date": round(grocery_spend_to_date, 2),
+        "grocery_budget_remaining": round(grocery_budget_remaining, 2),
         "total_meals": total_meals,
         "target_per_meal_budget": round(per_meal_budget, 2),
         "free_cash_remaining": round(free_cash, 2),
+        "safe_to_spend": safe_snapshot,
         "location": {
-            "zip_code": account.zip_code or "65084",
-            "city_state": getattr(account, 'city_state', 'Versailles, MO') or "Versailles, MO",
-            "sales_tax_rate": account.sales_tax_rate or 0.0825,
-            "sales_tax_pct": round((account.sales_tax_rate or 0.0825) * 100, 3),
-            "grocery_tax_rate": account.grocery_tax_rate or 0.0125,
-            "store_name": account.kroger_store_name or "",
-            "location_id": account.kroger_location_id or ""
+            "zip_code": location_zip,
+            "city_state": location_city_state,
+            "sales_tax_rate": account.sales_tax_rate if account.sales_tax_rate is not None else 0.0825,
+            "sales_tax_pct": round(((account.sales_tax_rate if account.sales_tax_rate is not None else 0.0825) * 100), 3),
+            "grocery_tax_rate": account.grocery_tax_rate if account.grocery_tax_rate is not None else 0.0125,
+            "store_name": selected_store.get("name") or "",
+            "location_id": selected_store.get("store_id") or "",
+            "selected_store": selected_store,
+            "is_saved": not bootstrap_location,
         }
     }
+
+
+def _canonical_financial_metrics(account: Account, owner_scope: str = "anonymous") -> dict[str, Any]:
+    snapshot = _compute_safe_to_spend_snapshot(account, owner_scope=owner_scope)
+    return {
+        "authority": "canonical_pyf_v1",
+        "checking_balance": round(float(account.checking_balance or 0.0), 2),
+        "safe_to_spend": snapshot,
+    }
+
+
+def _resolve_cart_grocery_budget(account: Account, data: dict[str, Any], owner_scope: str) -> tuple[float | None, str, dict[str, Any] | None]:
+    """Resolve explicit override or canonical grocery Need remaining."""
+    if data.get("budget_limit") is not None:
+        try:
+            explicit_cents = _money_to_cents(data.get("budget_limit"), field_name="budget_limit")
+        except ValueError as exc:
+            return None, "explicit_request", {"error": str(exc), "code": "invalid_budget_limit"}
+        if explicit_cents < 0:
+            return None, "explicit_request", {"error": "budget_limit cannot be negative.", "code": "invalid_budget_limit"}
+        return _cents_to_float(explicit_cents), "explicit_request", None
+
+    snapshot = _compute_safe_to_spend_snapshot(account, owner_scope=owner_scope)
+    grocery_remaining = (snapshot.get("components") or {}).get("groceries_remaining")
+    if not snapshot.get("complete") or grocery_remaining is None:
+        return None, "canonical_grocery_need_remaining", {
+            "error": "Grocery budget is unavailable until canonical financial and grocery Needs setup is complete.",
+            "code": "grocery_budget_setup_required",
+            "budget": {
+                "available": False,
+                "source": "canonical_grocery_need_remaining",
+                "grocery_need_remaining": None,
+            },
+            "missing_setup": snapshot.get("missing_setup") or [],
+        }
+    return round(float(grocery_remaining), 2), "canonical_grocery_need_remaining", None
+
+
+def _persist_kroger_store_choice(account: Account, store: Any) -> None:
+    store_id = str(getattr(store, "store_id", "") or "").strip()
+    store_name = str(getattr(store, "name", "") or "").strip()
+    if store_id:
+        account.kroger_location_id = store_id
+    if store_name:
+        account.kroger_store_name = store_name
+
+
+def _is_bootstrap_location(account: Account) -> bool:
+    zip_code = str(account.zip_code or "").strip()
+    city_state = str(getattr(account, "city_state", "") or "").strip()
+    has_coords = account.latitude is not None and account.longitude is not None
+    if has_coords:
+        return False
+    return zip_code == "65084" and city_state in {"", "Versailles, MO"}
+
+
+_US_ZIP_RE = re.compile(r"\b(\d{5})(?:-\d{4})?\b")
+
+# Baseline state rates for auto-detected location defaults.
+# These are coarse defaults used only when the user asks for automatic
+# detection and does not provide explicit tax values.
+_STATE_SALES_TAX_DEFAULTS = {
+    "AK": 0.0,
+    "AL": 0.04,
+    "AR": 0.065,
+    "AZ": 0.056,
+    "CA": 0.0725,
+    "CO": 0.029,
+    "CT": 0.0635,
+    "DC": 0.06,
+    "DE": 0.0,
+    "FL": 0.06,
+    "GA": 0.04,
+    "HI": 0.04,
+    "IA": 0.06,
+    "ID": 0.06,
+    "IL": 0.0625,
+    "IN": 0.07,
+    "KS": 0.065,
+    "KY": 0.06,
+    "LA": 0.0445,
+    "MA": 0.0625,
+    "MD": 0.06,
+    "ME": 0.055,
+    "MI": 0.06,
+    "MN": 0.06875,
+    "MO": 0.04225,
+    "MS": 0.07,
+    "NC": 0.0475,
+    "ND": 0.05,
+    "NE": 0.055,
+    "NH": 0.0,
+    "NJ": 0.06625,
+    "NM": 0.05125,
+    "NV": 0.0685,
+    "NY": 0.04,
+    "OH": 0.0575,
+    "OK": 0.045,
+    "OR": 0.0,
+    "PA": 0.06,
+    "RI": 0.07,
+    "SC": 0.06,
+    "SD": 0.045,
+    "TN": 0.07,
+    "TX": 0.0625,
+    "UT": 0.061,
+    "VA": 0.053,
+    "VT": 0.06,
+    "WA": 0.065,
+    "WI": 0.05,
+    "WV": 0.06,
+    "WY": 0.04,
+}
+
+_STATE_GROCERY_TAX_DEFAULTS = {
+    # Most states do not tax groceries at the state level.
+    "AK": 0.0,
+    "AL": 0.03,
+    "AR": 0.00125,
+    "AZ": 0.0,
+    "CA": 0.0,
+    "CO": 0.0,
+    "CT": 0.0,
+    "DC": 0.0,
+    "DE": 0.0,
+    "FL": 0.0,
+    "GA": 0.0,
+    "HI": 0.0,
+    "IA": 0.0,
+    "ID": 0.0,
+    "IL": 0.01,
+    "IN": 0.0,
+    "KS": 0.0,
+    "KY": 0.0,
+    "LA": 0.0,
+    "MA": 0.0,
+    "MD": 0.0,
+    "ME": 0.0,
+    "MI": 0.0,
+    "MN": 0.0,
+    "MO": 0.01225,
+    "MS": 0.07,
+    "NC": 0.02,
+    "ND": 0.0,
+    "NE": 0.0,
+    "NH": 0.0,
+    "NJ": 0.0,
+    "NM": 0.0,
+    "NV": 0.0,
+    "NY": 0.0,
+    "OH": 0.0,
+    "OK": 0.0,
+    "OR": 0.0,
+    "PA": 0.0,
+    "RI": 0.0,
+    "SC": 0.0,
+    "SD": 0.0,
+    "TN": 0.04,
+    "TX": 0.0,
+    "UT": 0.03,
+    "VA": 0.015,
+    "VT": 0.0,
+    "WA": 0.0,
+    "WI": 0.0,
+    "WV": 0.0,
+    "WY": 0.0,
+}
+
+# State-level grocery food tax behavior used to translate combined
+# location sales tax into grocery tax where possible.
+# - exempt: groceries are generally exempt at state+local level
+# - full: groceries are generally taxed at full combined rate
+# - reduced: groceries are taxed below general sales tax (state-specific)
+_STATE_GROCERY_TAX_MODE = {
+    "AL": "full",
+    "AR": "reduced",
+    "HI": "full",
+    "ID": "full",
+    "IL": "reduced",
+    "KS": "full",
+    "MO": "reduced",
+    "MS": "full",
+    "OK": "full",
+    "SD": "full",
+    "TN": "reduced",
+    "UT": "reduced",
+    "VA": "reduced",
+}
+
+
+def _normalize_zip_code(raw_zip: Any) -> str:
+    value = str(raw_zip or "").strip()
+    match = _US_ZIP_RE.search(value)
+    return match.group(1) if match else ""
+
+
+def _estimate_tax_rates_for_state(state_code: str) -> tuple[float, float]:
+    code = str(state_code or "").strip().upper()
+    sales = _STATE_SALES_TAX_DEFAULTS.get(code, 0.0825)
+    grocery = _STATE_GROCERY_TAX_DEFAULTS.get(code, 0.0125)
+    return float(sales), float(grocery)
+
+
+def _coerce_rate(value: Any) -> float:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return 0.0
+    if parsed < 0:
+        return 0.0
+    return min(parsed, 0.25)
+
+
+def _lookup_combined_sales_tax_by_zip(zip_code: str) -> float | None:
+    clean_zip = _normalize_zip_code(zip_code)
+    if not clean_zip:
+        return None
+    try:
+        dataset = ensure_bootstrap_tax_dataset()
+    except Exception:
+        return None
+
+    assignment = (
+        TaxBoundaryAssignment.query
+        .filter_by(dataset_id=dataset.id, geographic_key_type="zip5", geographic_key=clean_zip)
+        .order_by(TaxBoundaryAssignment.effective_from.desc())
+        .first()
+    )
+    if assignment is None:
+        return None
+
+    rate = (
+        TaxRate.query
+        .filter_by(
+            dataset_id=dataset.id,
+            jurisdiction_id=assignment.jurisdiction_id,
+            tax_class=TAX_CLASS_GENERAL_MERCHANDISE,
+        )
+        .order_by(TaxRate.effective_from.desc())
+        .first()
+    )
+    if rate is None:
+        return None
+    return _coerce_rate((int(rate.rate_basis_points or 0) / 10000.0))
+
+
+def _state_rate_from_owned_dataset(state_code: str, tax_class: str) -> float | None:
+    state = str(state_code or "").strip().upper()
+    if len(state) != 2:
+        return None
+    try:
+        dataset = ensure_bootstrap_tax_dataset()
+    except Exception:
+        return None
+
+    jurisdiction = TaxJurisdiction.query.filter_by(jurisdiction_type="state", canonical_code=f"STATE:{state}").first()
+    if jurisdiction is None:
+        return None
+    rate = (
+        TaxRate.query
+        .filter_by(
+            dataset_id=dataset.id,
+            jurisdiction_id=jurisdiction.id,
+            tax_class=tax_class,
+        )
+        .order_by(TaxRate.effective_from.desc())
+        .first()
+    )
+    if rate is None:
+        return None
+    return _coerce_rate((int(rate.rate_basis_points or 0) / 10000.0))
+    return None
+
+
+def _derive_grocery_rate_from_combined(combined_sales_rate: float, state_code: str) -> float:
+    combined = _coerce_rate(combined_sales_rate)
+    code = str(state_code or "").strip().upper()
+    state_sales = _STATE_SALES_TAX_DEFAULTS.get(code)
+    state_grocery = _STATE_GROCERY_TAX_DEFAULTS.get(code)
+    mode = _STATE_GROCERY_TAX_MODE.get(code, "exempt")
+
+    if mode == "full":
+        return combined
+    if mode == "reduced" and state_sales is not None and state_grocery is not None:
+        # Preserve local component from combined tax while reducing only the
+        # state portion to the state's grocery-food rate.
+        local_component = max(0.0, combined - float(state_sales))
+        return _coerce_rate(float(state_grocery) + local_component)
+    if mode == "reduced" and state_grocery is not None:
+        return _coerce_rate(float(state_grocery))
+    return 0.0
+
+
+def _estimate_tax_rates_for_location(zip_code: str, state_code: str) -> tuple[float, float]:
+    combined_sales = _lookup_combined_sales_tax_by_zip(zip_code)
+    if combined_sales is not None:
+        grocery = _derive_grocery_rate_from_combined(combined_sales, state_code)
+        return _coerce_rate(combined_sales), _coerce_rate(grocery)
+    owned_sales = _state_rate_from_owned_dataset(state_code, TAX_CLASS_GENERAL_MERCHANDISE)
+    owned_grocery = _state_rate_from_owned_dataset(state_code, TAX_CLASS_GROCERY_FOOD)
+    if owned_sales is not None and owned_grocery is not None:
+        return _coerce_rate(owned_sales), _coerce_rate(owned_grocery)
+    return _estimate_tax_rates_for_state(state_code)
+
+
+def _reverse_geocode_us_location(latitude: float, longitude: float) -> dict[str, str]:
+    try:
+        resp = requests.get(
+            "https://nominatim.openstreetmap.org/reverse",
+            params={
+                "format": "jsonv2",
+                "lat": latitude,
+                "lon": longitude,
+                "addressdetails": 1,
+            },
+            headers={
+                "User-Agent": "Rung/1.0 (finance-assistant)",
+            },
+            timeout=6,
+        )
+        resp.raise_for_status()
+        payload = resp.json() or {}
+        address = payload.get("address") or {}
+        zip_code = _normalize_zip_code(address.get("postcode"))
+        state_code = str(address.get("state_code") or "").strip().upper()
+        city = (
+            str(address.get("city") or "").strip()
+            or str(address.get("town") or "").strip()
+            or str(address.get("village") or "").strip()
+            or str(address.get("hamlet") or "").strip()
+        )
+        city_state = ", ".join(part for part in [city, state_code] if part)
+        return {
+            "zip_code": zip_code,
+            "state_code": state_code,
+            "city_state": city_state,
+        }
+    except Exception:
+        return {}
+
+
+def _store_city_from_address(address: str) -> str:
+    text = str(address or "").strip()
+    if not text:
+        return ""
+    pieces = [part.strip() for part in text.split(",") if part.strip()]
+    if len(pieces) >= 2:
+        return pieces[-2]
+    return ""
+
+
+def _store_choice_row(retailer: str, store: Any) -> dict[str, Any]:
+    address = str(getattr(store, "address", "") or "").strip()
+    postal_code = str(getattr(store, "postal_code", "") or "").strip()
+    return {
+        "retailer": retailer,
+        "retailer_display": "Walmart" if retailer == "walmart" else "Kroger",
+        "store_id": str(getattr(store, "store_id", "") or "").strip(),
+        "name": str(getattr(store, "name", "") or "").strip() or ("Walmart" if retailer == "walmart" else "Kroger"),
+        "address": address,
+        "city": _store_city_from_address(address),
+        "postal_code": postal_code,
+        "distance_miles": None,
+        "pickup_supported": None,
+        "verified": bool(getattr(store, "verified", False)),
+    }
+
+
+def _append_location_diag(event: dict[str, Any]) -> None:
+    """Write safe nearby-store diagnostics for runtime troubleshooting.
+
+    Never include secrets, auth headers, tokens, or raw provider payloads.
+    """
+    try:
+        line = json.dumps(event, separators=(",", ":"), sort_keys=True)
+        with open("/tmp/rung_location_nearby_diag.log", "a", encoding="utf-8") as handle:
+            handle.write(line + "\n")
+    except Exception:
+        LOGGER.exception("failed to append nearby-store diagnostics")
+
+
+def _discover_supported_stores(*, zip_code: str = "", latitude: float | None = None, longitude: float | None = None) -> dict[str, Any]:
+    from services.retail.router import get_retail_provider
+
+    resolved_zip = _normalize_zip_code(zip_code)
+    resolved_city_state = ""
+    resolved_state_code = ""
+
+    if (not resolved_zip) and latitude is not None and longitude is not None:
+        reverse_geo = _reverse_geocode_us_location(latitude, longitude)
+        resolved_zip = _normalize_zip_code(reverse_geo.get("zip_code"))
+        resolved_city_state = str(reverse_geo.get("city_state") or "").strip()
+        resolved_state_code = str(reverse_geo.get("state_code") or "").strip().upper()
+
+    if not resolved_zip:
+        return {
+            "status": "current_location_unavailable",
+            "user_message": "We couldn't determine your current location. Try again or enter your ZIP code.",
+            "stores": [],
+            "zip_code": "",
+            "city_state": resolved_city_state,
+            "state_code": resolved_state_code,
+        }
+
+    stores: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    provider_success_count = 0
+    provider_failure_count = 0
+    provider_results: list[dict[str, Any]] = []
+
+    for retailer in ("walmart", "kroger"):
+        try:
+            provider = get_retail_provider(retailer)
+            candidates = provider.find_stores(postal_code=resolved_zip)
+            provider_success_count += 1
+            provider_results.append({
+                "retailer": retailer,
+                "success": True,
+                "error_type": "",
+                "stores_count": len(candidates or []),
+            })
+            for store in candidates:
+                store_id = str(getattr(store, "store_id", "") or "").strip()
+                if not store_id:
+                    continue
+                key = (retailer, store_id)
+                if key in seen:
+                    continue
+                seen.add(key)
+                stores.append(_store_choice_row(retailer, store))
+        except Exception as exc:
+            LOGGER.exception("nearby store lookup failed for retailer=%s zip=%s", retailer, resolved_zip)
+            provider_failure_count += 1
+            provider_results.append({
+                "retailer": retailer,
+                "success": False,
+                "error_type": type(exc).__name__,
+                "stores_count": 0,
+            })
+
+    stores = sorted(stores, key=lambda row: (str(row.get("retailer") or ""), str(row.get("name") or ""), str(row.get("store_id") or "")))
+    if stores:
+        return {
+            "status": "ok",
+            "user_message": "",
+            "stores": stores,
+            "zip_code": resolved_zip,
+            "city_state": resolved_city_state,
+            "state_code": resolved_state_code,
+            "provider_results": provider_results,
+        }
+
+    if provider_success_count > 0:
+        return {
+            "status": "no_supported_store",
+            "user_message": "We found your location, but couldn't find a supported store nearby.",
+            "stores": [],
+            "zip_code": resolved_zip,
+            "city_state": resolved_city_state,
+            "state_code": resolved_state_code,
+            "provider_results": provider_results,
+        }
+
+    if provider_failure_count > 0:
+        return {
+            "status": "store_search_unavailable",
+            "user_message": "We found your location, but store search isn't available right now. Try again shortly.",
+            "stores": [],
+            "zip_code": resolved_zip,
+            "city_state": resolved_city_state,
+            "state_code": resolved_state_code,
+            "provider_results": provider_results,
+        }
+
+    return {
+        "status": "no_supported_store",
+        "user_message": "We found your location, but couldn't find a supported store nearby.",
+        "stores": [],
+        "zip_code": resolved_zip,
+        "city_state": resolved_city_state,
+        "state_code": resolved_state_code,
+        "provider_results": provider_results,
+    }
+
+
+def _selected_store_payload(account: Account) -> dict[str, Any]:
+    selected = get_selected_store(current_household_id(), account=account)
+    selected["city_state"] = ", ".join(filter(None, [selected.get("city"), selected.get("state")]))
+    return selected
+
+
+def _resolve_kroger_store_selection(account: Account, requested_store_name: str = "") -> dict[str, Any]:
+    from services.retail.base import RetailStore
+    from services.retail.router import get_retail_provider
+
+    selected = get_selected_store(current_household_id(), account=account)
+    saved_location_id = str(selected.get("store_id") or "").strip()
+    saved_store_name = str(selected.get("name") or requested_store_name or "Kroger").strip() or "Kroger"
+    postal_code = str(account.zip_code or "").strip()
+
+    if saved_location_id:
+        return {
+            "state": "ready",
+            "store": RetailStore(
+                store_id=saved_location_id,
+                name=saved_store_name,
+                address=None,
+                postal_code=postal_code or None,
+                verified=True,
+            ),
+            "stores": [],
+            "persisted": False,
+        }
+
+    if not postal_code:
+        return {
+            "state": "none",
+            "message": "Save a ZIP code first so Rung can find nearby Kroger-family stores.",
+        }
+
+    provider = get_retail_provider("kroger")
+    stores = provider.find_stores(postal_code=postal_code)
+
+    unique_stores = []
+    seen_ids = set()
+    for store in stores:
+        store_id = str(getattr(store, "store_id", "") or "").strip()
+        if not store_id or store_id in seen_ids:
+            continue
+        seen_ids.add(store_id)
+        unique_stores.append(store)
+
+    if not unique_stores:
+        return {
+            "state": "none",
+            "message": f"No Kroger-family stores were found near ZIP {postal_code}.",
+        }
+
+    return {
+        "state": "choice",
+        "message": f"Choose a Kroger-family store for ZIP {postal_code}.",
+        "store_choice": {
+            "retailer": "kroger",
+            "zip_code": postal_code,
+            "selected_store_name": saved_store_name,
+            "stores": [store.to_dict() for store in unique_stores],
+        },
+    }
+
+
+@app.route("/api/location/nearby-stores", methods=["POST"])
+def location_nearby_stores():
+    account = _household_account()
+    if not account:
+        return jsonify({"error": "Account not found"}), 404
+
+    data: dict[str, Any] = request.json or {}
+    auto_detect = bool(data.get("auto_detect"))
+    zip_code = _normalize_zip_code(data.get("zip_code"))
+
+    latitude = None
+    longitude = None
+    if auto_detect:
+        try:
+            latitude = float(str(data.get("latitude", "")).strip())
+            longitude = float(str(data.get("longitude", "")).strip())
+        except (TypeError, ValueError):
+            return jsonify({
+                "status": "current_location_unavailable",
+                "user_message": "We couldn't determine your current location. Try again or enter your ZIP code.",
+            }), 400
+        if not (-90 <= latitude <= 90) or not (-180 <= longitude <= 180):
+            return jsonify({
+                "status": "current_location_unavailable",
+                "user_message": "We couldn't determine your current location. Try again or enter your ZIP code.",
+            }), 400
+    elif not zip_code:
+        return jsonify({
+            "status": "invalid_zip_code",
+            "user_message": "We couldn't save that location. Please check the ZIP code and try again.",
+        }), 400
+
+    lookup = _discover_supported_stores(zip_code=zip_code, latitude=latitude, longitude=longitude)
+    status = str(lookup.get("status") or "")
+    selected = _selected_store_payload(account)
+    selected_zip = str(selected.get("postal_code") or "").strip()
+    detected_zip = str(lookup.get("zip_code") or "").strip()
+    new_area_detected = bool(selected_zip and detected_zip and selected_zip != detected_zip)
+
+    code = 200
+    if status in {"current_location_unavailable", "invalid_zip_code"}:
+        code = 422
+    elif status == "store_search_unavailable":
+        code = 503
+
+    # Safe diagnostics for owner beta runtime troubleshooting.
+    _append_location_diag({
+        "event": "nearby_stores",
+        "time_utc": datetime.now(timezone.utc).isoformat(),
+        "auth_required_mode": bool(auth_required_mode()),
+        "input": {
+            "auto_detect": auto_detect,
+            "zip_code": zip_code,
+            "latitude_rounded": (round(float(latitude), 4) if latitude is not None else None),
+            "longitude_rounded": (round(float(longitude), 4) if longitude is not None else None),
+        },
+        "resolved": {
+            "zip_code": str(lookup.get("zip_code") or ""),
+            "city_state": str(lookup.get("city_state") or ""),
+            "state_code": str(lookup.get("state_code") or ""),
+        },
+        "providers": lookup.get("provider_results") or [],
+        "result": {
+            "status": status,
+            "http_code": code,
+            "stores_total": len(lookup.get("stores") or []),
+            "reason": (
+                "provider_success_zero_and_failures_present"
+                if status == "store_search_unavailable"
+                else ("no_supported_stores" if status == "no_supported_store" else "ok_or_other")
+            ),
+        },
+    })
+
+    return jsonify({
+        "status": status,
+        "user_message": str(lookup.get("user_message") or ""),
+        "location": {
+            "zip_code": detected_zip,
+            "city_state": str(lookup.get("city_state") or "").strip(),
+            "source": "gps" if auto_detect else "zip",
+        },
+        "stores": lookup.get("stores") or [],
+        "selected_store": selected,
+        "new_area_detected": new_area_detected,
+    }), code
+
+
+@app.route("/api/location/select-store", methods=["POST"])
+def location_select_store():
+    account = _household_account()
+    if not account:
+        return jsonify({"error": "Account not found"}), 404
+
+    data: dict[str, Any] = request.json or {}
+    retailer = str(data.get("retailer") or "").strip().lower()
+    if retailer not in {"walmart", "kroger"}:
+        return jsonify({
+            "error": "invalid_retailer",
+            "user_message": "Please choose a supported store.",
+        }), 400
+
+    location_id = str(data.get("store_id") or "").strip()
+    store_name = str(data.get("store_name") or "").strip()
+    if not location_id:
+        return jsonify({
+            "error": "invalid_store",
+            "user_message": "Please choose a supported store.",
+        }), 400
+
+    zip_code = _normalize_zip_code(data.get("zip_code"))
+    city_state = str(data.get("city_state") or "").strip()
+    state_code = ""
+    if city_state and "," in city_state:
+        state_code = city_state.rsplit(",", 1)[-1].strip().upper()
+
+    explicit_sales_tax = data.get("sales_tax_rate")
+    explicit_grocery_tax = data.get("grocery_tax_rate")
+
+    store_address = str(data.get("store_address") or "").strip()
+    store_city = str(data.get("city") or "").strip()
+    if not store_city and city_state:
+        store_city = city_state.rsplit(",", 1)[0].strip()
+    selected = select_store(
+        current_household_id(),
+        retailer=retailer,
+        store_id=location_id,
+        store_name=store_name or ("Walmart" if retailer == "walmart" else "Kroger"),
+        address=store_address,
+        city=store_city,
+        state=state_code,
+        postal_code=zip_code,
+        account=account,
+    )
+
+    if explicit_sales_tax is not None:
+        account.sales_tax_rate = _coerce_rate(explicit_sales_tax)
+    if explicit_grocery_tax is not None:
+        account.grocery_tax_rate = _coerce_rate(explicit_grocery_tax)
+    if explicit_sales_tax is None and explicit_grocery_tax is None and zip_code:
+        inferred_sales_tax, inferred_grocery_tax = _estimate_tax_rates_for_location(zip_code, state_code)
+        account.sales_tax_rate = inferred_sales_tax
+        account.grocery_tax_rate = inferred_grocery_tax
+
+    try:
+        db.session.commit()
+    except Exception:
+        db.session.rollback()
+        return jsonify({
+            "error": "location_save_failed",
+            "user_message": "We couldn't save that location. Please check the ZIP code and try again.",
+        }), 500
+
+    return jsonify({
+        "status": "store_selected",
+        "user_message": "Store saved.",
+        "location": {
+            "zip_code": account.zip_code or "",
+            "city_state": account.city_state or "",
+            "sales_tax_rate": float(account.sales_tax_rate if account.sales_tax_rate is not None else 0.0825),
+            "grocery_tax_rate": float(account.grocery_tax_rate if account.grocery_tax_rate is not None else 0.0125),
+            "store_name": selected["name"],
+            "location_id": selected["store_id"],
+            "is_saved": True,
+        },
+        "store": {
+            "found": True,
+            "status": "resolved",
+            "retailer": retailer,
+            "name": selected["name"],
+            "location_id": selected["store_id"],
+            "selected_store": selected,
+        },
+    })
+
+
+@app.route("/api/location/area-check", methods=["POST"])
+def location_area_check():
+    account = _household_account()
+    if not account:
+        return jsonify({"error": "Account not found"}), 404
+
+    data = request.json or {}
+    try:
+        latitude = float(str(data.get("latitude", "")).strip())
+        longitude = float(str(data.get("longitude", "")).strip())
+    except (TypeError, ValueError):
+        return jsonify({
+            "status": "current_location_unavailable",
+            "user_message": "We couldn't determine your current location. Try again or enter your ZIP code.",
+        }), 400
+
+    reverse_geo = _reverse_geocode_us_location(latitude, longitude)
+    detected_zip = _normalize_zip_code(reverse_geo.get("zip_code"))
+    if not detected_zip:
+        return jsonify({
+            "status": "current_location_unavailable",
+            "user_message": "We couldn't determine your current location. Try again or enter your ZIP code.",
+        }), 422
+
+    current_zip = _normalize_zip_code(account.zip_code or "")
+    new_area_detected = bool(current_zip and current_zip != detected_zip)
+    return jsonify({
+        "status": "ok",
+        "detected_zip": detected_zip,
+        "current_zip": current_zip,
+        "new_area_detected": new_area_detected,
+        "user_message": "Looks like you're in a new area. See stores near you?" if new_area_detected else "",
+    })
 
 # =============================================================================
 # API ROUTES
 # =============================================================================
+
+_AUTH_EXEMPT_API_PATHS = {
+    "/api/auth/login",
+    "/api/auth/logout",
+    "/api/auth/session",
+}
+
+
+@app.before_request
+def enforce_authentication_boundary():
+    if not auth_required_mode():
+        return None
+    if request.method == "OPTIONS":
+        return None
+    if not str(request.path or "").startswith("/api/"):
+        return None
+    if str(request.path) in _AUTH_EXEMPT_API_PATHS:
+        return None
+    if get_current_principal() is None:
+        return jsonify({"error": "Authentication required."}), 401
+    return None
+
+
+@app.route("/api/auth/session", methods=["GET"])
+def auth_session_current():
+    return jsonify(_current_auth_session_payload())
+
+
+@app.route("/api/auth/login", methods=["POST"])
+def auth_login():
+    data = request.json or {}
+    email = str(data.get("email") or "").strip().lower()
+    password = str(data.get("password") or "")
+    invalid = {"error": "Invalid credentials."}
+
+    if not email or not password:
+        return jsonify(invalid), 401
+
+    blocked, retry_after = login_is_blocked(email)
+    if blocked:
+        return jsonify({"error": "Invalid credentials.", "retry_after_seconds": retry_after}), 429
+
+    user = User.query.filter(db.func.lower(User.email) == email).first()
+    membership = None
+    if user is not None and bool(user.active):
+        membership = HouseholdMembership.query.filter_by(user_id=user.id, active=True).first()
+
+    valid = (
+        user is not None
+        and bool(user.active)
+        and membership is not None
+        and bool(check_password_hash(str(user.password_hash), password))
+    )
+    if not valid:
+        record_login_failure(email)
+        clear_session()
+        return jsonify(invalid), 401
+
+    if user is None:
+        record_login_failure(email)
+        clear_session()
+        return jsonify(invalid), 401
+    clear_login_failures(email)
+    establish_session(user)
+    return jsonify(_current_auth_session_payload())
+
+
+@app.route("/api/auth/logout", methods=["POST"])
+def auth_logout():
+    clear_session()
+    return jsonify({"authenticated": False})
 
 @app.route("/")
 def index():
@@ -384,24 +2945,17 @@ def recipes_crud():
         # Parse ingredients from lines or structured list
         ingredients = data.get("ingredients", [])
         for ing in ingredients:
-            if isinstance(ing, dict):
-                ri = RecipeIngredient(
-                    recipe_id=r.id,
-                    product_name=ing.get("product_name", ""),
-                    clean_keyword=ing.get("clean_keyword", ""),
-                    quantity=float(ing.get("quantity", 1)),
-                    unit=ing.get("unit", "oz")
-                )
-            elif isinstance(ing, str) and ing.strip():
-                ri = RecipeIngredient(
-                    recipe_id=r.id,
-                    product_name=ing.strip(),
-                    clean_keyword=ing.strip().lower().replace(' ', '_'),
-                    quantity=1,
-                    unit="item"
-                )
-            else:
+            parsed = coerce_recipe_ingredient(ing)
+            if not parsed:
                 continue
+            product_name = parsed["product_name"]
+            ri = RecipeIngredient(
+                recipe_id=r.id,
+                product_name=product_name,
+                clean_keyword=parsed.get("clean_keyword") or _derive_clean_keyword(product_name),
+                quantity=parsed.get("quantity"),
+                unit=parsed.get("unit"),
+            )
             db.session.add(ri)
         db.session.commit()
         return jsonify({"message": "Recipe added", "id": r.id})
@@ -412,15 +2966,14 @@ def recipes_crud():
         "title": r.title,
         "servings": r.servings,
         "estimated_cost_per_serving": r.estimated_cost_per_serving,
+        "is_favorite": bool(getattr(r, "is_favorite", False)),
+        "usage_frequency": int(getattr(r, "usage_frequency", 0) or 0),
+        "last_selected_date": (
+            r.last_selected_date.isoformat() if getattr(r, "last_selected_date", None) else None
+        ),
         "source_url": r.source_url or "",
         "instructions": r.instructions,
-        "ingredients": [{
-            "id": i.id,
-            "product_name": i.product_name,
-            "clean_keyword": i.clean_keyword,
-            "quantity": i.quantity,
-            "unit": i.unit
-        } for i in r.ingredients]
+        "ingredients": [_serialize_recipe_ingredient(i) for i in r.ingredients]
     } for r in recipes])
 
 @app.route("/api/recipes/<int:rid>", methods=["DELETE"])
@@ -554,6 +3107,11 @@ def _derive_clean_keyword(product_name):
     # Clean: lowercase, replace non-alphanumeric with underscore, collapse runs
     core = re.sub(r'[^a-z0-9]+', '_', core.lower())
     core = re.sub(r'_+', '_', core).strip('_')
+    # Strip leading connectors that the last-2-words heuristic can pick up,
+    # e.g. "salt and pepper" → last-2 = "and pepper" → "and_pepper" → "pepper"
+    core = re.sub(r'^(and|or|with|plus|of|for|in|a|an|the)_+', '', core)
+    if not core:
+        core = re.sub(r'[^a-z0-9]+', '_', words[-1].lower()).strip('_')
     return core
 
 
@@ -689,7 +3247,6 @@ def import_recipe():
       "cache": {"status": "ok", ...}
     }
     """
-    import re
     import time
     global _import_cache
 
@@ -723,6 +3280,7 @@ def import_recipe():
         }), 501
 
     scraper_error = None
+    scraper = None
     try:
         scraper = scrape_me(url)
     except Exception as exc:
@@ -746,6 +3304,13 @@ def import_recipe():
                 "cache": {"status": "error", "hit": False, "error_detail": str(scraper_error)[:200]}
             }), 500
     else:
+        if scraper is None:
+            return jsonify({
+                "error": "Could not scrape that URL.",
+                "detail": "Recipe scraper returned no result.",
+                "url": url,
+                "cache": {"status": "error", "hit": False, "error_detail": "empty_scraper"}
+            }), 500
         # recipe-scrapers succeeded — extract normally
         try:
             title = scraper.title()
@@ -805,16 +3370,16 @@ def import_recipe():
         db.session.flush()  # get recipe.id
 
     for ing_str in raw_ingredients:
-        ing_str = ing_str.strip()
-        if not ing_str:
+        parsed = coerce_recipe_ingredient(ing_str)
+        if not parsed:
             continue
-        kw = _derive_clean_keyword(ing_str)
+        product_name = parsed["product_name"]
         ri = RecipeIngredient(
             recipe_id=recipe.id,
-            product_name=ing_str,
-            clean_keyword=kw,
-            quantity=1,
-            unit="item"
+            product_name=product_name,
+            clean_keyword=parsed.get("clean_keyword") or _derive_clean_keyword(product_name),
+            quantity=parsed.get("quantity"),
+            unit=parsed.get("unit"),
         )
         db.session.add(ri)
 
@@ -860,13 +3425,7 @@ def generate_recipes():
             "servings": r.servings,
             "source_url": r.source_url or "",
             "estimated_cost_per_serving": r.estimated_cost_per_serving,
-            "ingredients": [{
-                "id": i.id,
-                "product_name": i.product_name,
-                "clean_keyword": i.clean_keyword,
-                "quantity": i.quantity,
-                "unit": i.unit
-            } for i in r.ingredients]
+            "ingredients": [_serialize_recipe_ingredient(i) for i in r.ingredients]
         } for r in recipes],
         "total_meals": len(recipes)
     })
@@ -878,7 +3437,7 @@ MEAL_PLAN_MAX = 14  # cap: Active Pay-Period Recipes expander shows at most 14
 
 def _serialize_meal_plan():
     """Serialize the persisted meal plan (ordered by insertion)."""
-    items = MealPlanItem.query.order_by(MealPlanItem.created_at.asc()).all()
+    items = _household_meal_plan_query().order_by(MealPlanItem.created_at.asc()).all()
     ids = [m.recipe_id for m in items]
     recipes = []
     by_id = {r.id: r for r in Recipe.query.filter(Recipe.id.in_(ids)).all()} if ids else {}
@@ -918,15 +3477,15 @@ def meal_plan():
         ids = data["recipe_ids"]
         if not isinstance(ids, list):
             return jsonify({"error": "recipe_ids must be a list"}), 400
-        MealPlanItem.query.delete()
+        _household_meal_plan_query().delete()
         for rid in ids[:MEAL_PLAN_MAX]:
             try:
                 rid = int(rid)
             except (ValueError, TypeError):
                 continue
-            if MealPlanItem.query.filter_by(recipe_id=rid).first():
+            if _household_meal_plan_query().filter_by(recipe_id=rid).first():
                 continue
-            db.session.add(MealPlanItem(recipe_id=rid, source="user"))
+            db.session.add(MealPlanItem(household_id=current_household_id(), recipe_id=rid, source="user"))
         db.session.commit()
         return jsonify(_serialize_meal_plan())
 
@@ -937,17 +3496,17 @@ def meal_plan():
             rid = int(rid)
         except (ValueError, TypeError):
             continue
-        MealPlanItem.query.filter_by(recipe_id=rid).delete()
+        _household_meal_plan_query().filter_by(recipe_id=rid).delete()
     for rid in add_ids:
         try:
             rid = int(rid)
         except (ValueError, TypeError):
             continue
-        if MealPlanItem.query.filter_by(recipe_id=rid).first():
+        if _household_meal_plan_query().filter_by(recipe_id=rid).first():
             continue
-        if MealPlanItem.query.count() >= MEAL_PLAN_MAX:
+        if _household_meal_plan_query().count() >= MEAL_PLAN_MAX:
             break
-        db.session.add(MealPlanItem(recipe_id=rid, source="user"))
+        db.session.add(MealPlanItem(household_id=current_household_id(), recipe_id=rid, source="user"))
     db.session.commit()
     return jsonify(_serialize_meal_plan())
 
@@ -955,7 +3514,7 @@ def meal_plan():
 @app.route("/api/meal-plan/clear", methods=["POST"])
 def clear_meal_plan():
     """Empty the active meal plan (start a new pay period)."""
-    MealPlanItem.query.delete()
+    _household_meal_plan_query().delete()
     db.session.commit()
     return jsonify(_serialize_meal_plan())
 
@@ -970,16 +3529,22 @@ def transactions_crud():
             return jsonify({"error": "Description required"}), 400
         amount = float(data.get("amount", 0))
         category = data.get("category", "discretionary")
-        t = ExpenseTransaction(description=desc, amount=amount, category=category)
+        hid = current_household_id()
+        account = _household_account()
+        t = ExpenseTransaction(
+            household_id=hid,
+            description=desc,
+            amount=amount,
+            category=category,
+            source="manual",
+            local_account_id=account.id if account else None,
+        )
         db.session.add(t)
-        # Also decrement checking balance
-        account = Account.query.first()
-        if account:
-            account.checking_balance -= amount
+        apply_balance_delta(hid, -amount)
         db.session.commit()
-        return jsonify({"message": "Expense logged", "id": t.id, "new_balance": account.checking_balance if account else None})
+        return jsonify({"message": "Expense logged", "id": t.id, "new_balance": _household_account().checking_balance if account else None})
     # GET list
-    txns = ExpenseTransaction.query.order_by(ExpenseTransaction.date.desc()).all()
+    txns = _household_tx_query().order_by(ExpenseTransaction.date.desc()).all()
     return jsonify([{
         "id": t.id,
         "description": t.description,
@@ -990,12 +3555,166 @@ def transactions_crud():
 
 @app.route("/transactions/<int:txn_id>", methods=["DELETE"])
 def delete_transaction(txn_id):
-    t = ExpenseTransaction.query.get(txn_id)
+    t = _household_tx_query().filter_by(id=txn_id).first()
     if not t:
         return jsonify({"error": "Transaction not found"}), 404
     db.session.delete(t)
     db.session.commit()
     return jsonify({"message": f"Transaction {txn_id} deleted"})
+
+
+def _plaid_error_payload(exc: Exception) -> tuple[dict[str, Any], int]:
+    if isinstance(exc, PlaidFoundationError):
+        return {
+            "error": str(exc),
+            "code": exc.code,
+        }, int(getattr(exc, "status_code", 400) or 400)
+    return {
+        "error": "Plaid request failed.",
+        "code": "plaid_request_failed",
+    }, 500
+
+
+@app.route("/api/plaid/link-token", methods=["POST"])
+def plaid_link_token():
+    data = request.json or {}
+    user_id = _resolve_request_user_id(data)
+    try:
+        payload = create_link_token(user_scope=user_id)
+    except Exception as exc:
+        err, status = _plaid_error_payload(exc)
+        return jsonify(err), status
+    return jsonify(payload)
+
+
+@app.route("/api/plaid/exchange-public-token", methods=["POST"])
+def plaid_exchange_public_token():
+    data = request.json or {}
+    user_id = _resolve_request_user_id(data)
+    public_token = str(data.get("public_token") or "").strip()
+    if not public_token:
+        return jsonify({"error": "public_token is required.", "code": "missing_public_token"}), 400
+
+    rung_account_id = None
+    raw_id = data.get("rung_account_id")
+    if raw_id is not None:
+        try:
+            rung_account_id = int(raw_id)
+        except (TypeError, ValueError):
+            return jsonify({"error": "rung_account_id must be an integer.", "code": "bad_rung_account_id"}), 400
+
+    try:
+        result = exchange_public_token_and_persist(
+            owner_scope=user_id,
+            public_token=public_token,
+            rung_account_id=rung_account_id,
+        )
+    except Exception as exc:
+        err, status = _plaid_error_payload(exc)
+        return jsonify(err), status
+    return jsonify(result)
+
+
+@app.route("/api/plaid/status", methods=["GET"])
+def plaid_status():
+    user_id = _resolve_request_user_id({"user_id": request.args.get("user_id")})
+    payload = get_plaid_connection_status(user_id)
+    return jsonify(payload)
+
+
+@app.route("/api/plaid/sync-transactions", methods=["POST"])
+def plaid_sync_transactions():
+    data = request.json or {}
+    user_id = _resolve_request_user_id(data)
+    plaid_item_id = str(data.get("plaid_item_id") or "").strip() or None
+    gate = check_optional_operation(user_id, "plaid_sync_call")
+    if not gate.get("allowed", True):
+        record_usage_event(
+            owner_scope=user_id,
+            category="plaid",
+            provider="plaid",
+            operation="transactions_sync_blocked",
+            success=False,
+            external_call=False,
+            request_count=1,
+            cost_status="unknown",
+            metadata={"code": gate.get("code")},
+        )
+        return jsonify({
+            "error": gate.get("message") or "Plaid sync is currently unavailable.",
+            "code": gate.get("code") or "plaid_sync_blocked",
+        }), 429
+    try:
+        payload = sync_plaid_transactions(owner_scope=user_id, plaid_item_id=plaid_item_id)
+        projection = project_plaid_transactions(
+            owner_scope=user_id,
+            plaid_item_id=(payload.get("item") or {}).get("id"),
+        )
+        payload["projection"] = projection
+    except Exception as exc:
+        err, status = _plaid_error_payload(exc)
+        return jsonify(err), status
+    return jsonify(payload)
+
+
+@app.route("/api/plaid/transactions", methods=["GET"])
+def plaid_transactions_list():
+    user_id = _resolve_request_user_id({"user_id": request.args.get("user_id")})
+    item_id = request.args.get("plaid_item_id")
+    hid = current_household_id()
+
+    rows = PlaidTransaction.query.filter_by(household_id=hid, owner_scope=user_id)
+    if item_id:
+        item = PlaidItem.query.filter_by(household_id=hid, owner_scope=user_id, plaid_item_id=str(item_id)).first()
+        if item is None:
+            return jsonify({"transactions": []})
+        rows = rows.filter_by(plaid_item_id=item.id)
+
+    results = rows.order_by(PlaidTransaction.transaction_date.desc(), PlaidTransaction.id.desc()).limit(200).all()
+    return jsonify({"transactions": [row.to_summary() for row in results]})
+
+
+@app.route("/api/reconciliation/proposals", methods=["GET"])
+def reconciliation_proposals_list():
+    user_id = _resolve_request_user_id({"user_id": request.args.get("user_id")})
+    rows = list_reconciliation_proposals(owner_scope=user_id)
+    return jsonify({"proposals": rows})
+
+
+@app.route("/api/reconciliation/decision", methods=["POST"])
+def reconciliation_decide():
+    data = request.json or {}
+    user_id = _resolve_request_user_id(data)
+    action = str(data.get("action") or "").strip().lower()
+    manual_id = data.get("manual_transaction_id")
+    plaid_tx_id = str(data.get("plaid_transaction_id") or "").strip()
+
+    try:
+        manual_id_int = int(str(manual_id or "").strip())
+    except (TypeError, ValueError):
+        return jsonify({"error": "manual_transaction_id must be an integer."}), 400
+    if not plaid_tx_id:
+        return jsonify({"error": "plaid_transaction_id is required."}), 400
+
+    try:
+        result = decide_reconciliation_pair(
+            owner_scope=user_id,
+            manual_transaction_id=manual_id_int,
+            plaid_transaction_id=plaid_tx_id,
+            action=action,
+            user_id=user_id,
+        )
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    except Exception:
+        LOGGER.exception("reconciliation decision failed")
+        return jsonify({"error": "Could not apply reconciliation decision."}), 500
+
+    account = _household_account()
+    return jsonify({
+        "result": result,
+        "metrics": _canonical_financial_metrics(account, owner_scope=user_id) if account else None,
+    })
 
 # ----- BILLS CRUD ------------------------------------------------------------
 
@@ -1006,21 +3725,21 @@ def bills_crud():
         name = data.get("name", "").strip()
         if not name:
             return jsonify({"error": "Name required"}), 400
-        amount = float(data.get("amount", 0))
+        amount = _coerce_amount(data.get("amount", 0))
         due_date_str = data.get("due_date", "")
         if due_date_str:
             try:
                 due_date = datetime.strptime(due_date_str, "%Y-%m-%d")
             except ValueError:
-                due_date = datetime.utcnow() + timedelta(days=7)
+                due_date = datetime.now(timezone.utc) + timedelta(days=7)
         else:
-            due_date = datetime.utcnow() + timedelta(days=7)
-        b = Bill(name=name, amount=amount, due_date=due_date)
+            due_date = datetime.now(timezone.utc) + timedelta(days=7)
+        b = Bill(household_id=current_household_id(), name=name, amount=amount, due_date=due_date)
         db.session.add(b)
         db.session.commit()
         return jsonify({"message": "Bill added", "id": b.id})
     # GET list
-    bills = Bill.query.order_by(Bill.due_date.asc()).all()
+    bills = _household_bill_query().order_by(Bill.due_date.asc()).all()
     return jsonify([{
         "id": b.id,
         "name": b.name,
@@ -1031,7 +3750,7 @@ def bills_crud():
 
 @app.route("/bills/<int:bid>/pay", methods=["POST"])
 def toggle_bill(bid):
-    b = Bill.query.get(bid)
+    b = _household_bill_query().filter_by(id=bid).first()
     if not b:
         return jsonify({"error": "Bill not found"}), 404
     b.is_paid = not b.is_paid
@@ -1040,7 +3759,7 @@ def toggle_bill(bid):
 
 @app.route("/bills/<int:bid>", methods=["DELETE"])
 def delete_bill(bid):
-    b = Bill.query.get(bid)
+    b = _household_bill_query().filter_by(id=bid).first()
     if not b:
         return jsonify({"error": "Bill not found"}), 404
     db.session.delete(b)
@@ -1130,65 +3849,427 @@ def _write_env_var(key: str, value: str) -> None:
 
 @app.route("/api/settings/groq-key", methods=["GET", "POST", "DELETE"])
 def groq_key_settings():
-    """Manage the user's Groq API key for AI Copilot.
+    """Deprecated BYOK endpoint.
 
-    GET  — return ``{"configured": true, "key_preview": "gsk_...XXXX"}``
-    POST — validate the key against the Groq API, then save it.
-    DELETE — remove the saved key.
+    Copilot credentials are now server-side only. This endpoint remains for
+    backward compatibility with older clients but no longer accepts user keys.
     """
     if request.method == "GET":
-        key = get_setting("groq_api_key") or os.environ.get("GROQ_API_KEY", "")
-        if key:
-            preview = key[:4] + "..." + key[-4:] if len(key) > 8 else "****"
-            # Live best-effort validation so the panel shows the truth
-            # ("saved but rejected") instead of claiming it works.
-            valid, note = _validate_groq_key(key)
-            return jsonify({
-                "configured": True,
-                "key_preview": preview,
-                "valid": valid,
-                "validation": note,
-            })
-        return jsonify({"configured": False, "key_preview": None, "valid": None, "validation": None})
-
-    if request.method == "DELETE":
-        set_setting("groq_api_key", "")
-        _write_env_var("GROQ_API_KEY", "")  # clear the .env fallback too
-        # load_dotenv() set the key in the running process at import —
-        # clear it so GET stops reporting "configured" immediately.
-        os.environ.pop("GROQ_API_KEY", None)
-        return jsonify({"configured": False, "message": "Key removed"})
-
-    # POST — save first, then validate.
-    # We always save the key so the user can use it even if the Groq
-    # validation endpoint is unreachable or rate-limiting.  The
-    # validation is a best-effort check that returns a warning, not a
-    # failure.
-    data = request.json or {}
-    api_key = (data.get("api_key") or "").strip()
-    if not api_key:
-        return jsonify({"error": "API key is required"}), 400
-    if not api_key.startswith("gsk_"):
-        return jsonify({"error": "Invalid key format — Groq keys start with 'gsk_'"}), 400
-
-    # Save immediately — the key is always persisted.
-    set_setting("groq_api_key", api_key)
-
-    # Also write to .env so it survives test suite DB wipes.
-    _write_env_var("GROQ_API_KEY", api_key)
-
-    preview = api_key[:4] + "..." + api_key[-4:]
-
-    # Best-effort validation against the Groq models endpoint.
-    valid, validation_note = _validate_groq_key(api_key)
+        configured = bool((os.environ.get("GROQ_API_KEY") or "").strip())
+        return jsonify({
+            "configured": configured,
+            "managed_by": "server",
+        })
 
     return jsonify({
-        "configured": True,
-        "key_preview": preview,
-        "message": "Key saved!",
-        "validation": validation_note,
-        "valid": valid,
-        "env_updated": True,
+        "error": "Copilot provider credentials are managed server-side.",
+    }), 404
+
+
+@app.route("/api/settings/grocery-retailer", methods=["GET", "POST"])
+def grocery_retailer_settings():
+    """Compatibility retailer preference; canonical exact store wins."""
+    setting_key = "grocery_active_retailer"
+    account = _household_account()
+    selected = get_selected_store(current_household_id(), account=account) if account else {}
+
+    if request.method == "GET":
+        if selected.get("canonical"):
+            return jsonify({"retailer": selected["retailer"], "canonical_store": selected})
+        retailer = get_setting(setting_key, "walmart") or "walmart"
+        return jsonify({"retailer": retailer})
+
+    data = request.json or {}
+    retailer = str(data.get("retailer") or "").strip().lower()
+    if retailer not in {"walmart", "kroger", "dollar_general"}:
+        return jsonify({"error": "retailer must be walmart, kroger, or dollar_general"}), 400
+
+    if selected.get("canonical"):
+        return jsonify({
+            "retailer": selected["retailer"],
+            "canonical_store": selected,
+            "selection_required": retailer != selected["retailer"],
+        })
+
+    set_setting(setting_key, retailer)
+    return jsonify({"retailer": retailer})
+
+
+@app.route("/api/settings/household-shopping-defaults", methods=["GET", "POST"])
+def household_shopping_defaults_settings():
+    """Read or update household-level shopping defaults and shopping style."""
+    if request.method == "GET":
+        stored = _load_household_shopping_defaults()
+        return jsonify({
+            "definitions": household_defaults_schema(),
+            "preferences": stored["preferences"],
+            "shopping_style": stored["shopping_style"],
+        })
+
+    payload = request.json or {}
+    ok, errors = _save_household_shopping_defaults(payload)
+    if not ok:
+        return jsonify({
+            "error": "Invalid household shopping defaults payload.",
+            "details": errors,
+        }), 400
+
+    stored = _load_household_shopping_defaults()
+    return jsonify({
+        "saved": True,
+        "preferences": stored["preferences"],
+        "shopping_style": stored["shopping_style"],
+    })
+
+
+@app.route("/api/internal/usage/summary", methods=["GET"])
+def internal_usage_summary():
+    """Internal/operator usage summary for daily/monthly cost and call telemetry."""
+    user_id = _resolve_request_user_id({"user_id": request.args.get("user_id")})
+    return jsonify(summarize_usage(user_id))
+
+
+@app.route("/api/internal/usage/controls", methods=["GET", "POST"])
+def internal_usage_controls():
+    if request.method == "GET":
+        return jsonify(get_usage_controls())
+    payload = request.json or {}
+    if not isinstance(payload, dict):
+        return jsonify({"error": "controls payload must be an object."}), 400
+    return jsonify(set_usage_controls(payload))
+
+
+@app.route("/api/internal/usage/rates", methods=["GET", "POST"])
+def internal_usage_rates():
+    if request.method == "GET":
+        return jsonify(get_usage_rates())
+    payload = request.json or {}
+    if not isinstance(payload, dict):
+        return jsonify({"error": "rates payload must be an object."}), 400
+    return jsonify(set_usage_rates(payload))
+
+
+def _latest_retail_refresh() -> dict[str, Any]:
+    latest_verified = (
+        db.session.query(db.func.max(RetailProductCache.retrieved_at)).scalar()
+    )
+    latest_estimated = (
+        db.session.query(db.func.max(StorePriceCache.last_updated)).scalar()
+    )
+    return {
+        "verified_retail_cache_at": latest_verified.isoformat() if latest_verified else None,
+        "store_price_cache_at": latest_estimated.isoformat() if latest_estimated else None,
+    }
+
+
+def _sanitized_recent_errors(limit: int = 20) -> list[dict[str, Any]]:
+    rows = (
+        UsageEvent.query
+        .filter(UsageEvent.success == False)
+        .order_by(UsageEvent.created_at.desc())
+        .limit(max(1, min(int(limit or 20), 50)))
+        .all()
+    )
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        out.append({
+            "created_at": row.created_at.isoformat() if row.created_at else None,
+            "category": row.category,
+            "provider": row.provider,
+            "operation": row.operation,
+            "cost_status": row.cost_status,
+            "cache_status": row.cache_status,
+        })
+    return out
+
+
+@app.route("/api/internal/beta/readiness", methods=["GET"])
+def beta_readiness():
+    account = _household_account()
+    owner_scope = _resolve_request_user_id({"user_id": request.args.get("user_id")})
+    safe_snapshot = _compute_safe_to_spend_snapshot(account, owner_scope=owner_scope) if account else None
+    return jsonify({
+        "readiness": _household_readiness(account, owner_scope=owner_scope),
+        "safe_to_spend_state": (safe_snapshot or {}).get("state"),
+    })
+
+
+@app.route("/api/internal/beta/diagnostics", methods=["GET"])
+def beta_diagnostics():
+    owner_scope = _resolve_request_user_id({"user_id": request.args.get("user_id")})
+    account = _household_account()
+    capabilities = _runtime_capabilities()
+    readiness = _household_readiness(account, owner_scope=owner_scope)
+    plaid = get_plaid_connection_status(owner_scope)
+    db_uri = str(app.config.get("SQLALCHEMY_DATABASE_URI") or "")
+    db_path = _db_path_from_uri(db_uri)
+    migration_revision = None
+    try:
+        migration_revision = db.session.execute(text("SELECT version_num FROM alembic_version LIMIT 1")).scalar()
+    except Exception:
+        migration_revision = None
+    active_dataset = None
+    try:
+        active_dataset = ensure_bootstrap_tax_dataset()
+    except Exception:
+        active_dataset = None
+
+    selected_profile = None
+    if account is not None:
+        selected_store = get_selected_store(current_household_id(), account=account)
+        selected_profile = (
+            StoreTaxProfile.query
+            .filter_by(
+                retailer=str(selected_store.get("retailer") or "unknown"),
+                retailer_store_id=str(selected_store.get("store_id") or "unknown"),
+            )
+            .order_by(StoreTaxProfile.resolved_at.desc())
+            .first()
+        )
+
+    return jsonify({
+        "app": {
+            "healthy": True,
+            "schema_version": APP_SCHEMA_VERSION,
+            "debug": bool(getattr(app, "debug", False)),
+        },
+        "database": {
+            "uri_kind": "sqlite" if db_uri.startswith("sqlite:///") else "other",
+            "path": db_path,
+            "classification": _classify_db_path(db_path),
+            "postgres_ready": bool(db_uri.startswith("postgresql")),
+            "migration_head": migration_revision,
+        },
+        "authentication": {
+            "mode": "principal_membership" if auth_required_mode() else "compatibility",
+            "session": _current_auth_session_payload(),
+            "header_override_enabled": header_override_allowed(),
+        },
+        "readiness": readiness,
+        "capabilities": capabilities,
+        "plaid": {
+            "connected": bool(plaid.get("connected")),
+            "items": len(plaid.get("items") or []),
+            "last_sync_at": max([
+                str((item or {}).get("last_sync_at") or "")
+                for item in (plaid.get("items") or [])
+            ] or [""]) or None,
+            "sync_enabled": bool((get_usage_controls().get("kill_switches") or {}).get("plaid_sync_enabled", True)),
+        },
+        "retail_freshness": _latest_retail_refresh(),
+        "usage_controls": get_usage_controls(),
+        "cost_controls": {
+            "serpapi_fallback_enabled": bool((get_usage_controls().get("kill_switches") or {}).get("serpapi_fallback_enabled", False)),
+            "llm_enabled": bool((get_usage_controls().get("kill_switches") or {}).get("llm_enabled", True)),
+            "plaid_sync_enabled": bool((get_usage_controls().get("kill_switches") or {}).get("plaid_sync_enabled", True)),
+        },
+        "recent_errors": _sanitized_recent_errors(limit=int(request.args.get("limit", 20) or 20)),
+        "tax_engine": {
+            "provider": "rung_owned",
+            "paid_provider_keys_present": has_paid_provider_tax_keys(),
+            "normal_path_uses_paid_provider": False,
+            "active_dataset": {
+                "source_key": (active_dataset.source_key if active_dataset else None),
+                "version": (active_dataset.version_tag if active_dataset else None),
+                "source_hash": (active_dataset.source_hash if active_dataset else None),
+                "effective_from": (active_dataset.effective_from.isoformat() if active_dataset else None),
+                "effective_to": (active_dataset.effective_to.isoformat() if active_dataset and active_dataset.effective_to else None),
+                "status": (active_dataset.status if active_dataset else "unavailable"),
+            },
+            "selected_store_profile": {
+                "retailer": (selected_profile.retailer if selected_profile else None),
+                "retailer_store_id": (selected_profile.retailer_store_id if selected_profile else None),
+                "location_precision": (selected_profile.location_precision if selected_profile else None),
+                "confidence": (selected_profile.confidence if selected_profile else None),
+                "resolved_tax_code": (selected_profile.resolved_tax_code if selected_profile else None),
+                "general_rate_bps": (selected_profile.general_rate_basis_points if selected_profile else None),
+                "grocery_rate_bps": (selected_profile.grocery_rate_basis_points if selected_profile else None),
+                "prepared_rate_bps": (selected_profile.prepared_rate_basis_points if selected_profile else None),
+            },
+        },
+    })
+
+
+@app.route("/api/internal/beta/feedback", methods=["GET", "POST"])
+def beta_feedback_collection():
+    if request.method == "GET":
+        status = str(request.args.get("status") or "").strip().lower()
+        rows = BetaFeedback.query
+        if status in {"open", "resolved"}:
+            rows = rows.filter(BetaFeedback.status == status)
+        items = rows.order_by(BetaFeedback.created_at.desc()).limit(200).all()
+        return jsonify({"feedback": [row.to_summary() for row in items]})
+
+    payload = request.json or {}
+    category = str(payload.get("category") or "general").strip().lower() or "general"
+    description = str(payload.get("description") or "").strip()
+    if not description:
+        return jsonify({"error": "description is required."}), 400
+    screen_context = str(payload.get("screen_context") or "").strip() or None
+
+    row = BetaFeedback(
+        category=category[:40],
+        description=description[:500],
+        screen_context=(screen_context[:120] if screen_context else None),
+        status="open",
+    )
+    db.session.add(row)
+    db.session.commit()
+    return jsonify({"feedback": row.to_summary()}), 201
+
+
+@app.route("/api/internal/beta/feedback/<int:feedback_id>", methods=["PATCH"])
+def beta_feedback_update(feedback_id: int):
+    row = BetaFeedback.query.get(feedback_id)
+    if row is None:
+        return jsonify({"error": "feedback not found."}), 404
+
+    payload = request.json or {}
+    status = str(payload.get("status") or "").strip().lower()
+    if status and status not in {"open", "resolved"}:
+        return jsonify({"error": "status must be open or resolved."}), 400
+    if status:
+        row.status = status
+
+    db.session.add(row)
+    db.session.commit()
+    return jsonify({"feedback": row.to_summary()})
+
+
+@app.route("/api/onboarding/state", methods=["GET"])
+def onboarding_state():
+    """Return first-launch onboarding state and default field values."""
+    return jsonify(_onboarding_state_payload())
+
+
+@app.route("/api/onboarding/skip", methods=["POST"])
+def onboarding_skip():
+    """Mark onboarding complete without requiring any setup input."""
+    hid = current_household_id()
+    account = get_household_account(hid)
+    account.is_onboarded = True
+    seed_default_user_preferences(_resolve_request_user_id(request.json or {}), commit=False)
+    db.session.commit()
+    return jsonify({
+        'saved': True,
+        'is_onboarded': True,
+        'welcome_message': (
+            "Welcome to Rung. You're all set to start in Copilot. "
+            "You can add preferences or bill baselines any time from Settings."
+        ),
+        'readiness': _onboarding_readiness(account),
+    })
+
+
+@app.route("/api/onboarding/complete", methods=["POST"])
+def onboarding_complete():
+    """Persist onboarding inputs and mark first-launch setup as complete."""
+    data = request.json or {}
+
+    hid = current_household_id()
+    account = get_household_account(hid)
+
+    household_size = data.get('household_size', account.household_size or 4)
+    try:
+        household_size = max(1, int(household_size))
+    except (TypeError, ValueError):
+        household_size = 4
+    account.household_size = household_size
+
+    if 'favorite_proteins' in data:
+        set_user_preference('favorite_proteins', json.dumps(_normalize_list_input(data.get('favorite_proteins'))))
+    if 'dietary_restrictions' in data:
+        set_user_preference('dietary_restrictions', json.dumps(_normalize_list_input(data.get('dietary_restrictions'))))
+    if 'allergies' in data:
+        set_user_preference('allergies', json.dumps(_normalize_list_input(data.get('allergies'))))
+
+    grocery_baseline = _coerce_positive_float(data.get('baseline_grocery_cost'))
+    fuel_baseline = _coerce_positive_float(data.get('baseline_fuel_cost'))
+    if grocery_baseline is not None:
+        set_user_preference('baseline_grocery_cost', f"{grocery_baseline:.2f}")
+    if fuel_baseline is not None:
+        set_user_preference('baseline_fuel_cost', f"{fuel_baseline:.2f}")
+
+    shopping_payload: dict[str, Any] = {}
+    if "shopping_style" in data:
+        shopping_payload["shopping_style"] = data.get("shopping_style")
+    if "household_shopping_defaults" in data:
+        shopping_payload["preferences"] = data.get("household_shopping_defaults")
+    if shopping_payload:
+        ok, shop_errors = _save_household_shopping_defaults(shopping_payload, commit=False)
+        if not ok:
+            db.session.rollback()
+            return jsonify({"error": "Invalid household shopping defaults.", "details": shop_errors}), 400
+
+    if "location_sharing_enabled" in data:
+        if not isinstance(data.get("location_sharing_enabled"), bool):
+            db.session.rollback()
+            return jsonify({"error": "location_sharing_enabled must be true or false."}), 400
+        set_setting(
+            LOCATION_SHARING_SETTING_KEY,
+            "true" if data["location_sharing_enabled"] else "false",
+            commit=False,
+        )
+
+    financial_errors = _persist_onboarding_financial_basics(account, data)
+    if financial_errors:
+        db.session.rollback()
+        return jsonify({"error": "Invalid financial setup.", "details": financial_errors}), 400
+
+    recurring_bills = data.get('recurring_bills') or []
+    if isinstance(recurring_bills, list):
+        for item in recurring_bills:
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get('name') or '').strip()
+            amount = _coerce_positive_float(item.get('amount'))
+            if not name or amount is None:
+                continue
+
+            existing = _household_bill_query().filter(Bill.name.ilike(name)).first()
+            if existing:
+                existing.amount = amount
+                existing.is_gas_estimate = False
+            else:
+                db.session.add(Bill(
+                    household_id=hid,
+                    name=name.title(),
+                    amount=amount,
+                    due_date=datetime.now(timezone.utc) + timedelta(days=14),
+                    is_gas_estimate=False,
+                    is_paid=False,
+                ))
+
+    if fuel_baseline is not None:
+        gas_bill = _household_bill_query().filter_by(is_gas_estimate=True).first()
+        if gas_bill:
+            gas_bill.amount = fuel_baseline
+        else:
+            db.session.add(Bill(
+                household_id=hid,
+                name='Gas Allocation',
+                amount=fuel_baseline,
+                due_date=datetime.now(timezone.utc) + timedelta(days=2),
+                is_gas_estimate=True,
+                is_paid=False,
+            ))
+
+    account.is_onboarded = True
+    seed_default_user_preferences(_resolve_request_user_id(data), commit=False)
+    db.session.commit()
+
+    bill_count = len(recurring_bills) if isinstance(recurring_bills, list) else 0
+    welcome = (
+        f"Welcome to Rung. I saved your household size ({household_size})"
+        + (f", captured {bill_count} recurring bill baseline(s)," if bill_count else ',')
+        + " and I'm ready to help you plan meals, groceries, and spending."
+    )
+
+    return jsonify({
+        'saved': True,
+        'is_onboarded': True,
+        'welcome_message': welcome,
+        'readiness': _onboarding_readiness(account),
     })
 
 
@@ -1196,12 +4277,13 @@ def groq_key_settings():
 
 @app.route("/api/account/update", methods=["POST"])
 def update_account():
-    account = Account.query.first()
+    account = _household_account()
     if not account:
         return jsonify({"error": "Account not found"}), 404
     data = request.json or {}
+    checking_balance = float(account.checking_balance or 0.0)
     if "checking_balance" in data:
-        account.checking_balance = float(data["checking_balance"])
+        checking_balance = set_balance_absolute(current_household_id(), float(data["checking_balance"]))
     if "food_allocation_pct" in data:
         account.food_allocation_pct = float(data["food_allocation_pct"])
     if "pay_period_days" in data:
@@ -1211,7 +4293,7 @@ def update_account():
     if "expected_paycheck" in data:
         account.expected_paycheck = float(data["expected_paycheck"])
     db.session.commit()
-    return jsonify({"message": "Account updated", "checking_balance": round(account.checking_balance, 2)})
+    return jsonify({"message": "Account updated", "checking_balance": round(checking_balance, 2)})
 
 # ----- GROCERY LIST (GET/DELETE) --------------------------------------------
 
@@ -1224,13 +4306,14 @@ def grocery_list():
         # Build cart from recipes
         recipes = Recipe.query.filter(Recipe.id.in_(recipe_ids)).all() if recipe_ids else []
         # Clear old grocery items for this session
-        GroceryItem.query.delete()
+        _household_grocery_query().delete()
         items = []
         for r in recipes:
             for ing in r.ingredients:
                 gi = GroceryItem(
+                    household_id=current_household_id(),
                     item_name=ing.product_name,
-                    estimated_price=round(2.00 + (ing.quantity * 0.15), 2),
+                    estimated_price=round(2.00 + (float(ing.quantity or 0.0) * 0.15), 2),
                     store_name=store_name or "Local Store",
                     location_context=""
                 )
@@ -1239,126 +4322,521 @@ def grocery_list():
         db.session.commit()
         return jsonify({"message": f"Grocery list generated with {len(items)} items"})
     # GET list
-    items = GroceryItem.query.all()
-    return jsonify({
-        "items": [{
+    items = _household_grocery_query().order_by(GroceryItem.id).all()
+    account = _household_account()
+    selected = get_selected_store(current_household_id(), account=account) if account else {}
+    selected_store = selected.get("name") or "Kroger"
+    location_id = selected.get("store_id") or None
+    selected_retailer = str(selected.get("retailer") or "kroger").strip().lower()
+    serialized = []
+    for i in items:
+        term = (i.item_name or "").strip()
+        row = {
             "id": i.id,
-            "item_name": i.item_name,
-            "estimated_price": i.estimated_price,
-            "store_name": i.store_name,
-            "location_context": i.location_context,
-            "is_purchased": i.is_purchased,
-            "quantity": 1
-        } for i in items]
-    })
+            "item_name": term,
+            "estimated_price": float(i.estimated_price or 0.0),
+            "store_name": i.store_name or selected_store,
+            "location_context": i.location_context or (account.city_state if account else ""),
+            "is_purchased": bool(i.is_purchased),
+            "is_favorite": bool(getattr(i, "is_favorite", False)),
+            "quantity": 1,
+            "price_source": "estimated",
+            "confirmed_local_store": False,
+            "product_label": term,
+        }
+        # This legacy resolver is Kroger-specific. Walmart and other retailer
+        # product resolution belongs to the authoritative cart pipeline.
+        if term and selected_retailer == "kroger":
+            resolved = resolve_terms(app, [term], store_name=selected_store, location_id=location_id, limit=5)
+            candidates = resolved.get(term.lower(), []) or resolved.get(term, [])
+            best = None
+            if candidates:
+                best = pick_best(
+                    candidates,
+                    prefer_store_brand=True,
+                    keyword=term.lower(),
+                    net_needed=1,
+                    required_dimension="unknown",
+                )
+            if best:
+                row["product_label"] = best.get("product_title") or term
+                row["item_name"] = best.get("product_title") or term
+                row["estimated_price"] = round(float(best.get("price") or 0.0), 2)
+                row["store_name"] = best.get("source_store_name") or best.get("store_name") or selected_store
+                row["price_source"] = best.get("source", "estimated")
+                row["confirmed_local_store"] = str(best.get("source", "")).lower() in {"kroger_cache", "kroger_api"}
+                row["package_size"] = best.get("package_size")
+                row["image_url"] = best.get("image_url")
+        serialized.append(row)
+    return jsonify({"items": serialized})
 
 @app.route("/api/grocery/<int:gid>", methods=["DELETE"])
 def delete_grocery_item(gid):
-    gi = GroceryItem.query.get(gid)
+    gi = _household_grocery_query().filter_by(id=gid).first()
     if not gi:
         return jsonify({"error": "Item not found"}), 404
     db.session.delete(gi)
     db.session.commit()
     return jsonify({"message": f"Grocery item {gid} deleted"})
 
-@app.route("/api/budget/summary", methods=["GET"])
-def get_budget_summary():
-    account = Account.query.first()
-    if not account:
-        return jsonify({"error": "Account settings missing"}), 400
-    return jsonify(compute_liquidity_metrics(account))
 
-@app.route("/api/decision/can-i-buy", methods=["POST"])
-def can_i_buy():
-    """Behavioral Decision Engine — evaluates a purchase against your
-    remaining pay-period cash, daily burn rate, and a configurable
-    safety-buffer multiplier.
+def _build_trip_token(*, retailer: str, store_id: str, store_name: str, cart_signature: str, planned_total_cents: int) -> str:
+    raw = "|".join([
+        str(retailer or "").strip().lower(),
+        str(store_id or "").strip(),
+        str(store_name or "").strip().lower(),
+        str(cart_signature or "").strip().lower(),
+        str(int(planned_total_cents)),
+    ])
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:40]
 
-    Request body
-    ------------
-    item_name : str
-    cost : float
-    multiplier : float, optional (default 1.5)
-        Safety-buffer multiplier.  A purchase is considered "safe"
-        only when ``free_cash >= cost * multiplier``.
 
-    Returns (200)
-    -------------
-    {
-      "item_name": str,
-      "item_cost": float,
-      "approved": bool,          # cost <= free_cash
-      "verdict": "safe" | "warning" | "denied",
-      "pre_daily_pace": float,   # $/day before purchase
-      "post_daily_pace": float,  # $/day after  purchase
-      "days_remaining": int,
-      "impact_text": str,        # human-readable pacing impact
+def _normalize_finished_shopping_payload(data: dict[str, Any]) -> dict[str, Any]:
+    planned_cents = _money_to_cents(data.get("planned_total"), field_name="planned_total")
+    if planned_cents <= 0:
+        raise ValueError("planned_total must be greater than 0.")
+
+    use_planned = bool(data.get("use_planned_total", False))
+    actual_input = data.get("actual_total")
+    actual_cents = planned_cents if use_planned else _money_to_cents(actual_input, field_name="actual_total")
+    if actual_cents <= 0:
+        raise ValueError("actual_total must be greater than 0.")
+
+    retailer = str(data.get("retailer") or "").strip().lower()
+    store_name = str(data.get("store_name") or "").strip()
+    store_id = str(data.get("store_id") or "").strip()
+    cart_signature = str(data.get("cart_signature") or "").strip()
+    operation_id = str(data.get("operation_id") or "").strip() or f"trip_{uuid.uuid4().hex}"
+
+    return {
+        "planned_total_cents": planned_cents,
+        "actual_total_cents": actual_cents,
+        "actual_amount_source": "planned" if use_planned else "actual",
+        "retailer": retailer,
+        "store_name": store_name,
+        "store_id": store_id,
+        "cart_signature": cart_signature,
+        "operation_id": operation_id,
     }
-    """
-    account = Account.query.first()
+
+
+@app.route("/api/grocery/finished-shopping/stage", methods=["POST"])
+def grocery_finished_shopping_stage():
     data = request.json or {}
-    item_name = data.get("item_name", "Requested Item")
-    item_cost = float(data.get("cost", 0.0))
-    multiplier = float(data.get("multiplier", 1.5))
+    try:
+        payload = _normalize_finished_shopping_payload(data)
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
 
-    metrics = compute_liquidity_metrics(account)
-    free_cash = metrics["free_cash_remaining"]
-
-    # Days actually remaining (now → period end), not the full config value.
-    pay_period_end = datetime.utcnow() + timedelta(days=account.pay_period_days)
-    days = max(1, (pay_period_end - datetime.utcnow()).days)
-
-    # ---- Daily pace (pre- and post-purchase) ----
-    pre_pace = round(free_cash / days, 2) if days > 0 else 0.0
-    post_pace = round((free_cash - item_cost) / days, 2) if days > 0 else 0.0
-
-    # ---- Three-tier verdict ----
-    if item_cost > free_cash:
-        verdict = "denied"
-        approved = False
-    elif free_cash >= (item_cost * multiplier):
-        verdict = "safe"
-        approved = True
-    else:
-        verdict = "warning"
-        approved = True
-
-    # ---- Human-readable impact text ----
-    if verdict == "safe":
-        impact = (
-            f"🟢 This purchase drops your daily fun spending from "
-            f"${pre_pace:.2f}/day to ${post_pace:.2f}/day for "
-            f"{days} days — well within your {multiplier:.1f}× safety buffer."
-        )
-    elif verdict == "warning":
-        impact = (
-            f"🟡 Pacing warning: your daily spend drops from "
-            f"${pre_pace:.2f}/day to ${post_pace:.2f}/day for "
-            f"{days} days. It fits, but you're below your "
-            f"{multiplier:.1f}× buffer — spend cautiously."
-        )
-    else:
-        shortfall = round(item_cost - free_cash, 2)
-        impact = (
-            f"🔴 Insufficient funds: you're ${shortfall:.2f} short. "
-            f"Your current daily pace is ${pre_pace:.2f}/day with "
-            f"{days} days left in the pay period."
-        )
+    planned = payload["planned_total_cents"]
+    actual = payload["actual_total_cents"]
+    diff = actual - planned
 
     return jsonify({
-        "item_name": item_name,
-        "item_cost": item_cost,
-        "approved": approved,
-        "verdict": verdict,
-        "pre_daily_pace": pre_pace,
-        "post_daily_pace": post_pace,
-        "days_remaining": days,
-        "impact_text": impact,
-        "free_cash": round(free_cash, 2),
+        "staged": True,
+        "requires_confirmation": True,
+        "operation_id": payload["operation_id"],
+        "trip_preview": {
+            "grocery_spending": _cents_to_float(actual),
+            "planned_total": _cents_to_float(planned),
+            "actual_total": _cents_to_float(actual),
+            "difference": _cents_to_float(diff),
+            "difference_sign": "plus" if diff > 0 else ("minus" if diff < 0 else "zero"),
+            "retailer": payload["retailer"],
+            "store_name": payload["store_name"],
+            "store_id": payload["store_id"],
+            "amount_source": payload["actual_amount_source"],
+        },
+        "message": "Relevant financial totals will be updated after confirmation.",
     })
 
 
-def _dispatch_parsed(parsed: dict, user_text: str = "") -> dict:
+@app.route("/api/grocery/finished-shopping/complete", methods=["POST"])
+def grocery_finished_shopping_complete():
+    data = request.json or {}
+    user_id = _resolve_request_user_id(data)
+    hid = current_household_id()
+    confirm = bool(data.get("confirm", False))
+    if not confirm:
+        return jsonify({"error": "Confirmation required."}), 400
+
+    try:
+        payload = _normalize_finished_shopping_payload(data)
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+
+    trip_token = str(data.get("trip_token") or "").strip()
+    if not trip_token:
+        trip_token = _build_trip_token(
+            retailer=payload["retailer"],
+            store_id=payload["store_id"],
+            store_name=payload["store_name"],
+            cart_signature=payload["cart_signature"],
+            planned_total_cents=payload["planned_total_cents"],
+        )
+
+    op_id = payload["operation_id"]
+    existing = _household_trip_query().filter_by(operation_id=op_id).first()
+    if existing:
+        txn = _household_tx_query().filter_by(id=existing.transaction_id).first()
+        account = _household_account()
+        return jsonify({
+            "completed": True,
+            "already_completed": True,
+            "operation_id": existing.operation_id,
+            "trip_token": existing.trip_token,
+            "transaction_id": existing.transaction_id,
+            "transaction_amount": round(float(txn.amount), 2) if txn else _cents_to_float(existing.actual_total_cents),
+            "planned_total": _cents_to_float(existing.planned_total_cents),
+            "actual_total": _cents_to_float(existing.actual_total_cents),
+            "amount_source": existing.amount_source,
+            "completed_at": existing.completed_at.isoformat() if existing.completed_at else None,
+            "metrics": _canonical_financial_metrics(account) if account else None,
+        })
+
+    duplicate_trip = _household_trip_query().filter_by(trip_token=trip_token).first()
+    if duplicate_trip:
+        return jsonify({
+            "error": "This shopping trip has already been completed.",
+            "operation_id": duplicate_trip.operation_id,
+            "trip_token": duplicate_trip.trip_token,
+        }), 409
+
+    account = _household_account()
+    if not account:
+        return jsonify({"error": "Account not found"}), 404
+
+    amount = _cents_to_float(payload["actual_total_cents"])
+    description_parts = ["Grocery trip"]
+    if payload["store_name"]:
+        description_parts.append(payload["store_name"])
+    if payload["retailer"]:
+        description_parts.append(f"({payload['retailer']})")
+    description = " ".join(description_parts)
+
+    undo_token = uuid.uuid4().hex
+    try:
+        record_action_audit(
+            {
+                "operation_id": op_id,
+                "status": "in_progress",
+                "kind": "grocery_finished_shopping",
+                "trip_token": trip_token,
+            },
+            raw_text="finished_shopping_complete",
+            source="grocery_finished_shopping",
+            user_id=user_id,
+            operation_id=op_id,
+            undo_token=undo_token,
+            commit=False,
+        )
+        db.session.flush()
+
+        txn = ExpenseTransaction(
+            household_id=hid,
+            description=description[:150],
+            amount=amount,
+            category="grocery",
+            source="manual",
+            local_account_id=account.id if account else None,
+            date=datetime.now(timezone.utc),
+        )
+        db.session.add(txn)
+        apply_balance_delta(hid, -amount)
+        db.session.flush()
+
+        trip = ShoppingTripCompletion(
+            household_id=hid,
+            operation_id=op_id,
+            trip_token=trip_token,
+            transaction_id=txn.id,
+            retailer=payload["retailer"],
+            store_name=payload["store_name"],
+            store_id=payload["store_id"] or None,
+            planned_total_cents=payload["planned_total_cents"],
+            actual_total_cents=payload["actual_total_cents"],
+            amount_source=payload["actual_amount_source"],
+            cart_signature=payload["cart_signature"],
+            manual_provisional=True,
+            completed_at=datetime.now(timezone.utc),
+        )
+        db.session.add(trip)
+
+        audit_row = _household_audit_query().filter_by(operation_id=op_id).first()
+        if audit_row:
+            audit_row.actions_json = json.dumps({
+                "operation_id": op_id,
+                "undo_token": undo_token,
+                "kind": "grocery_finished_shopping",
+                "completed_trip": {
+                    "trip_token": trip_token,
+                    "transaction_id": txn.id,
+                    "planned_total": _cents_to_float(payload["planned_total_cents"]),
+                    "actual_total": _cents_to_float(payload["actual_total_cents"]),
+                    "amount_source": payload["actual_amount_source"],
+                },
+            })
+
+        db.session.commit()
+    except IntegrityError:
+        db.session.rollback()
+        # Concurrent duplicate submit can trip unique operation_id claim; replay.
+        replay = _household_trip_query().filter_by(operation_id=op_id).first()
+        if replay is None:
+            replay = _household_trip_query().filter_by(trip_token=trip_token).first()
+        if replay is not None:
+            txn = _household_tx_query().filter_by(id=replay.transaction_id).first()
+            account = _household_account()
+            return jsonify({
+                "completed": True,
+                "already_completed": True,
+                "operation_id": replay.operation_id,
+                "trip_token": replay.trip_token,
+                "transaction_id": replay.transaction_id,
+                "transaction_amount": round(float(txn.amount), 2) if txn else _cents_to_float(replay.actual_total_cents),
+                "planned_total": _cents_to_float(replay.planned_total_cents),
+                "actual_total": _cents_to_float(replay.actual_total_cents),
+                "amount_source": replay.amount_source,
+                "completed_at": replay.completed_at.isoformat() if replay.completed_at else None,
+                "metrics": _canonical_financial_metrics(account) if account else None,
+            })
+        raise
+    except Exception:
+        db.session.rollback()
+        raise
+
+    metrics = _canonical_financial_metrics(account)
+    return jsonify({
+        "completed": True,
+        "already_completed": False,
+        "operation_id": op_id,
+        "trip_token": trip_token,
+        "transaction_id": txn.id,
+        "transaction_amount": round(amount, 2),
+        "planned_total": _cents_to_float(payload["planned_total_cents"]),
+        "actual_total": _cents_to_float(payload["actual_total_cents"]),
+        "amount_source": payload["actual_amount_source"],
+        "completed_at": trip.completed_at.isoformat(),
+        "undo_token": undo_token,
+        "metrics": metrics,
+    })
+
+
+@app.route("/api/grocery/finished-shopping/status", methods=["GET"])
+def grocery_finished_shopping_status():
+    _ = current_household_id()
+    trip_token = str(request.args.get("trip_token") or "").strip()
+    operation_id = str(request.args.get("operation_id") or "").strip()
+    if not trip_token and not operation_id:
+        return jsonify({"completed": False})
+
+    row = None
+    if operation_id:
+        row = _household_trip_query().filter_by(operation_id=operation_id).first()
+    if row is None and trip_token:
+        row = _household_trip_query().filter_by(trip_token=trip_token).first()
+    if row is None:
+        return jsonify({"completed": False})
+
+    txn = _household_tx_query().filter_by(id=row.transaction_id).first()
+    account = _household_account()
+    return jsonify({
+        "completed": True,
+        "operation_id": row.operation_id,
+        "trip_token": row.trip_token,
+        "transaction_id": row.transaction_id,
+        "transaction_amount": round(float(txn.amount), 2) if txn else _cents_to_float(row.actual_total_cents),
+        "planned_total": _cents_to_float(row.planned_total_cents),
+        "actual_total": _cents_to_float(row.actual_total_cents),
+        "amount_source": row.amount_source,
+        "retailer": row.retailer,
+        "store_name": row.store_name,
+        "store_id": row.store_id,
+        "completed_at": row.completed_at.isoformat() if row.completed_at else None,
+        "metrics": _canonical_financial_metrics(account) if account else None,
+    })
+
+
+@app.route("/api/grocery/rebalance/preview", methods=["POST"])
+def grocery_rebalance_preview():
+    from services.retail.cart import _load_household_shopping_defaults, propose_rebalance_preview
+
+    data = request.json or {}
+    cart_items = data.get("cart_items") or []
+    budget_limit = float(data.get("budget_limit") or 0)
+    tax_rate = float(data.get("tax_rate") or 0)
+    raw_context = data.get("cart_context")
+    context: dict[str, Any] = raw_context if isinstance(raw_context, dict) else {}
+    retailer = str(context.get("retailer") or data.get("retailer") or "walmart").strip().lower()
+    protected = set()
+    for key in data.get("protected_choice_keys") or []:
+        normalized = " ".join(str(key or "").strip().lower().split())
+        if normalized:
+            protected.add(normalized)
+    last_changed = " ".join(str(data.get("last_changed_choice_key") or "").strip().lower().split())
+    if last_changed:
+        protected.add(last_changed)
+
+    preview = propose_rebalance_preview(
+        cart_items=cart_items,
+        budget_limit=budget_limit,
+        tax_rate=tax_rate,
+        retailer=retailer,
+        defaults=_load_household_shopping_defaults(),
+        protected_choice_keys=protected,
+        context=context,
+    )
+    preview["protected_choice_keys"] = sorted(protected)
+    return jsonify(preview)
+
+
+@app.route("/api/grocery/rebalance/apply", methods=["POST"])
+def grocery_rebalance_apply():
+    from services.retail.cart import _load_household_shopping_defaults, propose_rebalance_preview
+
+    data = request.json or {}
+    cart_items = data.get("cart_items") or []
+    budget_limit = float(data.get("budget_limit") or 0)
+    tax_rate = float(data.get("tax_rate") or 0)
+    raw_context = data.get("cart_context")
+    context: dict[str, Any] = raw_context if isinstance(raw_context, dict) else {}
+    retailer = str(context.get("retailer") or data.get("retailer") or "walmart").strip().lower()
+
+    protected = set()
+    for key in data.get("protected_choice_keys") or []:
+        normalized = " ".join(str(key or "").strip().lower().split())
+        if normalized:
+            protected.add(normalized)
+    raw_preview = data.get("preview")
+    preview_meta: dict[str, Any] = raw_preview if isinstance(raw_preview, dict) else {}
+    for key in preview_meta.get("protected_choice_keys") or []:
+        normalized = " ".join(str(key or "").strip().lower().split())
+        if normalized:
+            protected.add(normalized)
+
+    current_preview = propose_rebalance_preview(
+        cart_items=cart_items,
+        budget_limit=budget_limit,
+        tax_rate=tax_rate,
+        retailer=retailer,
+        defaults=_load_household_shopping_defaults(),
+        protected_choice_keys=protected,
+        context=context,
+    )
+
+    if (
+        str(preview_meta.get("context_fingerprint") or "") != str(current_preview.get("context_fingerprint") or "")
+        or str(preview_meta.get("proposal_fingerprint") or "") != str(current_preview.get("proposal_fingerprint") or "")
+    ):
+        return jsonify({
+            "error": "Rebalance preview is stale. Regenerate preview and retry.",
+            "code": "stale_rebalance_preview",
+            "current_preview": current_preview,
+        }), 409
+
+    return jsonify({
+        "applied": True,
+        "applied_choices": current_preview.get("changes") or [],
+        "preview": current_preview,
+    })
+
+@app.route("/api/budget/summary", methods=["GET"])
+def get_budget_summary():
+    account = _household_account()
+    if not account:
+        return jsonify({"error": "Account settings missing"}), 400
+    owner_scope = _resolve_request_user_id({"user_id": request.args.get("user_id")})
+    metrics = compute_liquidity_metrics(account)
+    metrics["readiness"] = _household_readiness(account, owner_scope=owner_scope)
+    metrics["safe_to_spend"] = _compute_safe_to_spend_snapshot(account, owner_scope=owner_scope)
+    return jsonify(metrics)
+
+
+@app.route("/api/settings/safe-to-spend", methods=["GET", "POST"])
+def safe_to_spend_settings():
+    if request.method == "GET":
+        return jsonify({
+            "protected_buffer": _cents_to_float(_get_safe_buffer_cents()),
+        })
+
+    data = request.json or {}
+    if "protected_buffer" not in data:
+        return jsonify({"error": "protected_buffer is required."}), 400
+    try:
+        buffer_cents = _money_to_cents(data.get("protected_buffer"), field_name="protected_buffer")
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+
+    set_setting(SAFE_BUFFER_SETTING_KEY, f"{_cents_to_float(buffer_cents):.2f}")
+    return jsonify({"protected_buffer": _cents_to_float(buffer_cents)})
+
+
+@app.route("/api/settings/pay-yourself-first", methods=["GET", "POST"])
+def pay_yourself_first_settings():
+    current = _explicit_household_setting_decimal(PYF_TARGET_SETTING_KEY)
+    if request.method == "GET":
+        return jsonify({
+            "long_term_savings_target_percent": float(current) if current is not None and current >= 0 else None,
+        })
+
+    data = request.json or {}
+    if "long_term_savings_target_percent" not in data:
+        return jsonify({"error": "long_term_savings_target_percent is required."}), 400
+    try:
+        target = Decimal(str(data.get("long_term_savings_target_percent")))
+    except (InvalidOperation, TypeError, ValueError):
+        return jsonify({"error": "Savings target must be a valid percentage."}), 400
+    if target < 0:
+        return jsonify({"error": "Savings target cannot be negative."}), 400
+    set_setting(PYF_TARGET_SETTING_KEY, format(target.normalize(), "f"))
+    return jsonify({"long_term_savings_target_percent": float(target)})
+
+@app.route("/api/decision/can-i-buy", methods=["POST"])
+def can_i_buy():
+    """Deterministic affordability check against current Safe-to-Spend.
+
+    This endpoint is advisory-only and never writes any financial rows.
+    """
+    account = _household_account()
+    if not account:
+        return jsonify({"error": "Account settings missing"}), 400
+
+    data = request.json or {}
+    item_name = str(data.get("item_name") or "Proposed purchase").strip() or "Proposed purchase"
+    try:
+        purchase_cents = _money_to_cents(data.get("cost"), field_name="cost")
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+
+    owner_scope = _resolve_request_user_id(data)
+    safe = _compute_safe_to_spend_snapshot(account, owner_scope=owner_scope)
+    if safe.get("state") == "needs_setup":
+        return jsonify({
+            "error": "Safe-to-Spend is unavailable until setup is complete.",
+            "code": "needs_setup",
+            "readiness": safe.get("readiness") or _household_readiness(account, owner_scope=owner_scope),
+        }), 409
+    now_safe_cents = int(safe.get("safe_to_spend_cents") or 0)
+    after_cents = now_safe_cents - purchase_cents
+    short_by_cents = max(0, -after_cents)
+    approved = after_cents >= 0
+
+    return jsonify({
+        "item_name": item_name,
+        "purchase": _cents_to_float(purchase_cents),
+        "safe_to_spend_now": _cents_to_float(now_safe_cents),
+        "safe_to_spend_after": _cents_to_float(after_cents),
+        "short_by": _cents_to_float(short_by_cents),
+        "approved": approved,
+        "message": (
+            "Yes, this fits within your current Safe-to-Spend amount."
+            if approved
+            else f"This is ${_cents_to_float(short_by_cents):.2f} over your current Safe-to-Spend amount."
+        ),
+    })
+
+
+def _dispatch_parsed(parsed: dict, user_text: str = "", user_id: str = "anonymous") -> dict:
     """Execute a parsed Copilot result against the database and report actions.
 
     Shared by ``/api/copilot/parse`` (single-turn) and ``/api/copilot/chat``
@@ -1369,12 +4847,13 @@ def _dispatch_parsed(parsed: dict, user_text: str = "") -> dict:
 
     Returns the ``actions_taken`` dict for the API response.
     """
-    from sqlalchemy import or_
-
     actions = {
         "bills_added": [],
         "bills_removed": [],
         "expenses_logged": [],
+        "income_logged": [],
+        "balance_reconciliations": [],
+        "shopping_trip_corrections": [],
         "grocery_items_added": [],
         "recipes_added": [],        # recipes actually persisted to the meal plan
         "recipes_auto_filled": [],  # recommendation engine fills the gap
@@ -1383,157 +4862,182 @@ def _dispatch_parsed(parsed: dict, user_text: str = "") -> dict:
         "target_meals": parsed.get("target_meals"),
     }
 
-    account = Account.query.first()
-
     # ---- Process tool_results (Groq native tool-calling path) ----
     # When the LLM uses native tool calling, the actions were already
     # persisted by execute_app_function — we just report them.
     tool_results = parsed.get("tool_results", [])
-    for tr in tool_results:
-        tool_name = tr.get("tool", "")
-        status = tr.get("status", "")
-        data = tr.get("data") or {}
-        if status != "ok":
-            continue
-        if tool_name == "add_recurring_bill":
-            actions["bills_added"].append({
-                "name": data.get("name", ""),
-                "amount": data.get("amount", 0),
-            })
-        elif tool_name == "add_grocery_item":
-            item = data.get("item_name", "").lower()
-            if item:
-                actions["grocery_items_added"].append(item)
-        elif tool_name == "select_active_recipe":
-            act = data.get("action", "")
-            if act == "added":
-                actions["recipes_added"].append({
-                    "id": data.get("id"),
-                    "title": data.get("title", ""),
+    if tool_results:
+        for tr in tool_results:
+            tool_name = tr.get("tool", "")
+            status = tr.get("status", "")
+            data = tr.get("data") or {}
+            if status != "ok":
+                continue
+            if tool_name == "add_recurring_bill":
+                actions["bills_added"].append({
+                    "name": data.get("name", ""),
+                    "amount": data.get("amount", 0),
                 })
-            elif act == "removed":
-                actions["recipes_removed"].append({
-                    "id": data.get("id"),
-                    "title": data.get("title", ""),
+            elif tool_name == "add_grocery_item":
+                item = data.get("item_name", "").lower()
+                if item:
+                    actions["grocery_items_added"].append(item)
+            elif tool_name == "select_active_recipe":
+                act = data.get("action", "")
+                if act == "added":
+                    actions["recipes_added"].append({
+                        "id": data.get("id"),
+                        "title": data.get("title", ""),
+                    })
+                elif act == "removed":
+                    actions["recipes_removed"].append({
+                        "id": data.get("id"),
+                        "title": data.get("title", ""),
+                    })
+            elif tool_name == "log_discretionary_expense":
+                actions["expenses_logged"].append({
+                    "description": data.get("description", ""),
+                    "amount": data.get("amount", 0),
                 })
-        elif tool_name == "log_discretionary_expense":
-            actions["expenses_logged"].append({
-                "description": data.get("description", ""),
-                "amount": data.get("amount", 0),
-            })
-        elif tool_name == "set_target_meals":
-            target_meals = data.get("target_meals", parsed.get("target_meals"))
-            actions["target_meals"] = target_meals
+            elif tool_name == "set_target_meals":
+                target_meals = data.get("target_meals", parsed.get("target_meals"))
+                actions["target_meals"] = target_meals
+        return actions
 
-    # ---- Dispatch bill_updates (legacy flat-list path) ----
-    for bill in parsed.get("bill_updates", []):
-        name = (bill.get("name") or "").strip()
-        amount = _coerce_amount(bill.get("amount", 0))
-        action = bill.get("action", "add")
-        if not name:
-            continue
-        if action == "remove":
-            _STOP = {"subscription", "monthly", "bill", "service", "account",
-                     "remove", "cancel", "delete", "the", "and", "for"}
-            words = [w for w in name.split() if len(w) > 2 and w.lower() not in _STOP]
-            if words:
-                filters = [Bill.name.ilike(f"%{w}%") for w in words]
-                existing = Bill.query.filter(or_(*filters)).first()
-            else:
-                existing = Bill.query.filter(
-                    Bill.name.ilike(f"%{name}%")
-                ).first()
-            if existing:
-                db.session.delete(existing)
-                actions["bills_removed"].append({"name": existing.name, "amount": existing.amount})
-            continue
-        if amount <= 0:
-            continue
-        else:
-            due_date = datetime.utcnow() + timedelta(days=14)
-            b = Bill(name=name.title(), amount=amount, due_date=due_date)
-            db.session.add(b)
-            actions["bills_added"].append({"name": name, "amount": amount})
-
-    # ---- Dispatch discretionary_events (legacy flat-list path) ----
-    for event in parsed.get("discretionary_events", []):
-        desc = (event.get("description") or "").strip()
-        amount = _coerce_amount(event.get("amount", 0))
-        if not desc or amount <= 0:
-            continue
-        t = ExpenseTransaction(description=desc, amount=amount, category="discretionary")
-        db.session.add(t)
-        if account:
-            account.checking_balance -= amount
-        actions["expenses_logged"].append({"description": desc, "amount": amount})
-
-    # ---- Dispatch grocery_additions (legacy flat-list path) ----
-    for item_name in parsed.get("grocery_additions", []):
-        name = str(item_name).strip().lower()
-        if not name:
-            continue
-        gi = GroceryItem(
-            item_name=name.title(),
-            estimated_price=3.50,
-            store_name=account.kroger_store_name if account else "Local Store",
-        )
-        db.session.add(gi)
-        actions["grocery_items_added"].append(name)
-
-    # ---- Dispatch selected_recipes → active pay-period meal plan (legacy flat-list path) ----
-    # (Only runs if the tool-calling path didn't already handle this.)
-    existing_plan = set(m.recipe_id for m in MealPlanItem.query.all())
-    removed_ids = set()
-
-    def _add_to_plan(rid, source):
-        if rid in existing_plan:
-            return False
-        if len(existing_plan) >= MEAL_PLAN_MAX:
-            return False
-        db.session.add(MealPlanItem(recipe_id=rid, source=source))
-        existing_plan.add(rid)
-        return True
-
-    for sel in parsed.get("selected_recipes", []):
-        title = (sel.get("title") or "").strip()
-        action = (sel.get("action") or "add").lower()
-        if not title:
-            continue
-        recipe = _match_recipe_by_title(title)
-        if not recipe:
-            actions["recipes_suggested"].append({"title": title, "action": action})
-            continue
-        if action == "remove":
-            removed_ids.add(recipe.id)
-            if recipe.id in existing_plan:
-                MealPlanItem.query.filter_by(recipe_id=recipe.id).delete()
-                existing_plan.discard(recipe.id)
-                actions["recipes_removed"].append({"id": recipe.id, "title": recipe.title})
-            continue
-        if _add_to_plan(recipe.id, "copilot"):
-            actions["recipes_added"].append({"id": recipe.id, "title": recipe.title})
-
-    # ---- Auto-fill: user asked for N meals but only named some ----
-    target_meals = actions.get("target_meals") or parsed.get("target_meals")
-    if target_meals is None:
+    # ---- Legacy / intent-based dispatch path (no native tool_results) ----
+    # If the LLM didn't set target_meals, check the raw user text for a number.
+    if parsed.get("target_meals") is None and user_text:
         m = re.search(r'(\d+)\s*(?:meals?|dinners?|dishes?|recipes?)', user_text, re.IGNORECASE)
         if m:
-            target_meals = int(m.group(1))
-    if target_meals:
-        try:
-            target_meals = int(target_meals)
-        except (ValueError, TypeError):
-            target_meals = None
-    if target_meals and target_meals > len(existing_plan) and len(existing_plan) < MEAL_PLAN_MAX:
-        fill = min(target_meals - len(existing_plan), MEAL_PLAN_MAX - len(existing_plan))
-        exclude = list(existing_plan) + list(removed_ids)
-        for rec in _recommend_recipes(exclude, limit=fill, seed_ids=list(existing_plan)):
-            if _add_to_plan(rec.id, "autofill"):
-                actions["recipes_auto_filled"].append({"id": rec.id, "title": rec.title})
-    actions["target_meals"] = target_meals
+            parsed = dict(parsed)
+            parsed["target_meals"] = int(m.group(1))
 
-    db.session.commit()
+    intent_payload = parse_intent_payload(parsed, user_text)
+    if (
+        intent_payload.meal_request
+        or intent_payload.expenses
+        or intent_payload.income_events
+        or intent_payload.balance_reconciliation
+        or intent_payload.shopping_corrections
+        or intent_payload.bill_adjustments
+        or intent_payload.groceries
+    ):
+        return execute_intent_payload(intent_payload, user_id=user_id)
+
+    # Nothing actionable found.
     return actions
+
+
+def _public_copilot_error(technical_error: str | None) -> str | None:
+    """Return a customer-safe Copilot error string.
+
+    Technical provider details stay server-side in logs and are never exposed
+    to browser clients.
+    """
+    if not technical_error:
+        return None
+    LOGGER.warning("Copilot provider error: %s", technical_error)
+    return "Copilot is temporarily unavailable. Please try again later."
+
+
+def _public_parsed_payload(parsed: dict[str, Any] | None) -> dict[str, Any]:
+    """Return only user-safe parsed fields for API responses."""
+    if not isinstance(parsed, dict):
+        return {}
+    allowed_keys = {
+        "tool_results",
+        "selected_recipes",
+        "grocery_additions",
+        "shopping_requirements",
+        "discretionary_events",
+        "spending_events",
+        "income_events",
+        "balance_reconciliation",
+        "shopping_corrections",
+        "bill_updates",
+        "target_meals",
+        "meal_servings",
+        "clarification_question",
+    }
+    out = {key: parsed.get(key) for key in allowed_keys if key in parsed}
+    meta = parsed.get("_parse_meta")
+    if isinstance(meta, dict):
+        out["_parse_meta"] = {
+            "path": meta.get("path"),
+            "llm_calls": meta.get("llm_calls"),
+            "repair_attempted": meta.get("repair_attempted"),
+            "validation": meta.get("validation"),
+            "latency_ms": meta.get("latency_ms"),
+        }
+    return out
+
+
+def _record_llm_usage(owner_scope: str, payload: dict[str, Any], operation: str) -> None:
+    """Persist one LLM usage event when a Copilot path actually called an external model."""
+    if not isinstance(payload, dict):
+        return
+    raw_meta = payload.get("_parse_meta")
+    meta: dict[str, Any] = raw_meta if isinstance(raw_meta, dict) else {}
+    raw_usage = payload.get("_llm_usage")
+    usage: dict[str, Any] = raw_usage if isinstance(raw_usage, dict) else {}
+    llm_calls = int(usage.get("llm_calls") or meta.get("llm_calls") or 0)
+    if llm_calls <= 0:
+        return
+
+    provider = str(usage.get("provider") or "groq").strip().lower() or "groq"
+    model = str(usage.get("model") or "").strip() or None
+    input_tokens = usage.get("input_tokens")
+    output_tokens = usage.get("output_tokens")
+    request_id = str(usage.get("request_id") or "").strip() or None
+
+    cost = estimate_usage_cost(
+        category="llm",
+        provider=provider,
+        operation=operation,
+        request_count=llm_calls,
+        llm_provider=provider,
+        llm_model=model,
+        input_tokens=(int(input_tokens) if input_tokens is not None else None),
+        output_tokens=(int(output_tokens) if output_tokens is not None else None),
+    )
+    record_usage_event(
+        owner_scope=owner_scope,
+        category="llm",
+        provider=provider,
+        operation=operation,
+        success=True,
+        external_call=True,
+        request_count=llm_calls,
+        llm_provider=provider,
+        llm_model=model,
+        input_tokens=(int(input_tokens) if input_tokens is not None else None),
+        output_tokens=(int(output_tokens) if output_tokens is not None else None),
+        estimated_cost_micros=cost.get("estimated_cost_micros"),
+        cost_status=cost.get("cost_status"),
+        cost_rate_key=cost.get("cost_rate_key"),
+        request_id=request_id,
+        metadata={"path": meta.get("path") or payload.get("_llm_path")},
+    )
+
+
+def _parse_copilot_prompt_compat(
+    user_text: str,
+    *,
+    staging_only: bool = False,
+    allow_llm: bool = True,
+) -> dict[str, Any]:
+    """Call parse_copilot_prompt while tolerating older monkeypatched signatures in tests."""
+    try:
+        return parse_copilot_prompt(
+            user_text,
+            staging_only=staging_only,
+            allow_llm=allow_llm,
+        )
+    except TypeError:
+        try:
+            return parse_copilot_prompt(user_text, staging_only=staging_only)
+        except TypeError:
+            return parse_copilot_prompt(user_text)
 
 
 @app.route("/api/copilot/parse", methods=["POST"])
@@ -1559,21 +5063,27 @@ def copilot_parse():
     """
     data = request.json or {}
     user_text = data.get("text", "").strip()
+    user_id = _resolve_request_user_id(data)
     if not user_text:
         return jsonify({"error": "Provide 'text' field with your request"}), 400
 
-    # ---- Parse (pass BYOK key from DB, falls back to env var if empty) ----
-    groq_key = get_setting("groq_api_key") or os.environ.get("GROQ_API_KEY", "")
-    parsed = parse_copilot_prompt(user_text, groq_api_key=groq_key)
+    llm_gate = check_optional_operation(user_id, "llm_call")
 
-    actions = _dispatch_parsed(parsed, user_text)
+    # ---- Parse (server-side provider credentials only) ----
+    parsed = _parse_copilot_prompt_compat(user_text, allow_llm=bool(llm_gate.get("allowed", True)))
+    if not llm_gate.get("allowed", True):
+        parsed["_llm_error"] = llm_gate.get("message") or "Copilot advanced model calls are currently unavailable."
+
+    actions = _dispatch_parsed(parsed, user_text, user_id=user_id)
+    _record_llm_usage(user_id, parsed, "copilot_parse")
 
     return jsonify({
-        "parsed": parsed,
+        "parsed": _public_parsed_payload(parsed),
         "actions_taken": actions,
         "tool_results": parsed.get("tool_results", []),
         "_fallback": parsed.get("_fallback", False),
-        "llm_error": parsed.get("_llm_error"),
+        "llm_error": _public_copilot_error(parsed.get("_llm_error")),
+        "clarification_question": parsed.get("clarification_question"),
     })
 
 
@@ -1603,6 +5113,7 @@ def copilot_chat():
     """
     data = request.json or {}
     messages = data.get("messages") or []
+    user_id = _resolve_request_user_id(data)
     if not isinstance(messages, list) or not messages:
         return jsonify({"error": "Provide 'messages' (non-empty list of {role, content})"}), 400
     for m in messages:
@@ -1611,19 +5122,245 @@ def copilot_chat():
     if messages[-1].get("role") != "user":
         return jsonify({"error": "Last message must be from the user"}), 400
 
-    # ---- Chat (pass BYOK key from DB, falls back to env var if empty) ----
-    groq_key = get_setting("groq_api_key") or os.environ.get("GROQ_API_KEY", "")
-    result = chat_copilot_prompt(messages, groq_api_key=groq_key)
+    llm_gate = check_optional_operation(user_id, "llm_call")
+
+    # ---- Chat (server-side provider credentials only) ----
+    if llm_gate.get("allowed", True):
+        result = _copilot_service.chat_copilot_prompt(messages)
+    else:
+        user_text = str(messages[-1].get("content") or "")
+        parsed = _parse_copilot_prompt_compat(user_text, allow_llm=False)
+        parsed["_llm_error"] = llm_gate.get("message") or "Copilot advanced model calls are currently unavailable."
+        has_actions = bool(
+            parsed.get("selected_recipes")
+            or parsed.get("grocery_additions")
+            or parsed.get("discretionary_events")
+            or parsed.get("spending_events")
+            or parsed.get("income_events")
+            or parsed.get("balance_reconciliation")
+            or parsed.get("shopping_corrections")
+            or parsed.get("bill_updates")
+            or parsed.get("target_meals") is not None
+        )
+        result = dict(parsed)
+        result["reply"] = (
+            "I can still run deterministic commands right now. "
+            "Please try again later for open-ended Copilot chat."
+            if not has_actions else ""
+        )
 
     user_text = messages[-1].get("content", "")
-    actions = _dispatch_parsed(result, user_text)
+    # If the model returned a plain-text reply but the regex fallback
+    # detected actionable items (no native tool calls), apply conservative
+    # gating: compute intent payload and require confirmation for risky
+    # items. This prevents the model from silently causing high-impact
+    # changes when it didn't use native tool calling.
+    is_plain_text_with_actions = (
+        not result.get("tool_results")
+        and bool(result.get("reply"))
+        and (
+            result.get("grocery_additions")
+            or result.get("bill_updates")
+            or result.get("discretionary_events")
+            or result.get("spending_events")
+            or result.get("income_events")
+            or result.get("balance_reconciliation")
+            or result.get("shopping_corrections")
+            or result.get("selected_recipes")
+        )
+    )
 
-    return jsonify({
+    if is_plain_text_with_actions:
+        # Parse intent and run the non-confirming executor so the response
+        # can indicate `requires_confirmation` and `pending_actions`.
+        intent_payload = parse_intent_payload(result, user_text)
+        from services.copilot_intent import _execute_intent_payload
+
+        actions = _execute_intent_payload(intent_payload, confirm=False, user_id=user_id)
+    else:
+        actions = _dispatch_parsed(result, user_text, user_id=user_id)
+
+    _record_llm_usage(user_id, result, "copilot_chat")
+
+    response = {
         "reply": result.get("reply", ""),
         "actions_taken": actions,
         "tool_results": result.get("tool_results", []),
         "_fallback": result.get("_fallback", False),
-        "llm_error": result.get("_llm_error"),
+        "llm_error": _public_copilot_error(result.get("_llm_error")),
+        "clarification_question": result.get("clarification_question"),
+    }
+    if actions.get("requires_confirmation"):
+        response["confirmation_prompt"] = _build_confirmation_prompt(actions)
+    return jsonify(response)
+
+
+@app.route("/api/copilot/stage", methods=["POST"])
+def copilot_stage():
+    """Generate a dry-run Copilot proposal with zero DB mutations."""
+    data = request.json or {}
+    user_text = (data.get("text") or "").strip()
+    user_id = _resolve_request_user_id(data)
+    if not user_text:
+        return jsonify({"error": "Provide 'text' field with your request"}), 400
+
+    llm_gate = check_optional_operation(user_id, "llm_call")
+    parsed = _parse_copilot_prompt_compat(
+        user_text,
+        staging_only=True,
+        allow_llm=bool(llm_gate.get("allowed", True)),
+    )
+    if not llm_gate.get("allowed", True):
+        parsed["_llm_error"] = llm_gate.get("message") or "Copilot advanced model calls are currently unavailable."
+
+    # Native tool calls are intentionally disabled in staging_only parse mode,
+    # but keep a defensive fallback so the endpoint remains stable.
+    if parsed.get("tool_results"):
+        return jsonify({
+            "parsed": _public_parsed_payload(parsed),
+            "actions_taken": {
+                "requires_confirmation": True,
+                "staged": True,
+                "summary": "Tool-call actions need confirmation before apply.",
+                "tool_results": parsed.get("tool_results", []),
+            },
+            "tool_results": parsed.get("tool_results", []),
+            "_fallback": parsed.get("_fallback", False),
+            "llm_error": _public_copilot_error(parsed.get("_llm_error")),
+            "clarification_question": parsed.get("clarification_question"),
+            "user_id": user_id,
+        })
+
+    from services.copilot_intent import parse_intent_payload, stage_intent_payload
+    intent_payload = parse_intent_payload(parsed, user_text)
+    staged = stage_intent_payload(intent_payload, user_id=user_id)
+    parse_meta = parsed.get("_parse_meta") if isinstance(parsed, dict) else {}
+    if isinstance(parse_meta, dict):
+        LOGGER.info(
+            "copilot.stage parser_path=%s llm_calls=%s repair=%s validation=%s operation_id=%s latency_ms=%s",
+            parse_meta.get("path"),
+            parse_meta.get("llm_calls"),
+            parse_meta.get("repair_attempted"),
+            parse_meta.get("validation"),
+            staged.get("operation_id"),
+            parse_meta.get("latency_ms"),
+        )
+    return jsonify({
+        "parsed": _public_parsed_payload(parsed),
+        "actions_taken": staged,
+        "tool_results": parsed.get("tool_results", []),
+        "_fallback": parsed.get("_fallback", False),
+        "llm_error": _public_copilot_error(parsed.get("_llm_error")),
+        "clarification_question": parsed.get("clarification_question"),
+        "user_id": user_id,
+    })
+
+
+@app.route("/api/copilot/apply", methods=["POST"])
+def copilot_apply_staged():
+    """Apply a reviewed/edited staged proposal from /api/copilot/stage."""
+    data = request.json or {}
+    user_id = _resolve_request_user_id(data)
+    staged_actions = data.get("staged_actions")
+    user_text = (data.get("text") or "").strip()
+
+    if not isinstance(staged_actions, dict):
+        return jsonify({"error": "Provide 'staged_actions' object from /api/copilot/stage."}), 400
+
+    try:
+        applied = apply_staged_actions(staged_actions, raw_user_text=user_text, user_id=user_id)
+    except StagedActionValidationError as exc:
+        payload: dict[str, Any] = {"error": str(exc)}
+        if getattr(exc, "details", None):
+            payload["validation"] = exc.details
+        return jsonify(payload), 400
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    return jsonify({
+        "actions_taken": applied,
+        "undo_token": applied.get("undo_token"),
+    })
+
+
+@app.route("/api/copilot/confirm", methods=["POST"])
+def copilot_confirm():
+    """Confirm and persist pending intent actions derived from a user message.
+
+    Accepts the same `text` payload as `/api/copilot/parse`. If the parser
+    previously indicated that confirmation was required, calling this
+    endpoint will apply the pending actions (bills/expenses) and return the
+    newly-applied `actions_taken` payload. This is intentionally simple and
+    synchronous so the UI can call it directly after showing a confirmation
+    dialog to the user.
+    """
+    data = request.json or {}
+    user_text = (data.get("text") or "").strip()
+    user_id = _resolve_request_user_id(data)
+    if not user_text:
+        return jsonify({"error": "Provide 'text' field with your request"}), 400
+
+    llm_gate = check_optional_operation(user_id, "llm_call")
+    parsed = _parse_copilot_prompt_compat(user_text, allow_llm=bool(llm_gate.get("allowed", True)))
+    if not llm_gate.get("allowed", True):
+        parsed["_llm_error"] = llm_gate.get("message") or "Copilot advanced model calls are currently unavailable."
+
+    _record_llm_usage(user_id, parsed, "copilot_confirm")
+
+    # If the parser returned native tool calls, just return that result.
+    if parsed.get("tool_results"):
+        # Let the existing intent tooling convert tool_results to actions.
+        from services.copilot_intent import _tool_results_to_actions
+
+        parsed["actions_taken"] = _tool_results_to_actions(parsed.get("tool_results", []))
+        return jsonify({
+            "parsed": _public_parsed_payload(parsed),
+            "actions_taken": parsed["actions_taken"],
+            "tool_results": parsed.get("tool_results", []),
+            "_fallback": parsed.get("_fallback", False),
+        })
+
+    # Otherwise parse intent and persist with confirmation flag.
+    from services.copilot_intent import parse_intent_payload, _execute_intent_payload
+    intent_payload = parse_intent_payload(parsed, user_text)
+    actions = _execute_intent_payload(intent_payload, confirm=True, user_id=user_id)
+    response = {
+        "parsed": _public_parsed_payload(parsed),
+        "actions_taken": actions,
+        "tool_results": parsed.get("tool_results", []),
+        "_fallback": parsed.get("_fallback", False),
+    }
+    if actions.get("undo_token"):
+        response["undo_token"] = actions["undo_token"]
+    return jsonify(response)
+
+
+@app.route("/api/copilot/undo", methods=["POST"])
+def copilot_undo():
+    """Undo a previously confirmed Copilot action using its undo token."""
+    data = request.json or {}
+    undo_token = (data.get("undo_token") or "").strip()
+    if not undo_token:
+        return jsonify({"error": "Provide 'undo_token' field."}), 400
+    user_id = _resolve_request_user_id(data)
+
+    audit = _load_audit_by_token(undo_token)
+    if not audit:
+        return jsonify({"error": "Invalid undo_token."}), 404
+    if audit.undone_at is not None:
+        return jsonify({"error": "This action has already been undone."}), 400
+
+    # user_id is preserved for audit/trace but is not currently used by undo logic.
+    _ = user_id
+
+    try:
+        undone = _undo_actions_from_audit(audit)
+    except Exception as exc:
+        return jsonify({"error": f"Undo failed: {exc}"}), 500
+
+    return jsonify({
+        "undo_token": undo_token,
+        "undone_at": audit.undone_at.isoformat() if audit.undone_at else None,
+        "undone_actions": undone,
     })
 
 
@@ -1689,9 +5426,10 @@ def search_recipes():
 
     try:
         import urllib.request
+        from urllib.parse import quote
         import json as py_json
 
-        url = f"https://www.themealdb.com/api/json/v1/1/search.php?s={urllib.parse.quote(query)}"
+        url = f"https://www.themealdb.com/api/json/v1/1/search.php?s={quote(query)}"
         req = urllib.request.Request(url, headers={"User-Agent": "Rung/1.0 (finance-assistant)"})
         with urllib.request.urlopen(req, timeout=8) as resp:
             body = resp.read().decode("utf-8")
@@ -1735,7 +5473,7 @@ def generate_pay_period_plan():
     Live grocery resolver — resolves every ingredient keyword via
     ``services.store_api.resolve_terms()`` (cache-first, Kroger API
     fallback), then builds and validates a pay-period cart within the
-    user's food budget.
+    canonical grocery Need remaining.
 
     Request body
     ------------
@@ -1749,47 +5487,308 @@ def generate_pay_period_plan():
     force_refresh : bool, optional
         If True, skip cache and hit the API for every term.
     budget_limit : float, optional
-        Override the food budget cap. Defaults to account's computed
-        food_budget from ``compute_liquidity_metrics()``.
+        Override the grocery budget cap. Without an override, defaults to the
+        canonical current-period grocery Need remaining.
 
     Returns
     -------
     JSON with the same shape as the cart_items block (subtotal, tax,
     total_cart_cost, etc.) plus:
       resolution_stats {cache_hits, api_hits, fallbacks, total_terms}
-      budget {food_budget, budget_exceeded, budget_remaining}
+      budget {grocery_need_budget, food_budget (compatibility alias),
+              budget_source, budget_exceeded, budget_remaining}
       recipes_used [{id, title}]
     """
-    account = Account.query.first()
-    data = request.json or {}
-    recipe_ids = data.get("recipe_ids", [])
-    
-    # Use the account's auto-detected store settings as defaults;
-    # request body can still override per-call if needed.
-    store_name = data.get("store_name", account.kroger_store_name or "Kroger")
-    location_id = data.get("location_id", account.kroger_location_id or "")
-    force_refresh = bool(data.get("force_refresh", False))
-    budget_limit = data.get("budget_limit", None)
+    account = _household_account()
+    if not account:
+        return jsonify({"error": "Account settings missing"}), 400
 
-    if not recipe_ids or not isinstance(recipe_ids, list):
+    data = request.json or {}
+    user_id = _resolve_request_user_id(data)
+    if "recipe_ids" not in data:
         return jsonify({"error": "Provide recipe_ids (list of int)"}), 400
 
-    recipes = Recipe.query.filter(Recipe.id.in_(recipe_ids)).all()
-    if not recipes:
+    grocery_budget, grocery_budget_source, grocery_budget_error = _resolve_cart_grocery_budget(account, data, user_id)
+    if grocery_budget_error is not None:
+        return jsonify(grocery_budget_error), 409 if grocery_budget_error.get("code") == "grocery_budget_setup_required" else 400
+
+    raw_recipe_ids = data.get("recipe_ids", [])
+    if raw_recipe_ids is None:
+        raw_recipe_ids = []
+    if not isinstance(raw_recipe_ids, list):
+        return jsonify({"error": "Provide recipe_ids (list of int)"}), 400
+    recipe_ids = [int(rid) for rid in raw_recipe_ids if str(rid).strip() not in {"", "None"}]
+
+    # Canonical exact-store state wins. Request values remain a compatibility
+    # fallback for households that have not explicitly selected a store yet.
+    selected_store = get_selected_store(current_household_id(), account=account)
+    has_canonical_store = bool(selected_store.get("canonical") and selected_store.get("store_id"))
+    raw_store_name = data.get("store_name", None)
+    explicit_store_name = isinstance(raw_store_name, str) and bool(raw_store_name.strip())
+    store_name = (
+        str(selected_store.get("name") or "").strip()
+        if has_canonical_store
+        else (str(raw_store_name).strip() if explicit_store_name else str(selected_store.get("name") or "Kroger"))
+    )
+    location_id = (
+        str(selected_store.get("store_id") or "").strip()
+        if has_canonical_store
+        else data.get("location_id", selected_store.get("store_id") or "")
+    )
+    selected_retailer = str(selected_store.get("retailer") or "").strip().lower()
+    if not has_canonical_store:
+        selected_retailer = "walmart" if store_name.lower() == "walmart" else "kroger"
+    force_refresh = bool(data.get("force_refresh", False))
+    budget_limit = data.get("budget_limit", None)
+    use_verified_cart = bool(data.get("use_verified_cart", False))
+    manual_rows = _household_grocery_query().filter(GroceryItem.is_purchased.is_(False)).filter(
+        db.or_(GroceryItem.recipe_ids == '', GroceryItem.recipe_ids.is_(None))
+    ).all()
+    has_active_recipes = bool(_household_meal_plan_query().first())
+
+    # Persisted active recipes (Package 5 MealPlanItem) are the authoritative
+    # recipe source for the verified cart. A request-only ``recipe_ids`` list
+    # that is *not* mirrored in the meal plan stays on the legacy resolver
+    # path, preserving existing transient recipe-driven behavior.
+    walmart_verified = (
+        (has_canonical_store or explicit_store_name)
+        and selected_retailer == "walmart"
+        and (bool(manual_rows) or has_active_recipes)
+        and (not recipe_ids or has_active_recipes)
+    )
+
+    if (use_verified_cart or walmart_verified) and selected_retailer == "walmart":
+        from services.retail.base import RetailStore
+        from services.retail.cart import build_verified_retail_cart, build_verified_walmart_cart
+        food_budget = float(grocery_budget)
+        try:
+            if has_canonical_store:
+                verified_cart = build_verified_retail_cart(
+                    retailer="walmart",
+                    store=RetailStore(
+                        store_id=location_id,
+                        name=store_name,
+                        address=selected_store.get("address") or None,
+                        postal_code=selected_store.get("postal_code") or None,
+                        verified=True,
+                    ),
+                    force_refresh=force_refresh,
+                    budget_limit=food_budget,
+                    tax_rate=0.0,
+                    owner_scope=user_id,
+                )
+            else:
+                verified_cart = build_verified_walmart_cart(
+                    force_refresh=force_refresh,
+                    budget_limit=food_budget,
+                    tax_rate=0.0,
+                    owner_scope=user_id,
+                )
+        except Exception:
+            LOGGER.exception("walmart verified cart failed")
+            return jsonify({
+                "error": "Live Walmart pricing is currently unavailable.",
+                "code": "retail_provider_unavailable",
+                "degraded_mode": "manual_shopping_available",
+            }), 502
+
+        store_payload = verified_cart.get("store") or {}
+        tax_payload = _apply_owned_tax_to_cart(
+            account=account,
+            owner_scope=user_id,
+            cart_items=verified_cart.get("cart_items") or [],
+            retailer="walmart",
+            store_name=str(store_payload.get("name") or "Walmart").strip(),
+            store_id=str(store_payload.get("store_id") or "357").strip(),
+            store_address=str(store_payload.get("address") or "").strip(),
+            postal_code=str(store_payload.get("postal_code") or account.zip_code or "").strip(),
+        )
+
+        verified_cart.update({
+            "subtotal": tax_payload["subtotal"],
+            "grocery_tax_rate": tax_payload["grocery_tax_rate"],
+            "applied_tax_pct": tax_payload["applied_tax_pct"],
+            "tax_amount": tax_payload["tax_amount"],
+            "total_cart_cost": tax_payload["total_cart_cost"],
+            "tax_engine": tax_payload["tax_engine"],
+            "budget": {
+                "available": True,
+                "grocery_need_budget": round(food_budget, 2),
+                "food_budget": round(food_budget, 2),
+                "food_budget_compatibility_alias": True,
+                "budget_source": grocery_budget_source,
+                "budget_exceeded": float(tax_payload["total_cart_cost"]) > food_budget,
+                "budget_remaining": round(food_budget - float(tax_payload["total_cart_cost"]), 2),
+            },
+            "store_config_warning": None,
+        })
+        return jsonify(verified_cart)
+
+    if (use_verified_cart or explicit_store_name or has_canonical_store) and selected_retailer == "kroger":
+        from services.retail.base import RetailStore
+        from services.retail.cart import build_verified_retail_cart
+
+        kroger_store = None
+        if str(location_id or "").strip():
+            kroger_store = RetailStore(
+                store_id=str(location_id).strip(),
+                name=store_name or "Kroger",
+                address=selected_store.get("address") or None,
+                postal_code=selected_store.get("postal_code") or str(account.zip_code or "").strip() or None,
+                verified=True,
+            )
+        else:
+            resolution = _resolve_kroger_store_selection(account, requested_store_name=store_name)
+            if resolution.get("state") == "none":
+                return jsonify({
+                    "status": "store_unavailable",
+                    "error": resolution.get("message", "No Kroger-family stores were found."),
+                    "store_config_warning": {
+                        "code": "no_kroger_store",
+                        "message": resolution.get("message", "No Kroger-family stores were found."),
+                        "selected_store": store_name,
+                    },
+                    "store_choice": None,
+                })
+            if resolution.get("state") == "choice":
+                return jsonify({
+                    "status": "store_choice_required",
+                    "message": resolution.get("message", "Choose a Kroger-family store to continue."),
+                    "store_choice": resolution.get("store_choice"),
+                    "store_config_warning": None,
+                })
+
+            kroger_store = resolution.get("store")
+            if resolution.get("persisted"):
+                _persist_kroger_store_choice(account, kroger_store)
+                db.session.commit()
+
+        if kroger_store is None:
+            return jsonify({
+                "status": "store_unavailable",
+                "error": "No Kroger-family store could be resolved.",
+                "store_choice": None,
+            })
+
+        food_budget = float(grocery_budget)
+        try:
+            verified_cart = build_verified_retail_cart(
+                retailer="kroger",
+                store=kroger_store,
+                force_refresh=force_refresh,
+                budget_limit=food_budget,
+                tax_rate=0.0,
+                owner_scope=user_id,
+            )
+        except Exception:
+            LOGGER.exception("kroger verified cart failed")
+            return jsonify({
+                "error": "Live Kroger pricing is currently unavailable.",
+                "code": "retail_provider_unavailable",
+                "degraded_mode": "manual_shopping_available",
+            }), 502
+
+        store_payload = verified_cart.get("store") or {}
+        tax_payload = _apply_owned_tax_to_cart(
+            account=account,
+            owner_scope=user_id,
+            cart_items=verified_cart.get("cart_items") or [],
+            retailer="kroger",
+            store_name=str(store_payload.get("name") or kroger_store.name or "Kroger").strip(),
+            store_id=str(store_payload.get("store_id") or kroger_store.store_id or "").strip(),
+            store_address=str(store_payload.get("address") or kroger_store.address or "").strip(),
+            postal_code=str(store_payload.get("postal_code") or kroger_store.postal_code or account.zip_code or "").strip(),
+        )
+
+        verified_cart.update({
+            "subtotal": tax_payload["subtotal"],
+            "grocery_tax_rate": tax_payload["grocery_tax_rate"],
+            "applied_tax_pct": tax_payload["applied_tax_pct"],
+            "tax_amount": tax_payload["tax_amount"],
+            "total_cart_cost": tax_payload["total_cart_cost"],
+            "tax_engine": tax_payload["tax_engine"],
+            "budget": {
+                "available": True,
+                "grocery_need_budget": round(food_budget, 2),
+                "food_budget": round(food_budget, 2),
+                "food_budget_compatibility_alias": True,
+                "budget_source": grocery_budget_source,
+                "budget_exceeded": float(tax_payload["total_cart_cost"]) > food_budget,
+                "budget_remaining": round(food_budget - float(tax_payload["total_cart_cost"]), 2),
+            },
+            "store_config_warning": None,
+        })
+        return jsonify(verified_cart)
+
+    # Warn when the selected store is Kroger but no location ID is configured.
+    # Results will silently fall back to third-party sources without this guard.
+    _kroger_selected = "kroger" in store_name.lower()
+    store_config_warning = None
+    if _kroger_selected and not location_id:
+        store_config_warning = {
+            "code": "no_location_id",
+            "message": (
+                "Kroger store location not configured. "
+                "Live Kroger prices are unavailable; results may be from "
+                "third-party sources and are not confirmed Kroger products."
+            ),
+            "selected_store": store_name,
+            "resolution": "Go to Settings and use 'Detect Location' to configure your Kroger store.",
+        }
+
+    if not recipe_ids and not manual_rows:
+        return jsonify({"error": "Provide recipe_ids (list of int)"}), 400
+
+    recipes = Recipe.query.filter(Recipe.id.in_(recipe_ids)).all() if recipe_ids else []
+    if recipe_ids and not recipes:
         return jsonify({"error": "No matching recipes found"}), 404
 
     # --- Step 1: Aggregate ingredient keywords ---
     required_ingredients: dict = {}
+    required_dimensions: dict = {}
+    required_conversion_uncertain: dict = {}
     for r in recipes:
         for ing in r.ingredients:
             kw = ing.clean_keyword.lower()
-            qty_std = normalize_to_standard_unit(ing.quantity, ing.unit)
+            qty_std, dim, reliable = normalize_requirement_for_selection(ing.quantity, ing.unit, kw)
             required_ingredients[kw] = required_ingredients.get(kw, 0.0) + qty_std
+            prev = required_dimensions.get(kw)
+            if prev is None:
+                required_dimensions[kw] = dim
+            elif prev != dim:
+                required_dimensions[kw] = 'unknown'
+            required_conversion_uncertain[kw] = bool(required_conversion_uncertain.get(kw, False) or (not reliable))
+
+    # Direct/manual grocery requests remain abstract until the deterministic resolver handles them.
+    # These rows are not fake store products; they are active shopping requests.
+    for row in manual_rows:
+        term = (row.item_name or '').strip()
+        if not term:
+            continue
+        kw = _normalize_manual_grocery_keyword(term)
+        if not kw:
+            continue
+        required_ingredients[kw] = required_ingredients.get(kw, 0.0) + 1.0
+        required_dimensions.setdefault(kw, 'unknown')
+        required_conversion_uncertain[kw] = bool(required_conversion_uncertain.get(kw, False) or True)
+
+    # Mixed recipe+manual runs consume staging rows after they are incorporated.
+    if manual_rows and recipe_ids:
+        for row in manual_rows:
+            row.is_purchased = True
+        db.session.commit()
 
     unique_terms = list(required_ingredients.keys())
 
     # --- Step 2: Live API resolution (cache-first, Kroger fallback) ---
     try:
+        if force_refresh:
+            gate = check_optional_operation(user_id, "retail_external_call")
+            if not gate.get("allowed", True):
+                return jsonify({
+                    "error": gate.get("message") or "Live retail refresh is currently unavailable.",
+                    "code": gate.get("code") or "retail_live_disabled",
+                }), 429
         resolved = resolve_terms(
             app,
             unique_terms,
@@ -1820,23 +5819,25 @@ def generate_pay_period_plan():
             pass  # Silently fall through — the loop below will use estimates
 
     # --- Step 3: Compute resolution stats ---
+    # Sources from resolve_terms: "kroger_cache", "kroger_api"
+    # Sources from RapidAPI path: "rapid_api", "rapid_cache", "store_cache_fallback"
+    _LOCAL_STORE_SOURCES = {"kroger_cache", "kroger_api"}
     cache_hits = 0
     api_hits = 0
     fallbacks = 0  # counted in Step 4 when estimate fallback is actually used
     for kw, products in resolved.items():
         for p in products:
-            if p.get("source") == "cache":
+            src = p.get("source", "")
+            if src in ("kroger_cache", "store_cache_fallback"):
                 cache_hits += 1
-            elif p.get("source") == "store_cache_fallback":
-                cache_hits += 1
-            elif p.get("source") == "api":
+            elif src == "kroger_api":
                 api_hits += 1
-            elif p.get("source") in ("rapid_api", "rapid_cache"):
-                pass  # Already counted in rapid_hits
+            elif src in ("rapid_api", "rapid_cache"):
+                pass  # counted in rapid_hits
 
     # --- Step 4: Pantry deduction + product selection ---
-    pantry_stock = {p.clean_keyword.lower(): p for p in PantryItem.query.all()}
-    prefs = {b.clean_keyword.lower(): b for b in BrandPreference.query.all()}
+    pantry_stock = {p.clean_keyword.lower(): p for p in _household_pantry_query().all()}
+    prefs = {b.clean_keyword.lower(): b for b in _household_brand_pref_query().all()}
 
     cart_items = []
     subtotal = 0.0
@@ -1845,7 +5846,18 @@ def generate_pay_period_plan():
     for kw, req_qty in required_ingredients.items():
         on_hand_qty = 0.0
         if kw in pantry_stock:
-            on_hand_qty = normalize_to_standard_unit(pantry_stock[kw].quantity, pantry_stock[kw].unit)
+            req_dim = required_dimensions.get(kw)
+            pantry_qty, pantry_dim, pantry_reliable = normalize_requirement_for_selection(
+                pantry_stock[kw].quantity,
+                pantry_stock[kw].unit,
+                kw,
+            )
+            # Only apply pantry deduction when both sides are safely
+            # comparable in the same canonical dimension.
+            if req_dim != 'unknown' and pantry_reliable and pantry_dim == req_dim:
+                on_hand_qty = pantry_qty
+            else:
+                required_conversion_uncertain[kw] = True
 
         if on_hand_qty >= req_qty:
             pantry_items_used += 1
@@ -1856,58 +5868,85 @@ def generate_pay_period_plan():
         use_store_brand = pref.prefer_store_brand if pref else True
 
         products = resolved.get(kw, [])
-        best = pick_best(products, prefer_store_brand=use_store_brand) if products else None
+        best = pick_best(
+            products,
+            prefer_store_brand=use_store_brand,
+            keyword=kw,
+            net_needed=net_needed,
+            required_dimension=required_dimensions.get(kw),
+        ) if products else None
 
         if best:
+            packages_to_buy = int(best.get("packages_to_buy", 1) or 1)
             unit_price = round(best["price"], 2)
+            line_price = round(unit_price * packages_to_buy, 2)
             product_label = best["product_title"]
-            price_source = best.get("source", "cache")
-            store = store_name
+            price_source = best.get("source", "kroger_cache")
+            confirmed = price_source in _LOCAL_STORE_SOURCES
+            # Use the actual source store, not the selected store, for non-local products.
+            store = best.get("source_store_name") or store_name if confirmed else (
+                best.get("store_name") or best.get("source_store_name") or None
+            )
         else:
             # Graceful fallback — estimate
             fallbacks += 1
+            packages_to_buy = 1
             unit_price = round(2.00 + (net_needed * 0.15), 2)
+            line_price = unit_price
             readable_name = kw.replace("_", " ").title()
             product_label = f"{readable_name} (estimate)"
             price_source = "estimated"
-            store = store_name
+            confirmed = False
+            store = None
 
-        subtotal += unit_price
+        subtotal += line_price
         pkg = best.get("package_size", "") if best else ""
         img = best.get("image_url", "") if best else ""
         cart_items.append({
             "keyword": kw,
             "product_label": product_label,
             "net_quantity_needed_oz": round(net_needed, 2),
-            "estimated_price": unit_price,
+            "estimated_price": line_price,
+            "unit_price": unit_price,
+            "packages_to_buy": packages_to_buy,
             "price_source": price_source,
+            "confirmed_local_store": confirmed,
+            "package_selection_uncertain": bool(required_conversion_uncertain.get(kw, False)) or (bool(best.get("package_parse_uncertain", False)) if best else True),
             "store_name": store,
             "package_size": pkg,
             "image_url": img,
         })
 
-    # --- Step 5: Tax + budget enforcement ---
-    tax_rate = account.grocery_tax_rate or account.sales_tax_rate or 0.0
-    tax_amount = subtotal * tax_rate
-    total_cart_cost = subtotal + tax_amount
+    # --- Step 5: Tax + budget enforcement (owned store tax engine) ---
+    tax_payload = _apply_owned_tax_to_cart(
+        account=account,
+        owner_scope=user_id,
+        cart_items=cart_items,
+        retailer=selected_retailer,
+        store_name=store_name,
+        store_id=str(location_id or "unknown").strip(),
+        store_address=str(selected_store.get("address") or "").strip(),
+        postal_code=str(selected_store.get("postal_code") or account.zip_code or "").strip(),
+    )
 
     # Determine the food budget
-    if budget_limit is not None:
-        food_budget = float(budget_limit)
-    else:
-        metrics = compute_liquidity_metrics(account)
-        food_budget = metrics["food_budget"]
+    food_budget = float(grocery_budget)
 
-    budget_exceeded = total_cart_cost > food_budget
-    budget_remaining = round(food_budget - total_cart_cost, 2)
+    budget_exceeded = float(tax_payload["total_cart_cost"]) > food_budget
+    budget_remaining = round(food_budget - float(tax_payload["total_cart_cost"]), 2)
 
     return jsonify({
+        "retailer": selected_retailer,
+        "store_id": str(location_id or "").strip(),
+        "store_name": store_name,
         "pantry_items_skipped": pantry_items_used,
         "cart_items": cart_items,
-        "subtotal": round(subtotal, 2),
-        "grocery_tax_rate": round(tax_rate * 100, 2),
-        "tax_amount": round(tax_amount, 2),
-        "total_cart_cost": round(total_cart_cost, 2),
+        "subtotal": tax_payload["subtotal"],
+        "grocery_tax_rate": tax_payload["grocery_tax_rate"],
+        "applied_tax_pct": tax_payload["applied_tax_pct"],
+        "tax_amount": tax_payload["tax_amount"],
+        "total_cart_cost": tax_payload["total_cart_cost"],
+        "tax_engine": tax_payload["tax_engine"],
         "resolution_stats": {
             "cache_hits": cache_hits,
             "api_hits": api_hits,
@@ -1916,10 +5955,15 @@ def generate_pay_period_plan():
             "total_terms": len(unique_terms),
         },
         "budget": {
+            "available": True,
+            "grocery_need_budget": round(food_budget, 2),
             "food_budget": round(food_budget, 2),
+            "food_budget_compatibility_alias": True,
+            "budget_source": grocery_budget_source,
             "budget_exceeded": budget_exceeded,
             "budget_remaining": budget_remaining,
         },
+        "store_config_warning": store_config_warning,
         "recipes_used": [{"id": r.id, "title": r.title} for r in recipes],
     })
 
@@ -1958,6 +6002,94 @@ def rapid_price_search():
         return jsonify({"found": False, "product": None})
 
 
+@app.route("/api/retail/product-preference", methods=["GET", "POST", "DELETE"])
+def retail_product_preference():
+    from services.retail.preferences import (
+        forget_product_preference,
+        get_product_preference,
+        preference_to_dict,
+        save_product_preference,
+    )
+
+    data = request.json or {} if request.method != "GET" else request.args
+    base_item = str(data.get("base_item") or "").strip()
+    if not base_item:
+        return jsonify({"error": "base_item is required."}), 400
+
+    try:
+        retailer = str(data.get("retailer") or "").strip() or None
+        if request.method == "GET":
+            preference = get_product_preference(base_item, retailer=retailer)
+            return jsonify({"preference": preference_to_dict(preference) if preference else None})
+        if request.method == "DELETE":
+            deleted = forget_product_preference(
+                base_item,
+                data.get("preference_type"),
+                retailer=retailer,
+            )
+            return jsonify({"deleted": deleted, "base_item": base_item})
+
+        preference, detail_calls = save_product_preference(
+            base_item=base_item,
+            preference_type=str(data.get("preference_type") or "usual"),
+            retailer=str(data.get("retailer") or "walmart"),
+            store_id=str(data.get("store_id") or ""),
+            product_identity=str(data.get("product_identity") or ""),
+        )
+        return jsonify({
+            "preference": preference_to_dict(preference),
+            "product_detail_calls": detail_calls,
+        })
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    except Exception as exc:
+        LOGGER.exception("Retail product preference request failed")
+        return jsonify({"error": f"Could not save product preference: {exc}"}), 502
+
+
+@app.route("/api/retail/product-substitution", methods=["GET", "POST", "DELETE"])
+def retail_product_substitution():
+    from services.retail.preferences import (
+        get_product_preference,
+        get_product_substitutions,
+        remove_product_substitution,
+        save_product_substitution,
+        substitution_to_dict,
+    )
+
+    data = request.args if request.method == "GET" else (request.json or {})
+    base_item = str(data.get("base_item") or "").strip()
+    if not base_item:
+        return jsonify({"error": "base_item is required."}), 400
+    try:
+        if request.method == "GET":
+            preference = get_product_preference(base_item)
+            substitutions = get_product_substitutions(preference.id) if preference else []
+            return jsonify({"substitutions": [substitution_to_dict(row) for row in substitutions]})
+        if request.method == "DELETE":
+            substitution_id = data.get("substitution_id")
+            if substitution_id is None:
+                return jsonify({"error": "substitution_id is required."}), 400
+            deleted = remove_product_substitution(int(substitution_id), base_item=base_item)
+            return jsonify({"deleted": deleted, "base_item": base_item})
+
+        substitution, detail_calls = save_product_substitution(
+            base_item=base_item,
+            product_identity=str(data.get("product_identity") or ""),
+            retailer=str(data.get("retailer") or "walmart"),
+            store_id=str(data.get("store_id") or ""),
+        )
+        return jsonify({
+            "substitution": substitution_to_dict(substitution),
+            "product_detail_calls": detail_calls,
+        })
+    except (TypeError, ValueError) as exc:
+        return jsonify({"error": str(exc)}), 400
+    except Exception as exc:
+        LOGGER.exception("Retail product substitution request failed")
+        return jsonify({"error": f"Could not update product substitution: {exc}"}), 502
+
+
 @app.route("/api/pantry", methods=["GET", "POST"])
 def manage_pantry():
     """Tab 4: Inventory Management & Stock Updates."""
@@ -1968,17 +6100,17 @@ def manage_pantry():
         qty = float(data.get("quantity", 0.0))
         unit = data.get("unit", "oz")
         
-        item = PantryItem.query.filter_by(clean_keyword=kw).first()
+        item = _household_pantry_query().filter_by(clean_keyword=kw).first()
         if item:
             item.quantity += qty
         else:
-            item = PantryItem(clean_keyword=kw, product_name=p_name, quantity=qty, unit=unit)
+            item = PantryItem(household_id=current_household_id(), clean_keyword=kw, product_name=p_name, quantity=qty, unit=unit)
             db.session.add(item)
             
         db.session.commit()
         return jsonify({"message": "Pantry item updated successfully"})
         
-    items = PantryItem.query.all()
+    items = _household_pantry_query().all()
     return jsonify([{
         "id": i.id,
         "keyword": i.clean_keyword,
@@ -1997,10 +6129,14 @@ def cook_recipe():
         return jsonify({"error": "Recipe not found"}), 404
         
     for ing in recipe.ingredients:
+        if ing.quantity is None or not ing.unit:
+            # The source did not provide a safely understood requirement;
+            # do not invent a pantry deduction.
+            continue
         kw = ing.clean_keyword.lower()
         required_qty = normalize_to_standard_unit(ing.quantity, ing.unit)
         
-        item = PantryItem.query.filter_by(clean_keyword=kw).first()
+        item = _household_pantry_query().filter_by(clean_keyword=kw).first()
         if item:
             item_on_hand_std = normalize_to_standard_unit(item.quantity, item.unit)
             new_qty_std = max(0.0, item_on_hand_std - required_qty)
@@ -2012,19 +6148,23 @@ def cook_recipe():
 @app.route("/api/vault/sweep", methods=["POST"])
 def sweep_vault():
     """Tab 5: Micro-Savings Sweeper."""
-    account = Account.query.first()
+    account = _household_account()
+    if not account:
+        return jsonify({"error": "Account settings missing"}), 400
+
     data = request.json or {}
     amount = float(data.get("amount", 0.0))
     
     if amount <= 0 or amount > account.checking_balance:
         return jsonify({"error": "Invalid sweep amount"}), 400
-        
-    account.checking_balance -= amount
+
+    hid = current_household_id()
+    new_checking_balance = apply_balance_delta(hid, -amount)
     account.vault_balance += amount
     db.session.commit()
     
     return jsonify({
-        "new_checking_balance": round(account.checking_balance, 2),
+        "new_checking_balance": round(new_checking_balance, 2),
         "new_vault_balance": round(account.vault_balance, 2)
     })
 
@@ -2036,54 +6176,157 @@ def update_location():
     auto-detects the nearest Kroger / Gerbes store via the Kroger
     Locations API and saves the location ID to the account.
     """
-    account = Account.query.first()
+    account = _household_account()
     if not account:
         return jsonify({"error": "Account not found"}), 404
 
     data = request.json or {}
-    
-    zip_code = str(data.get("zip_code", account.zip_code or ""))
-    latitude = data.get("latitude", account.latitude)
-    longitude = data.get("longitude", account.longitude)
-    
-    account.zip_code = zip_code
-    if latitude is not None:
-        account.latitude = float(latitude)
-    if longitude is not None:
-        account.longitude = float(longitude)
-    account.sales_tax_rate = float(data.get("sales_tax_rate", account.sales_tax_rate))
-    account.grocery_tax_rate = float(data.get("grocery_tax_rate", account.grocery_tax_rate))
-    
-    store_found = False
-    
-    # Auto-detect nearest Kroger store from location (only if we have a ZIP or coords)
-    has_location = bool(zip_code.strip()) or (
-        account.latitude is not None and account.longitude is not None
-    )
-    if has_location:
+
+    auto_detect = bool(data.get("auto_detect"))
+    zip_code = ""
+
+    def _safe_rate(value: Any) -> float | None:
+        if value is None:
+            return None
         try:
-            nearest = find_nearest_kroger(
-                zip_code=zip_code or "",
-                latitude=account.latitude,
-                longitude=account.longitude,
-            )
-            if nearest:
-                account.kroger_location_id = nearest["location_id"]
-                account.kroger_store_name = nearest["chain_display"]
-                store_found = True
+            parsed = _coerce_rate(value)
+            if parsed != parsed:
+                return None
+            return parsed
         except Exception:
-            # If Kroger API is unavailable, just keep whatever was stored before
-            pass
+            return None
+
+    def _safe_coord(value: Any) -> float | None:
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
+    posted_zip_raw = data.get("zip_code")
+    posted_zip = _normalize_zip_code(posted_zip_raw)
+
+    if auto_detect:
+        latitude = _safe_coord(data.get("latitude"))
+        longitude = _safe_coord(data.get("longitude"))
+        if latitude is None or longitude is None or not (-90 <= latitude <= 90) or not (-180 <= longitude <= 180):
+            return jsonify({
+                "error": "current_location_unavailable",
+                "user_message": "We couldn't get your current location. Enter your ZIP code instead.",
+            }), 400
+        account.latitude = latitude
+        account.longitude = longitude
+    else:
+        if posted_zip_raw is None or not str(posted_zip_raw).strip() or not posted_zip:
+            return jsonify({
+                "error": "invalid_zip_code",
+                "user_message": "We couldn't save that location. Please check the ZIP code and try again.",
+            }), 400
+        zip_code = posted_zip
+        # Manual ZIP updates should not keep stale city/state labels from prior defaults.
+        account.city_state = ""
+
+    explicit_sales_tax = _safe_rate(data.get("sales_tax_rate"))
+    explicit_grocery_tax = _safe_rate(data.get("grocery_tax_rate"))
+
+    reverse_geo = {}
+    resolved_state_code = ""
+    resolved_city_state = str(account.city_state or "").strip()
+    if auto_detect and account.latitude is not None and account.longitude is not None:
+        reverse_geo = _reverse_geocode_us_location(account.latitude, account.longitude)
+        resolved_zip = _normalize_zip_code(reverse_geo.get("zip_code"))
+        if not resolved_zip:
+            return jsonify({
+                "error": "current_location_unavailable",
+                "user_message": "We couldn't get your current location. Enter your ZIP code instead.",
+            }), 422
+        zip_code = resolved_zip
+        resolved_state_code = str(reverse_geo.get("state_code") or "").strip().upper()
+        if reverse_geo.get("city_state"):
+            resolved_city_state = str(reverse_geo["city_state"] or "").strip()
+
+    account.zip_code = zip_code
+    if resolved_city_state:
+        account.city_state = resolved_city_state
+
+    if explicit_sales_tax is not None:
+        account.sales_tax_rate = float(explicit_sales_tax)
+    if explicit_grocery_tax is not None:
+        account.grocery_tax_rate = float(explicit_grocery_tax)
     
-    db.session.commit()
+    selected = get_selected_store(current_household_id(), account=account)
+    store_found = bool(str(selected.get("store_id") or "").strip())
+    store_lookup_status = "not_attempted"
+    user_message = "Location saved."
+
+    explicit_store_name = str(data.get("store_name") or "").strip()
+    explicit_location_id = str(data.get("location_id") or "").strip()
+    if explicit_store_name or explicit_location_id:
+        if explicit_location_id:
+            selected = select_store(
+                current_household_id(),
+                retailer=str(data.get("retailer") or ("walmart" if "walmart" in explicit_store_name.lower() else "kroger")),
+                store_id=explicit_location_id,
+                store_name=explicit_store_name or "Selected Store",
+                postal_code=account.zip_code or "",
+                city=(account.city_state or "").split(",", 1)[0],
+                state=((account.city_state or "").rsplit(",", 1)[-1].strip() if "," in (account.city_state or "") else ""),
+                account=account,
+            )
+            store_found = True
+            store_lookup_status = "resolved"
+        if explicit_store_name and not explicit_location_id:
+            store_lookup_status = "named_store_saved"
+    else:
+        # Keep selected-store state stable unless the user explicitly picks one.
+        # Location changes can trigger nearby-store discovery, but they must not
+        # silently overwrite the current shopping store.
+        if store_found:
+            store_lookup_status = "unchanged"
+        else:
+            store_lookup_status = "store_choice_required"
+            user_message = "Location saved. Choose a nearby supported store to continue shopping."
+
+    if auto_detect and explicit_sales_tax is None and explicit_grocery_tax is None:
+        inferred_sales_tax, inferred_grocery_tax = _estimate_tax_rates_for_location(account.zip_code or "", resolved_state_code)
+        account.sales_tax_rate = inferred_sales_tax
+        account.grocery_tax_rate = inferred_grocery_tax
+    elif auto_detect and explicit_sales_tax is None and resolved_state_code:
+        inferred_sales_tax, _ = _estimate_tax_rates_for_location(account.zip_code or "", resolved_state_code)
+        account.sales_tax_rate = inferred_sales_tax
+    elif auto_detect and explicit_grocery_tax is None and resolved_state_code:
+        _, inferred_grocery_tax = _estimate_tax_rates_for_location(account.zip_code or "", resolved_state_code)
+        account.grocery_tax_rate = inferred_grocery_tax
     
+    try:
+        db.session.commit()
+    except Exception:
+        db.session.rollback()
+        return jsonify({
+            "error": "location_save_failed",
+            "user_message": "We couldn't save that location. Please check the ZIP code and try again.",
+        }), 500
+    
+    selected = get_selected_store(current_household_id(), account=account)
     return jsonify({
         "message": "Location and tax rates updated successfully",
+        "user_message": user_message,
         "zip": account.zip_code,
+        "location": {
+            "zip_code": account.zip_code or "",
+            "city_state": account.city_state or "",
+            "sales_tax_rate": float(account.sales_tax_rate if account.sales_tax_rate is not None else 0.0825),
+            "grocery_tax_rate": float(account.grocery_tax_rate if account.grocery_tax_rate is not None else 0.0125),
+            "store_name": selected.get("name") or "",
+            "location_id": selected.get("store_id") or "",
+            "selected_store": selected,
+            "latitude": account.latitude,
+            "longitude": account.longitude,
+        },
         "store": {
             "found": store_found,
-            "name": account.kroger_store_name,
-            "location_id": account.kroger_location_id,
+            "name": selected.get("name"),
+            "location_id": selected.get("store_id"),
+            "status": store_lookup_status,
         },
     })
 
@@ -2157,125 +6400,176 @@ def upload_store_cache_csv():
         "skipped": skipped, "errors": errors,
     })
 
-# =============================================================================
-# INITIALIZE DATABASE & SEED DEMO DATA
-# =============================================================================
+
+def _normalize_beta_email(value: str) -> str:
+    return str(value or "").strip().lower()
+
+
+@app.cli.command("beta-user-create")
+@click.option("--email", required=True, help="Login email for the beta user.")
+@click.option("--password", required=True, help="Initial password for the beta user.")
+@click.option("--household-public-id", required=True, help="Target household public_id to bind membership.")
+@click.option("--role", default="owner", show_default=True, help="Membership role label.")
+def beta_user_create(email: str, password: str, household_public_id: str, role: str) -> None:
+    """Create a beta auth user and bind them to a household."""
+    normalized_email = _normalize_beta_email(email)
+    if not normalized_email or len(password or "") < 8:
+        raise click.ClickException("Email is required and password must be at least 8 characters.")
+
+    row = Household.query.filter_by(public_id=str(household_public_id).strip()).first()
+    if row is None:
+        raise click.ClickException("Household public_id not found.")
+
+    existing = User.query.filter(db.func.lower(User.email) == normalized_email).first()
+    if existing is not None:
+        raise click.ClickException("User already exists.")
+
+    user = User(
+        email=normalized_email,
+        password_hash=generate_password_hash(password),
+        active=True,
+        auth_version=1,
+    )
+    db.session.add(user)
+    db.session.flush()
+    membership = HouseholdMembership(
+        user_id=user.id,
+        household_id=row.id,
+        role=str(role or "owner").strip() or "owner",
+        active=True,
+    )
+    db.session.add(membership)
+    db.session.commit()
+    click.echo(f"created user={user.email} user_id={user.id} household_id={row.id}")
+
+
+@app.cli.command("beta-user-assign-household")
+@click.option("--email", required=True, help="Existing beta user email.")
+@click.option("--household-public-id", required=True, help="Target household public_id.")
+@click.option("--role", default="member", show_default=True, help="Membership role label.")
+def beta_user_assign_household(email: str, household_public_id: str, role: str) -> None:
+    """Assign or reactivate household membership for an existing beta user."""
+    normalized_email = _normalize_beta_email(email)
+    user = User.query.filter(db.func.lower(User.email) == normalized_email).first()
+    if user is None:
+        raise click.ClickException("User not found.")
+    row = Household.query.filter_by(public_id=str(household_public_id).strip()).first()
+    if row is None:
+        raise click.ClickException("Household public_id not found.")
+
+    membership = HouseholdMembership.query.filter_by(user_id=user.id, household_id=row.id).first()
+    if membership is None:
+        membership = HouseholdMembership(
+            user_id=user.id,
+            household_id=row.id,
+            role=str(role or "member").strip() or "member",
+            active=True,
+        )
+        db.session.add(membership)
+    else:
+        membership.role = str(role or membership.role or "member").strip() or "member"
+        membership.active = True
+        db.session.add(membership)
+    db.session.commit()
+    click.echo(f"assigned user={user.email} household_id={row.id} role={membership.role}")
+
+
+@app.cli.command("beta-user-reset-password")
+@click.option("--email", required=True, help="Existing beta user email.")
+@click.option("--password", required=True, help="New password.")
+def beta_user_reset_password(email: str, password: str) -> None:
+    """Reset beta user password and invalidate active sessions."""
+    normalized_email = _normalize_beta_email(email)
+    user = User.query.filter(db.func.lower(User.email) == normalized_email).first()
+    if user is None:
+        raise click.ClickException("User not found.")
+    if len(password or "") < 8:
+        raise click.ClickException("Password must be at least 8 characters.")
+    user.password_hash = generate_password_hash(password)
+    user.auth_version = int(user.auth_version or 0) + 1
+    db.session.add(user)
+    db.session.commit()
+    click.echo(f"password reset user={user.email}")
+
+
+@app.cli.command("beta-user-set-active")
+@click.option("--email", required=True, help="Existing beta user email.")
+@click.option("--active", type=bool, required=True, help="true to enable, false to disable.")
+def beta_user_set_active(email: str, active: bool) -> None:
+    """Enable or disable a beta user account."""
+    normalized_email = _normalize_beta_email(email)
+    user = User.query.filter(db.func.lower(User.email) == normalized_email).first()
+    if user is None:
+        raise click.ClickException("User not found.")
+    user.active = bool(active)
+    user.auth_version = int(user.auth_version or 0) + 1
+    db.session.add(user)
+    db.session.commit()
+    click.echo(f"updated user={user.email} active={str(bool(active)).lower()}")
+
 def init_db():
     with app.app_context():
-        db.create_all()
-        
-        # Migrate existing database: add new columns if missing
-        try:
-            from sqlalchemy import inspect as sa_inspect
-            inspector = sa_inspect(db.engine)
-            account_cols = {c["name"] for c in inspector.get_columns("account")}
-            if "kroger_location_id" not in account_cols:
-                db.session.execute(db.text("ALTER TABLE account ADD COLUMN kroger_location_id VARCHAR(20)"))
-            if "kroger_store_name" not in account_cols:
-                db.session.execute(db.text("ALTER TABLE account ADD COLUMN kroger_store_name VARCHAR(100) DEFAULT 'Kroger'"))
-            recipe_cols = {c["name"] for c in inspector.get_columns("recipe")}
-            if "source_url" not in recipe_cols:
-                db.session.execute(db.text("ALTER TABLE recipe ADD COLUMN source_url VARCHAR(500)"))
-            rapid_cols = {c["name"] for c in inspector.get_columns("rapid_price_cache")}
-            if "package_size" not in rapid_cols:
-                db.session.execute(db.text("ALTER TABLE rapid_price_cache ADD COLUMN package_size VARCHAR(100)"))
-            if "image_url" not in rapid_cols:
-                db.session.execute(db.text("ALTER TABLE rapid_price_cache ADD COLUMN image_url VARCHAR(500)"))
-            # Ensure user_settings table exists
-            existing_tables = {t for t in inspector.get_table_names()}
-            if "user_settings" not in existing_tables:
-                UserSetting.__table__.create(db.engine)
-            db.session.commit()
-        except Exception:
-            pass  # Fresh database — columns already exist
-        
+        _validate_startup_configuration()
+        _validate_database_connectivity()
 
-        
-        if not Account.query.first():
-            acc = Account(checking_balance=1250.00, food_allocation_pct=40.0, pay_period_days=14, meals_per_day=3)
-            db.session.add(acc)
-            
-            b1 = Bill(name="Electric Bill", amount=120.00, due_date=datetime.utcnow() + timedelta(days=5))
-            b2 = Bill(name="Internet", amount=65.00, due_date=datetime.utcnow() + timedelta(days=8))
-            b3 = Bill(name="Gas Allocation", amount=55.00, due_date=datetime.utcnow() + timedelta(days=2), is_gas_estimate=True)
-            db.session.add_all([b1, b2, b3])
-            
-            p1 = PantryItem(clean_keyword="flour", product_name="All Purpose Flour", quantity=32.0, unit="oz")
-            p2 = PantryItem(clean_keyword="chicken", product_name="Chicken Breasts", quantity=16.0, unit="oz")
-            db.session.add_all([p1, p2])
-            
-            r1 = Recipe(title="Chicken Rice Bowl", servings=2, estimated_cost_per_serving=3.20, instructions="Cook chicken and serve over rice.")
-            db.session.add(r1)
-            db.session.flush()
-            
-            ri1 = RecipeIngredient(recipe_id=r1.id, product_name="Chicken Breast", clean_keyword="chicken", quantity=24.0, unit="oz")
-            ri2 = RecipeIngredient(recipe_id=r1.id, product_name="White Rice", clean_keyword="rice", quantity=8.0, unit="oz")
-            db.session.add_all([ri1, ri2])
-            
-            # Seed demo StorePriceCache entries so the cart resolves real
-            # products out-of-the-box without requiring API credentials.
-            demo_prices = [
-                # (store, keyword, title, price, is_store_brand, package, retailer)
-                # --- Proteins ---
-                ('Kroger', 'chicken',   'Simple Truth Chicken Breast Family Pack',  8.99,  1, '2.5 lb', 'kroger'),
-                ('Kroger', 'chicken',   'Kroger Boneless Skinless Chicken Breast',   9.49,  1, '2 lb',   'kroger'),
-                ('Kroger', 'chicken',   'Tyson Fresh Chicken Breast',               11.99,  0, '2.5 lb', 'kroger'),
-                ('Kroger', 'chicken_breast', 'Simple Truth Chicken Breast Family Pack',  8.99,  1, '2.5 lb', 'kroger'),
-                ('Kroger', 'chicken_breast', 'Kroger Boneless Skinless Chicken Breast',   9.49,  1, '2 lb',   'kroger'),
-                ('Kroger', 'chicken_breast', 'Tyson Fresh Chicken Breast',               11.99,  0, '2.5 lb', 'kroger'),
-                ('Kroger', 'beef',      'Kroger Ground Beef 85/15',                  5.49,  1, '1 lb',   'kroger'),
-                ('Kroger', 'beef',      'Simple Truth Grass-Fed Ground Beef',        7.99,  1, '1 lb',   'kroger'),
-                ('Kroger', 'bacon',     'Kroger Hickory Smoked Bacon',               5.99,  1, '16 oz',  'kroger'),
-                ('Kroger', 'eggs',      'Kroger Grade A Large Eggs',                 2.99,  1, '12 ct',  'kroger'),
-                ('Kroger', 'eggs',      'Simple Truth Cage-Free Large Eggs',         4.49,  1, '12 ct',  'kroger'),
-                ('Kroger', 'eggs',      'Eggland Best Large Eggs',                   5.29,  0, '12 ct',  'kroger'),
-                # --- Grains & Baking ---
-                ('Kroger', 'rice',      'Kroger Long Grain White Rice',              2.99,  1, '2 lb',   'kroger'),
-                ('Kroger', 'rice',      'Kroger Enriched White Rice',                1.89,  1, '1 lb',   'kroger'),
-                ('Kroger', 'rice',      'Uncle Ben White Rice Original',             4.49,  0, '2 lb',   'kroger'),
-                ('Kroger', 'pasta',     'Kroger Penne Pasta',                        1.29,  1, '16 oz',  'kroger'),
-                ('Kroger', 'pasta',     'Kroger Spaghetti Pasta',                    1.29,  1, '16 oz',  'kroger'),
-                ('Kroger', 'pasta',     'Barilla Penne Pasta',                       1.99,  0, '16 oz',  'kroger'),
-                ('Kroger', 'flour',     'Kroger All-Purpose Flour',                  2.49,  1, '5 lb',   'kroger'),
-                ('Kroger', 'flour',     'Gold Medal All-Purpose Flour',              3.49,  0, '5 lb',   'kroger'),
-                ('Kroger', 'bread',     'Kroger White Sandwich Bread',               1.49,  1, '20 oz',  'kroger'),
-                ('Kroger', 'bread',     'Sara Lee Classic White Bread',              3.99,  0, '20 oz',  'kroger'),
-                ('Kroger', 'sugar',     'Kroger Granulated Sugar',                   3.29,  1, '4 lb',   'kroger'),
-                # --- Dairy ---
-                ('Kroger', 'milk',      'Kroger Whole Milk',                         3.49,  1, '1 gal',  'kroger'),
-                ('Kroger', 'milk',      'Horizon Organic Whole Milk',                6.49,  0, '1 gal',  'kroger'),
-                ('Kroger', 'cheese',    'Kroger Sharp Cheddar Cheese',               2.99,  1, '8 oz',   'kroger'),
-                ('Kroger', 'cheese',    'Kroger Mozzarella Cheese',                  2.99,  1, '8 oz',   'kroger'),
-                ('Kroger', 'cheese',    'Sargento Sharp Cheddar Slices',             4.49,  0, '8 oz',   'kroger'),
-                ('Kroger', 'butter',    'Kroger Unsalted Butter',                    4.29,  1, '1 lb',   'kroger'),
-                ('Kroger', 'butter',    'Land O Lakes Unsalted Butter',              5.99,  0, '1 lb',   'kroger'),
-                ('Kroger', 'cream',     'Kroger Heavy Whipping Cream',               3.99,  1, '16 oz',  'kroger'),
-                ('Kroger', 'cream',     'Organic Valley Heavy Cream',                5.49,  0, '16 oz',  'kroger'),
-                # --- Produce ---
-                ('Kroger', 'broccoli',  'Fresh Broccoli Crowns',                     1.99,  0, '1 lb',   'kroger'),
-                ('Kroger', 'banana',    'Fresh Bananas',                             0.29,  0, '1 ct',   'kroger'),
-                ('Kroger', 'onion',     'Yellow Onions',                             0.89,  0, '1 lb',   'kroger'),
-                ('Kroger', 'garlic',    'Fresh Garlic',                              0.69,  0, '1 head', 'kroger'),
-                ('Kroger', 'tomato',    'Roma Tomatoes',                             1.49,  0, '1 lb',   'kroger'),
-                ('Kroger', 'tomato',    'Kroger Diced Tomatoes Canned',              0.99,  1, '14.5 oz','kroger'),
-                ('Kroger', 'potato',    'Russet Potatoes',                           3.99,  0, '5 lb',   'kroger'),
-                ('Kroger', 'carrot',    'Whole Carrots',                             1.49,  0, '2 lb',   'kroger'),
-                ('Kroger', 'mushroom',  'White Mushrooms',                           2.49,  0, '8 oz',   'kroger'),
-                # --- Oils & Condiments ---
-                ('Kroger', 'olive_oil', 'Kroger Extra Virgin Olive Oil',             5.99,  1, '16.9 oz','kroger'),
-                ('Kroger', 'olive_oil', 'Bertolli Extra Virgin Olive Oil',           9.49,  0, '16.9 oz','kroger'),
-                ('Kroger', 'salt',      'Kroger Iodized Salt',                       0.89,  1, '26 oz',  'kroger'),
-                ('Kroger', 'pepper',    'Kroger Ground Black Pepper',                2.49,  1, '3 oz',   'kroger'),
-            ]
-            for store, kw, title, price, is_sb, pkg, rtlr in demo_prices:
-                db.session.add(StorePriceCache(
-                    store_name=store, item_keyword=kw, product_title=title,
-                    price=price, package_size=pkg, retailer=rtlr,
-                    is_store_brand=is_sb,
-                ))
-            
-            db.session.commit()
+        from sqlalchemy import inspect as sa_inspect
+
+        inspector = sa_inspect(db.engine)
+        existing_tables = set(inspector.get_table_names())
+        db_uri = str(app.config.get("SQLALCHEMY_DATABASE_URI") or "")
+        db_path = _db_path_from_uri(db_uri)
+        db_class = _classify_db_path(db_path)
+        require_alembic_version = db_class not in {"test", "disposable"}
+
+        required_tables = {
+            "household",
+            "auth_user",
+            "household_membership",
+            "auth_login_throttle",
+            "account",
+            "bill",
+            "expense_transactions",
+            "shopping_trip_completion",
+            "user_settings",
+            "user_preferences",
+            "action_audit",
+            "plaid_item",
+            "plaid_account",
+            "plaid_transaction",
+            "transaction_reconciliation",
+            "retail_product",
+            "retail_store_identity",
+            "store_product_observation",
+            "retail_search_cache",
+            "retail_refresh_lease",
+        }
+        if require_alembic_version:
+            required_tables.add("alembic_version")
+        missing = sorted(required_tables - existing_tables)
+        if missing:
+            raise RuntimeError(
+                "Database schema is not up to date. Run migrations before startup "
+                f"(missing tables: {', '.join(missing)})."
+            )
+
+        # Keep compatibility default household behavior, but only after schema
+        # is migration-ready. No runtime DDL is performed here.
+        legacy_household = ensure_legacy_household()
+
+        if _env_flag("RUNG_BOOTSTRAP_DEMO_DATA", False):
+            acc = get_household_account(legacy_household.id)
+            # Demo bootstrap is explicitly opted in; populate the canonical
+            # row instead of racing a second Account insert.
+            if acc.checking_balance is None:
+                acc.checking_balance = 1250.00
+                acc.food_allocation_pct = 40.0
+                acc.pay_period_days = 14
+                acc.meals_per_day = 3
+                acc.expected_paycheck = 2000.00
+                db.session.commit()
+            seed_default_user_preferences("bootstrap")
 
 if __name__ == "__main__":
     init_db()
+    # With proper db.init_app() pattern and models in separate module, reloader works correctly
     app.run(port=5000, debug=True)

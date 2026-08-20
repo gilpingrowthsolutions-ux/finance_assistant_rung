@@ -11,6 +11,9 @@
 
 'use strict';
 
+const fs = require('fs');
+const path = require('path');
+
 // ---- Mock fetch infrastructure (mirrors test_recipes.js) ----
 const mockRoutes = [];
 function mockRoute(method, path, status, responseBody, expectedBody) {
@@ -176,8 +179,8 @@ mockRoute('GET', '/api/grocery', 200, {
 });
 SUT._setMockFetch(mockFetch);
 await SUT.refreshGrocery();
-assertEq(metaEl3.textContent, 'Tax rate applied: 8.225%', 'meta shows applied tax rate');
-assertEq(totalEl3.textContent, 'Total (tax incl.): $8.11', 'total shows tax-inclusive total');
+assertEq(metaEl3.textContent, 'Tax used: 8.225%', 'meta shows applied tax rate');
+assertEq(totalEl3.textContent, 'Total (with tax): $8.11', 'total shows tax-inclusive total');
 assertEq(listEl3.children.length, 2, 'renders 2 grocery items');
 assertEq(listEl3.children[0].innerHTML.includes('Eggs'), true, 'row 1 shows Eggs');
 assertEq(listEl3.children[0].innerHTML.includes('data-id="10"'), true, 'row 1 has correct data-id');
@@ -198,7 +201,7 @@ setupFakeDom({
 mockRoute('GET', '/api/grocery', 200, { items: [] });
 SUT._setMockFetch(mockFetch);
 await SUT.refreshGrocery();
-assertEq(listEl4.innerHTML, '<div class="empty">No active grocery list yet — generate one to begin.</div>', 'empty state when no items');
+assertEq(listEl4.innerHTML, '<div class="empty">No grocery list yet. Build one to get started.</div>', 'empty state when no items');
 assertEq(totalEl4.textContent, '', 'total cleared when no items');
 
 // ============================================================================
@@ -214,96 +217,135 @@ setupFakeDom({
 mockRoute('GET', '/api/grocery', 500, { error: 'database unavailable' });
 SUT._setMockFetch(mockFetch);
 await SUT.refreshGrocery();
-assertEq(listEl5.innerHTML, '<div class="empty">Could not load grocery list.</div>', 'error empty state when GET fails');
+assertEq(listEl5.innerHTML, '<div class="empty">We could not load your grocery list right now.</div>', 'error empty state when GET fails');
 
 // ============================================================================
-console.log('\n6. setupGroceryInit Generate handler: empty selection shows error flash, no fetch');
+console.log('\n6. setupGroceryInit is the idempotent production controller for cart actions');
 // ============================================================================
 reset();
 setupFakeDom({
-  'generateGroceryBtn': new FakeEl('generateGroceryBtn'),
-  'recipeListContainer': buildRecipesContainer('recipeListContainer', [
-    { id: 1, checked: false },
-  ]),
+  'grocery': new FakeEl('grocery'),
+  'generateRecipesBtn': new FakeEl('generateRecipesBtn'),
+  'buildCartBtn': new FakeEl('buildCartBtn'),
 });
-const capturedFlash6 = [];
-let fetchCalled6 = false;
-SUT.setupGroceryInit({
-  flash: (msg, kind) => capturedFlash6.push({ msg, kind }),
-  refreshGrocery: () => { fetchCalled6 = true; },
-});
-await fakeDom.get('generateGroceryBtn').eventListeners.click[0]();
-assertEq(fetchCalled6, false, 'no fetch when no recipes selected');
-assertEq(capturedFlash6.length, 1, 'flash called once on empty selection');
-assertEq(capturedFlash6[0].kind, 'error', 'flash kind is error');
-assertEq(capturedFlash6[0].msg, 'Select at least one recipe in the Recipes tab first', 'flash message prompts recipe selection');
+const buildCalls6 = [];
+let rebalanceCalls6 = 0;
+const deps6 = {
+  buildCart: (forceRefresh) => { buildCalls6.push(forceRefresh); },
+  rebalanceCart: () => { rebalanceCalls6++; },
+};
+await SUT.setupGroceryInit(deps6);
+await SUT.setupGroceryInit(deps6);
+assertEq(fakeDom.get('generateRecipesBtn').eventListeners.click.length, 1, 'reinitialization does not duplicate Build Shopping Plan handlers');
+assertEq(fakeDom.get('buildCartBtn').eventListeners.click.length, 1, 'reinitialization does not duplicate Rebalance Cart handlers');
+await fakeDom.get('generateRecipesBtn').eventListeners.click[0]();
+await fakeDom.get('buildCartBtn').eventListeners.click[0]();
+assertEq(buildCalls6, [false], 'Build Shopping Plan uses the cart build runtime');
+assertEq(rebalanceCalls6, 1, 'Rebalance Cart uses the preview-review-apply runtime');
 
 // ============================================================================
-console.log('\n7. setupGroceryInit Generate happy path: POSTs recipe_ids + store_name + budget_limit, refreshes');
+console.log('\n7. setupGroceryInit restores and persists retailer context before rebuilding');
+// ============================================================================
+reset();
+const storeSelect7 = new FakeEl('storeSel');
+storeSelect7.value = 'kroger';
+setupFakeDom({
+  'storeSel': storeSelect7,
+});
+const lifecycle7 = [];
+await SUT.setupGroceryInit({
+  restoreGroceryRetailerSelection: async () => { lifecycle7.push('restore'); },
+  persistGroceryRetailerSelection: async (retailer) => { lifecycle7.push('persist:' + retailer); },
+  buildCart: async () => { lifecycle7.push('build'); },
+});
+await storeSelect7.eventListeners.change[0]();
+assertEq(lifecycle7, ['restore', 'persist:kroger', 'build'], 'retailer restores first, then persists before cart rebuild');
+
+// ============================================================================
+console.log('\n8. setupGroceryInit owns quick search and Finished Shopping initialization');
 // ============================================================================
 reset();
 setupFakeDom({
-  'generateGroceryBtn': new FakeEl('generateGroceryBtn'),
-  'storeSel': (() => { const e = new FakeEl('storeSel'); e.value = 'Aldi'; return e; })(),
-  'budgetInput': (() => { const e = new FakeEl('budgetInput'); e.value = '100'; return e; })(),
-  'recipeListContainer': buildRecipesContainer('recipeListContainer', [
-    { id: 7, checked: true },
-    { id: 8, checked: true },
-    { id: 9, checked: false },
-  ]),
-  'groceryListContainer': new FakeEl('groceryListContainer'),
-  'groceryTotal': new FakeEl('groceryTotal'),
-  'groceryMeta': new FakeEl('groceryMeta'),
+  'grocery': new FakeEl('grocery'),
+  'rapidSearchBtn': new FakeEl('rapidSearchBtn'),
+  'rapidSearchInput': new FakeEl('rapidSearchInput'),
 });
-let capturedGenerateBody = null;
-// The handler now calls POST /api/grocery/generate-pay-period-plan
-mockRoute('POST', '/api/grocery/generate-pay-period-plan', 200, {
-  recipes_used: [{ id: 7, title: 'Recipe 7' }, { id: 8, title: 'Recipe 8' }],
-  cart_items: [],
-  subtotal: 0,
-  total_cart_cost: 0,
-}, { recipe_ids: [7, 8], store_name: 'Aldi', budget_limit: 100 });
-const capturedFlash7 = [];
-let refreshCalled7 = 0;
-SUT._setMockFetch((m, p, b) => {
-  capturedGenerateBody = b;
-  return mockFetch(m, p, b);
-});
-SUT.setupGroceryInit({
-  flash: (msg, kind) => capturedFlash7.push({ msg, kind }),
-  refreshGrocery: () => { refreshCalled7++; },
-});
-await fakeDom.get('generateGroceryBtn').eventListeners.click[0]();
-assertEq(capturedGenerateBody && capturedGenerateBody.recipe_ids, [7, 8], 'POST body includes selected recipe_ids');
-assertEq(capturedGenerateBody && capturedGenerateBody.store_name, 'Aldi', 'POST body includes store_name');
-assertEq(capturedGenerateBody && capturedGenerateBody.budget_limit, 100, 'POST body includes budget_limit');
-assertEq(capturedFlash7.length, 1, 'flash called once on success');
-assertEq(capturedFlash7[0].kind, 'success', 'flash kind is success');
-assertEq(refreshCalled7, 1, 'refreshGrocery called once after successful generate');
+let searchCalls8 = 0;
+let finishedInitCalls8 = 0;
+const deps8 = {
+  buildCart: async () => {},
+  searchProductPrice: () => { searchCalls8++; },
+  initFinishedShoppingFlow: async () => { finishedInitCalls8++; },
+};
+await SUT.setupGroceryInit(deps8);
+await SUT.setupGroceryInit(deps8);
+assertEq(fakeDom.get('rapidSearchBtn').eventListeners.click.length, 1, 'reinitialization does not duplicate quick-search handlers');
+await fakeDom.get('rapidSearchBtn').eventListeners.click[0]();
+await fakeDom.get('rapidSearchInput').eventListeners.keypress[0]({ key: 'Enter' });
+await fakeDom.get('rapidSearchInput').eventListeners.keypress[0]({ key: 'Escape' });
+assertEq(searchCalls8, 2, 'quick search runs from click and Enter only');
+assertEq(finishedInitCalls8, 1, 'Finished Shopping is initialized once by the Grocery controller');
 
 // ============================================================================
-console.log('\n8. setupGroceryInit Generate server error: flash with API error, no refresh');
+console.log('\n9. getCartSourcePresentation confirmed local item: green confirmed indicator');
 // ============================================================================
-reset();
-setupFakeDom({
-  'generateGroceryBtn': new FakeEl('generateGroceryBtn'),
-  'storeSel': (() => { const e = new FakeEl('storeSel'); e.value = 'Walmart'; return e; })(),
-  'recipeListContainer': buildRecipesContainer('recipeListContainer', [
-    { id: 1, checked: true },
-  ]),
-});
-mockRoute('POST', '/api/grocery/generate-pay-period-plan', 400, { error: 'recipe_ids must be a non-empty list' });
-const capturedFlash8 = [];
-let refreshCalled8 = 0;
-SUT.setupGroceryInit({
-  flash: (msg, kind) => capturedFlash8.push({ msg, kind }),
-  refreshGrocery: () => { refreshCalled8++; },
-});
-await fakeDom.get('generateGroceryBtn').eventListeners.click[0]();
-assertEq(capturedFlash8.length, 1, 'flash called on HTTP error');
-assertEq(capturedFlash8[0].kind, 'error', 'flash kind is error');
-assertEq(capturedFlash8[0].msg, 'recipe_ids must be a non-empty list', 'flash shows server error');
-assertEq(refreshCalled8, 0, 'refresh NOT called on error');
+const confirmed9 = SUT.getCartSourcePresentation({
+  price_source: 'kroger_api',
+  confirmed_local_store: true,
+  store_name: 'Kroger - West',
+}, 'Kroger');
+assertEq(confirmed9.badgeHtml.includes('Store-Checked (Live)'), true, 'confirmed local item uses live confirmed badge');
+assertEq(confirmed9.detailHtml.includes('Checked at Kroger - West'), true, 'confirmed local item shows actual store name');
+assertEq(confirmed9.detailHtml.includes('Not confirmed'), false, 'confirmed local item does not show fallback warning text');
+
+// ============================================================================
+console.log('\n10. getCartSourcePresentation RapidAPI fallback: clearly not confirmed local');
+// ============================================================================
+const rapid10 = SUT.getCartSourcePresentation({
+  price_source: 'rapid_api',
+  confirmed_local_store: false,
+  store_name: 'RapidMart',
+}, 'Kroger');
+assertEq(rapid10.badgeHtml.includes('Other Source'), true, 'RapidAPI item uses other-source badge');
+assertEq(rapid10.detailHtml.includes('Store found: RapidMart'), true, 'RapidAPI item shows source store');
+assertEq(rapid10.detailHtml.includes('Not yet confirmed at Kroger'), true, 'RapidAPI item explicitly says not confirmed at selected store');
+
+// ============================================================================
+console.log('\n11. getCartSourcePresentation estimated item: estimate badge + not confirmed context');
+// ============================================================================
+const est11 = SUT.getCartSourcePresentation({
+  price_source: 'estimated',
+  confirmed_local_store: false,
+}, 'Kroger');
+assertEq(est11.badgeHtml.includes('Estimate'), true, 'estimated item uses estimate badge');
+assertEq(est11.detailHtml.includes('Store not available'), true, 'estimated item shows unresolved source detail');
+assertEq(est11.detailHtml.includes('Not yet confirmed at Kroger'), true, 'estimated item says not confirmed at selected store');
+
+// ============================================================================
+console.log('\n12. getCartSourcePresentation store cache fallback: treated as non-local third-party');
+// ============================================================================
+const fallback12 = SUT.getCartSourcePresentation({
+  price_source: 'store_cache_fallback',
+  confirmed_local_store: false,
+  store_name: 'Generic Store',
+}, 'Kroger');
+assertEq(fallback12.badgeHtml.includes('Other Source (Saved)'), true, 'store_cache_fallback badge is not local-confirmed cache');
+assertEq(fallback12.detailHtml.includes('Not yet confirmed at Kroger'), true, 'store_cache_fallback explicitly not confirmed at selected store');
+
+// ============================================================================
+console.log('\n13. production template initializes the tested Grocery controller');
+// ============================================================================
+const productionTemplate = fs.readFileSync(path.join(__dirname, '..', 'templates', 'index.html'), 'utf8');
+assertEq(productionTemplate.includes("await setupGroceryInit({"), true, 'production awaits setupGroceryInit');
+assertEq(productionTemplate.includes("generateRecipesBtn').addEventListener"), false, 'production has no duplicate inline Build Shopping Plan listener');
+assertEq(productionTemplate.includes("buildCartBtn').addEventListener"), false, 'production has no duplicate inline Rebalance Cart listener');
+assertEq(productionTemplate.includes("rapidSearchBtn').addEventListener"), false, 'production has no duplicate inline quick-search listener');
+assertEq(productionTemplate.includes("if (typeof buildCart === 'function') buildCart();"), false, 'tab navigation does not run a competing cart build');
+assertEq(productionTemplate.includes('chosen.price == null || item.quantity_uncertain || item.packages_to_buy == null'), true, 'unknown quantity stays price-unavailable after product choice');
+assertEq(productionTemplate.includes('if (item.estimated_price != null && item.promo_price != null'), true, 'promo display cannot fabricate an unknown-quantity total');
+assertEq(productionTemplate.includes("'/api/grocery/rebalance/preview'"), true, 'served browser calls authoritative rebalance preview endpoint');
+assertEq(productionTemplate.includes("'/api/grocery/rebalance/apply'"), true, 'served browser calls authoritative rebalance apply endpoint');
+assertEq(productionTemplate.includes('id="rebalanceReviewDialog"'), true, 'served browser renders an explicit rebalance review dialog');
 
 // ============================================================================
 console.log('\n' + passed + ' passed, ' + failed + ' failed');

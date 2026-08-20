@@ -33,6 +33,7 @@ from app import (
     app, db, Account, Bill, Recipe, RecipeIngredient, MealPlanItem,
 )
 from services.copilot_service import parse_copilot_prompt
+from services.household_context import household_id as current_household_id
 
 client = app.test_client()
 app.testing = True
@@ -48,7 +49,7 @@ def _setup():
         db.drop_all()
         db.create_all()
         db.session.commit()
-        acc = Account(checking_balance=1250.00)
+        acc = Account(household_id=current_household_id(), checking_balance=1250.00)
         db.session.add(acc)
         db.session.commit()
 

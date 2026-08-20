@@ -99,7 +99,7 @@ async function refreshTransactions() {
   const resp = await fetchTx_('GET', '/api/transactions', undefined);
   list.innerHTML = '';
   if (!resp.ok) {
-    list.innerHTML = '<div class="empty">Could not load transactions.</div>';
+    list.innerHTML = '<div class="empty">We could not load your transactions right now.</div>';
     return;
   }
   const data = resp.data || [];
@@ -115,7 +115,7 @@ async function refreshTransactions() {
       <div class="li-amount">${fmt_(t.amount)}</div>
       <div class="li-meta">${escapeHtml_(t.category || '')}</div>
       <div class="li-meta">${escapeHtml_(t.date || '')}</div>
-      <button class="btn is-danger" type="button" data-action="del" data-id="${t.id}">Delete</button>
+      <button class="btn is-danger" type="button" data-action="del" data-id="${t.id}">Remove</button>
     `;
     list.appendChild(row);
   });
@@ -163,15 +163,14 @@ function setupTransactionsInit(deps) {
       amount: parseFloat(amt && amt.value ? amt.value : '0'),
       category: cat && cat.value ? cat.value : '',
     };
-    if (!body.description) { if (flashFn) flashFn('Description required', 'error'); return; }
+    if (!body.description) { if (flashFn) flashFn('Add a short description.', 'error'); return; }
     const resp = await fetchTx_('POST', '/api/transactions', body);
     if (!resp.ok) {
-      const errMsg = (resp.data && (resp.data.error || resp.data.message)) || ('Failed to log expense (' + resp.status + ')');
-      if (flashFn) flashFn(errMsg, 'error');
+      if (flashFn) flashFn('We could not add this expense right now.', 'error');
       return;
     }
     if (desc) desc.value = '';
-    if (flashFn) flashFn('Expense posted', 'success');
+    if (flashFn) flashFn('Expense added', 'success');
     await refreshFn();
     if (typeof refreshOverview_ === 'function') await refreshOverview_();
   });
@@ -186,7 +185,7 @@ async function refreshBills() {
   const resp = await fetchTx_('GET', '/bills', undefined);
   list.innerHTML = '';
   if (!resp.ok) {
-    list.innerHTML = '<div class="empty">Could not load bills.</div>';
+    list.innerHTML = '<div class="empty">We could not load your bills right now.</div>';
     return;
   }
   const data = resp.data || [];
@@ -203,8 +202,8 @@ async function refreshBills() {
       <div class="li-meta">Due: ${escapeHtml_(b.due_date || '')}</div>
       <div><span class="badge ${b.is_paid ? 'is-paid' : ''}">${b.is_paid ? 'Paid' : 'Unpaid'}</span></div>
       <div class="row" style="gap:6px;">
-        <button class="btn is-ghost" type="button" data-action="toggle" data-id="${b.id}">${b.is_paid ? 'Unmark' : 'Mark Paid'}</button>
-        <button class="btn is-danger" type="button" data-action="del" data-id="${b.id}">Delete</button>
+        <button class="btn is-ghost" type="button" data-action="toggle" data-id="${b.id}">${b.is_paid ? 'Mark Unpaid' : 'Mark Paid'}</button>
+        <button class="btn is-danger" type="button" data-action="del" data-id="${b.id}">Remove</button>
       </div>
     `;
     list.appendChild(row);
@@ -261,11 +260,10 @@ function setupBillsInit(deps) {
       amount: parseFloat(amt && amt.value ? amt.value : '0'),
       due_date: date && date.value ? date.value : '',
     };
-    if (!body.name) { if (flashFn) flashFn('Bill name required', 'error'); return; }
+    if (!body.name) { if (flashFn) flashFn('Enter a bill name.', 'error'); return; }
     const resp = await fetchTx_('POST', '/bills', body);
     if (!resp.ok) {
-      const errMsg = (resp.data && (resp.data.error || resp.data.message)) || ('Failed to add bill (' + resp.status + ')');
-      if (flashFn) flashFn(errMsg, 'error');
+      if (flashFn) flashFn('We could not add this bill right now.', 'error');
       return;
     }
     // Reset each input individually (mirrors setupTransactionsInit's pattern).

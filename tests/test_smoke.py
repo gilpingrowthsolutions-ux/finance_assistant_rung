@@ -8,11 +8,11 @@ stock, and a custom budget. Then hits `/api/grocery/generate-pay-period-plan`
 and verifies every response field end-to-end:
 
   • Basic response shape (cart_items, subtotal, total, tax)
-  • package_size on every cart item
+    • package_size on confirmed local-store cart items
   • image_url field presence
   • price_source per item (cache vs estimate)
   • BrandPreference — cheerios locked to name brand (not store brand)
-  • Pantry deduction — flour skipped (on-hand >= needed)
+    • Pantry deduction — flour skipped when units are safely comparable
   • Resolution stats (cache_hits, fallbacks)
   • Budget enforcement (exceeded flag, remaining)
   • recipes_used list
@@ -33,6 +33,7 @@ from app import (
     app, db, Account, Recipe, RecipeIngredient, BrandPreference,
     StorePriceCache, PantryItem,
 )
+from services.household_context import household_id as current_household_id
 app.testing = True
 
 passed = 0
@@ -67,6 +68,7 @@ def check(condition, label, expected=None, actual=None):
 # SETUP — clear state, seed deterministic scenario
 # ===========================================================================
 with app.app_context():
+    hid = current_household_id()
     db.create_all()  # in-memory DB starts empty — build the schema first
     # Wipe all relevant tables
     BrandPreference.query.delete()
@@ -79,6 +81,7 @@ with app.app_context():
 
     # Account with custom grocery tax rate (separate from sales tax)
     acc = Account(
+        household_id=hid,
         checking_balance=2000.00,
         food_allocation_pct=30.0,
         pay_period_days=14,
@@ -98,7 +101,8 @@ with app.app_context():
         ('Penne Pasta',     'pasta',      16, 'oz'),
         ('Cheddar Cheese',  'cheese',      8,  'oz'),
         ('Whole Milk',      'milk',       1,  'cup'),
-        ('All-Purpose Flour','flour',      2,  'tbsp'),
+        # Use a mass unit so pantry deduction is safely comparable.
+        ('All-Purpose Flour','flour',      2,  'oz'),
     ]
     for pname, kw, qty, unit in pasta_ings:
         db.session.add(RecipeIngredient(
@@ -111,7 +115,8 @@ with app.app_context():
     db.session.add(r2)
     db.session.flush()
     cereal_ings = [
-        ('Honey Nut Cheerios', 'cheerios', 1, 'box'),
+        # Use mass units so package adequacy can be evaluated deterministically.
+        ('Honey Nut Cheerios', 'cheerios', 1, 'oz'),
         ('Whole Milk',         'milk',     1, 'cup'),
         ('Banana',             'banana',   1, 'item'),
     ]
@@ -127,13 +132,13 @@ with app.app_context():
     cache_seed = [
         # Name-brand products
         ('Walmart', 'pasta',     'Barilla Penne Pasta 16oz',          1.99, 0, '16 oz',  'walmart'),
-        ('Walmart', 'cheese',    'Kraft Sharp Cheddar 8oz',           3.49, 0, '8 oz',   'walmart'),
+        ('Walmart', 'cheese',    'Kraft Sharp Cheddar Cheese 8oz',    3.49, 0, '8 oz',   'walmart'),
         ('Walmart', 'milk',      'Horizon Organic Whole Milk 64oz',   4.99, 0, '64 oz',  'walmart'),
         ('Walmart', 'flour',     'Gold Medal All-Purpose Flour 5lb',  3.29, 0, '5 lb',   'walmart'),
         ('Walmart', 'cheerios',  'Honey Nut Cheerios 15.4oz',         4.49, 0, '15.4 oz','walmart'),
         # Store-brand alternatives (cheaper)
         ('Walmart', 'pasta',     'Great Value Penne Pasta 16oz',      1.00, 1, '16 oz',  'walmart'),
-        ('Walmart', 'cheese',    'Great Value Sharp Cheddar 8oz',     2.49, 1, '8 oz',   'walmart'),
+        ('Walmart', 'cheese',    'Great Value Sharp Cheddar Cheese 8oz', 2.49, 1, '8 oz',   'walmart'),
         ('Walmart', 'milk',      'Great Value Whole Milk 64oz',       2.99, 1, '64 oz',  'walmart'),
         ('Walmart', 'flour',     'Great Value All-Purpose Flour 5lb', 2.10, 1, '5 lb',   'walmart'),
         ('Walmart', 'cheerios',  'Great Value Toasted Oats 18oz',     2.10, 1, '18 oz',  'walmart'),
@@ -150,6 +155,7 @@ with app.app_context():
 
     # ---- BrandPreference: cheerios locked to name brand ------------------
     pref = BrandPreference(
+        household_id=hid,
         clean_keyword='cheerios',
         prefer_store_brand=False,
         preferred_brand_name='Honey Nut Cheerios',
@@ -159,6 +165,7 @@ with app.app_context():
 
     # ---- Pantry: enough flour to skip purchasing it ----------------------
     db.session.add(PantryItem(
+        household_id=hid,
         clean_keyword='flour', product_name='All Purpose Flour',
         quantity=32.0, unit='oz',  # 32 oz on-hand vs 1 oz needed (2 tbsp)
     ))
@@ -187,16 +194,26 @@ check(len(cart) >= 5, 'at least 5 cart items (7 ingredients - 1 skipped flour - 
 # ===========================================================================
 # SECTION 2: package_size on every cart item
 # ===========================================================================
-print('\n2. package_size present on every cart item')
-all_have_pkg = True
-empty_pkgs = []
+print('\n2. package_size contract on cart items')
+confirmed_missing_pkg = []
+estimated_without_uncertainty = []
 for item in cart:
     pkg = item.get('package_size', '')
-    if not pkg:
-        all_have_pkg = False
-        empty_pkgs.append(item.get('keyword', '?'))
-check(all_have_pkg, 'every cart item has a non-empty package_size',
-     'all items', 'missing: ' + ', '.join(empty_pkgs) if empty_pkgs else None)
+    is_confirmed = bool(item.get('confirmed_local_store', False))
+    is_estimated = item.get('price_source') == 'estimated'
+    if is_confirmed and not pkg:
+        confirmed_missing_pkg.append(item.get('keyword', '?'))
+    if is_estimated and (item.get('package_selection_uncertain') is not True or item.get('confirmed_local_store') is not False):
+        estimated_without_uncertainty.append(item.get('keyword', '?'))
+
+check(len(confirmed_missing_pkg) == 0,
+      'confirmed local-store items have non-empty package_size',
+      'all confirmed items',
+      'missing: ' + ', '.join(confirmed_missing_pkg) if confirmed_missing_pkg else None)
+check(len(estimated_without_uncertainty) == 0,
+      'estimated items are explicitly uncertain and not confirmed local store',
+      'all estimated items',
+      'violations: ' + ', '.join(estimated_without_uncertainty) if estimated_without_uncertainty else None)
 
 # ===========================================================================
 # SECTION 3: price_source per item
@@ -211,10 +228,23 @@ for item in cart:
         fail(f'{item.get("keyword", "?")} has invalid price_source: {repr(ps)}')
 check(all_valid, 'all price_sources are valid')
 
-# All seeded items should resolve from local cache (no API calls needed)
-cache_items = [i for i in cart if i.get('price_source') == 'cache']
-check(len(cache_items) >= 4, 'at least 4 items resolved from cache',
-     '>=4', len(cache_items))
+# All seeded resolvable items should trace to selected local-store sources.
+local_store_sources = {'cache', 'api', 'kroger_cache', 'kroger_api'}
+local_items = [
+    i for i in cart
+    if i.get('confirmed_local_store') and i.get('price_source') in local_store_sources
+]
+check(len(local_items) >= 4,
+    'at least 4 items are confirmed local-store resolutions',
+    '>=4', len(local_items))
+
+# Estimated items must never masquerade as confirmed local-store products.
+estimated_items = [i for i in cart if i.get('price_source') == 'estimated']
+estimated_masking = [i.get('keyword', '?') for i in estimated_items if i.get('confirmed_local_store')]
+check(len(estimated_masking) == 0,
+    'estimated items are not marked confirmed_local_store',
+    '0 masking items',
+    len(estimated_masking))
 
 # ===========================================================================
 # SECTION 4: BrandPreference — cheerios locked to name brand
@@ -229,8 +259,12 @@ if cheerios_items:
          'Honey Nut Cheerios', label)
     check('Great Value' not in label, f'cheerios is NOT the store brand (got: {label})',
          'not Great Value', label)
-    check(ci.get('price_source') == 'cache',
-          'cheerios price_source is cache')
+    check(ci.get('confirmed_local_store') is True,
+          'cheerios is confirmed local-store item',
+          True, ci.get('confirmed_local_store'))
+    check(ci.get('price_source') in local_store_sources,
+          'cheerios price_source is local-store backed',
+          local_store_sources, ci.get('price_source'))
 
 # ===========================================================================
 # SECTION 5: Pantry deduction — flour skipped
@@ -326,6 +360,15 @@ check(b2.get('budget_remaining', 0) < 0,
 # ===========================================================================
 # SUMMARY
 # ===========================================================================
-print('\n' + '=' * 60)
-print('{} passed, {} failed'.format(passed, failed))
-sys.exit(1 if failed > 0 else 0)
+def _main():
+    print('\n' + '=' * 60)
+    print('{} passed, {} failed'.format(passed, failed))
+    sys.exit(1 if failed > 0 else 0)
+
+
+def test_smoke_script_checks() -> None:
+    assert failed == 0, f"smoke script checks failed: {failed}"
+
+
+if __name__ == '__main__':
+    _main()

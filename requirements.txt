@@ -1,10 +1,17 @@
+openpyxl>=3.1.5
 Flask==3.0.0
+Flask-Migrate==4.1.0
+Flask-SQLAlchemy==3.0.5
 SQLAlchemy==2.0.0
+alembic==1.19.1
 python-dotenv==1.0.0
 plaid-python==27.0.0
 recipe-scrapers==15.11.0
 groq>=1.6.0
 requests==2.34.2
+pydantic==2.8.0
 curl-cffi==0.15.0
+cryptography==45.0.6
+psycopg2-binary==2.9.12
 # product_scraper.py retired in favor of the Rung 2-stage engine,
 # which sources prices exclusively from the StorePriceCache table.

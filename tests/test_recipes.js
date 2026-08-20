@@ -288,7 +288,7 @@ setupFakeDom({ 'recipeListContainer': rlc2, 'recipeSelectedCount': rsc2 });
 mockRoute('GET', '/api/recipes', 500, { error: 'database unavailable' });
 global.api_ = (m, p) => mockFetch(m, p, undefined);
 await SUT.refreshRecipes();
-assertEq(rlc2.innerHTML, '<div class="empty">No recipes available.</div>', 'empty state on error');
+assertEq(rlc2.innerHTML, '<div class="empty">No recipes yet.</div>', 'empty state on error');
 
 // ============================================================================
 console.log('\n7. refreshRecipes empty: GET returns [], empty state shown');
@@ -300,7 +300,7 @@ setupFakeDom({ 'recipeListContainer': rlc3, 'recipeSelectedCount': rsc3 });
 mockRoute('GET', '/api/recipes', 200, []);
 global.api_ = (m, p) => mockFetch(m, p, undefined);
 await SUT.refreshRecipes();
-assertEq(rlc3.innerHTML, '<div class="empty">No recipes available.</div>', 'empty state when GET returns []');
+assertEq(rlc3.innerHTML, '<div class="empty">No recipes yet.</div>', 'empty state when GET returns []');
 
 // ============================================================================
 console.log('\n8. Add Recipe (manual): POST sends correct body, success resets form');
@@ -532,12 +532,11 @@ SUT.setupRecipesInit({
 await fakeDom.get('importRecipeForm').eventListeners.submit[0]({ preventDefault: () => {} });
 assertEq(fakeDom.get('importRecipeStatus').textContent.startsWith('\u2717 '), true, 'status prefix is \u2717 on HTTP 500');
 assertEq(fakeDom.get('importRecipeStatus').style.color, 'crimson', 'status color crimson on HTTP 500');
-assertEq(fakeDom.get('importRecipeStatus').textContent.includes('Could not scrape that URL.'), true, 'status includes upstream error message');
+assertEq(fakeDom.get('importRecipeStatus').textContent.includes('We could not import that recipe right now.'), true, 'status includes safe user-facing error message');
 assertEq(fakeDom.get('importRecipeBtn').disabled, false, 'button re-enabled on HTTP 500 (finally-block runs)');
 assertEq(capturedToast13.length, 1, 'flash called exactly once on HTTP 500');
 assertEq(capturedToast13[0].kind, 'error', 'flash kind is error on HTTP 500');
-assertEq(capturedToast13[0].msg.includes('Import failed:'), true, 'flash message prefixed with "Import failed:"');
-assertEq(capturedToast13[0].msg.includes('Could not scrape that URL.'), true, 'flash message contains upstream error');
+assertEq(capturedToast13[0].msg, 'We could not import that recipe right now.', 'flash message uses safe generic import error');
 assertEq(refreshFnCalledOn13.value, false, 'refreshRecipes NOT called on HTTP 500 (handler bailed on resp.ok=false)');
 
 // ============================================================================

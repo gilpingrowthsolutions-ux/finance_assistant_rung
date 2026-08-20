@@ -24,7 +24,7 @@
  * Public API (callable as globals from the main inline script):
  *   - refreshGrocery              Renders the grocery list + meta + total.
  *   - getSelectedRecipeIds        Reads checked recipe IDs from the DOM.
- *   - setupGroceryInit(deps)      Wires the Generate button + per-item Delete.
+ *   - setupGroceryInit(deps)      Authoritative production Grocery controller.
  *
  * Dependencies (resolved at call-time, not load-time):
  *   - `escapeHtml`  from the main inline script.
@@ -113,6 +113,56 @@ function escapeHtml_(s) {
 }
 
 /**
+ * Build UI labels/colors for cart source display so non-confirmed items are
+ * clearly distinguishable from confirmed local-store products.
+ *
+ * @param {object} item
+ * @param {string} selectedStoreName
+ * @returns {{badgeHtml: string, detailHtml: string, isConfirmedLocal: boolean}}
+ */
+function getCartSourcePresentation(item, selectedStoreName) {
+  item = item || {};
+  var ps = String(item.price_source || 'estimated').toLowerCase();
+  var selectedStore = selectedStoreName || 'selected store';
+  var actualStore = item.store_name ? escapeHtml_(item.store_name) : '';
+  var confirmed = item.confirmed_local_store === true;
+
+  if (confirmed) {
+    var live = (ps === 'api' || ps === 'kroger_api');
+    var confirmedLabel = live ? 'Store-Checked (Live)' : 'Store-Checked (Saved)';
+    var confirmedDetail = actualStore
+      ? 'Checked at ' + actualStore
+      : 'Checked at selected store';
+    return {
+      isConfirmedLocal: true,
+      badgeHtml: '<span class="badge" style="background:var(--accent-soft);color:var(--accent);border-color:rgba(45,191,110,.3);">' + confirmedLabel + '</span>',
+      detailHtml: '<div class="li-meta" style="color:var(--accent);">' + confirmedDetail + '</div>',
+    };
+  }
+
+  var badgeLabel = 'Needs Review';
+  var badgeStyle = 'background:rgba(107,114,128,.12);color:var(--text-mute);border-color:rgba(107,114,128,.30);';
+  if (ps === 'rapid_api') {
+    badgeLabel = 'Other Source';
+    badgeStyle = 'background:rgba(59,130,246,.12);color:#3b82f6;border-color:rgba(59,130,246,.25);';
+  } else if (ps === 'rapid_cache' || ps === 'store_cache_fallback') {
+    badgeLabel = 'Other Source (Saved)';
+    badgeStyle = 'background:rgba(59,130,246,.10);color:#2563eb;border-color:rgba(59,130,246,.22);';
+  } else if (ps === 'estimated') {
+    badgeLabel = 'Estimate';
+    badgeStyle = 'background:rgba(245,158,11,.10);color:var(--warn);border-color:rgba(245,158,11,.25);';
+  }
+
+  var sourceLine = actualStore ? ('Store found: ' + actualStore) : ('Store not available');
+  var detail = sourceLine + ' • Not yet confirmed at ' + escapeHtml_(selectedStore);
+  return {
+    isConfirmedLocal: false,
+    badgeHtml: '<span class="badge" style="' + badgeStyle + '">' + badgeLabel + '</span>',
+    detailHtml: '<div class="li-meta" style="color:var(--warn);">' + detail + '</div>',
+  };
+}
+
+/**
 
 /**
  * Fetch /api/grocery and render the list. Renders per-item rows with
@@ -132,27 +182,40 @@ async function refreshGrocery() {
   if (metaEl) metaEl.textContent = '';
   const resp = await fetchGrocery_('GET', '/api/grocery', undefined);
   if (!resp.ok) {
-    list.innerHTML = '<div class="empty">Could not load grocery list.</div>';
+    list.innerHTML = '<div class="empty">We could not load your grocery list right now.</div>';
     return;
   }
   const data = resp.data || {};
   const items = data.items || [];
   if (items.length === 0) {
-    list.innerHTML = '<div class="empty">No active grocery list yet — generate one to begin.</div>';
+    list.innerHTML = '<div class="empty">No grocery list yet. Build one to get started.</div>';
     return;
   }
   if (data.applied_tax_pct != null && metaEl) {
-    metaEl.textContent = 'Tax rate applied: ' + data.applied_tax_pct + '%';
+    metaEl.textContent = 'Tax used: ' + data.applied_tax_pct + '%';
   }
   items.forEach(g => {
     const row = document.createElement('div');
     row.className = 'list-item';
+
+    const productName = g.product_label || g.item_name || 'Item';
+    const price = Number(g.estimated_price ?? g.unit_price ?? 0) || 0;
+    const priceSource = String(g.price_source || 'estimated').toLowerCase();
+    const isConfirmed = g.confirmed_local_store === true || ['kroger_api', 'kroger_cache', 'store_cache_fallback'].includes(priceSource);
+    const quantityLabel = Number(g.quantity || 1);
+    const displayStore = g.store_name || 'Store unavailable';
+    const packageSize = g.package_size || (isConfirmed ? '' : 'Needs review / estimated');
+    const sourceText = priceSource === 'estimated' || !priceSource
+      ? 'Needs review / estimated'
+      : priceSource.replace(/_/g, ' ');
+
     row.innerHTML = `
-      <div class="li-title">${Number(g.quantity || 1)}× <strong>${escapeHtml_(g.item_name)}</strong></div>
-      <div class="li-amount">$${(Number(g.estimated_price) || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</div>
-      <div class="li-meta">${escapeHtml_(g.store_name || '')}</div>
-      <div class="li-meta">${escapeHtml_(g.location_context || '')}</div>
-      <button class="btn is-danger" type="button" data-id="${g.id}">Delete</button>
+      <div class="li-title">${quantityLabel}× <strong>${escapeHtml_(productName)}</strong></div>
+      <div class="li-amount">$${price.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</div>
+      <div class="li-meta">${escapeHtml_(displayStore)}</div>
+      <div class="li-meta">${escapeHtml_(packageSize || g.location_context || '')}</div>
+      <div class="li-meta" style="color:${isConfirmed ? 'var(--accent)' : 'var(--warn)'};">${escapeHtml_(sourceText)}</div>
+      <button class="btn is-danger" type="button" data-id="${g.id}">Remove</button>
     `;
     list.appendChild(row);
   });
@@ -164,7 +227,7 @@ async function refreshGrocery() {
     });
   });
   if (data.estimated_total_with_tax != null && totalEl) {
-    totalEl.textContent = 'Total (tax incl.): $' + Number(data.estimated_total_with_tax).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    totalEl.textContent = 'Total (with tax): $' + Number(data.estimated_total_with_tax).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
   } else if (data.estimated_subtotal != null && totalEl) {
     totalEl.textContent = 'Subtotal: $' + Number(data.estimated_subtotal).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
   }
@@ -209,21 +272,21 @@ async function refreshActiveRecipesExpander() {
   }
 
   if (cappedIds.length === 0) {
-    grid.innerHTML = '<div class="empty">No recipes selected for this pay period yet. Go to the Recipes tab to pick your meals!</div>';
+    grid.innerHTML = '<div class="empty">No recipes selected for this pay period yet. Go to Recipes to pick meals.</div>';
     return;
   }
 
   // Fetch recipe details including ingredients
   var resp = await fetchGrocery_('POST', '/api/recipes/generate', { recipe_ids: cappedIds });
   if (!resp.ok) {
-    grid.innerHTML = '<div class="empty">Could not load selected recipes.</div>';
+    grid.innerHTML = '<div class="empty">We could not load selected recipes right now.</div>';
     return;
   }
   var data = resp.data || {};
   var recipes = data.recipes || [];
 
   if (recipes.length === 0) {
-    grid.innerHTML = '<div class="empty">No recipes matched the selected IDs.</div>';
+    grid.innerHTML = '<div class="empty">No recipes matched the selected items.</div>';
     return;
   }
 
@@ -233,7 +296,11 @@ async function refreshActiveRecipesExpander() {
     card.className = 'recipe-mini-card';
     var ings = (r.ingredients || []);
     var ingHtml = ings.map(function (i) {
-      return '<li>' + (i.quantity || 1) + ' ' + escapeHtml_(i.unit || 'oz') + ' \u2014 <strong>' + escapeHtml_(i.product_name || '') + '</strong></li>';
+      if (i.display_text) return '<li><strong>' + escapeHtml_(i.display_text) + '</strong></li>';
+      var requirement = i.quantity != null
+        ? escapeHtml_(String(i.quantity)) + (i.unit ? ' ' + escapeHtml_(i.unit) : '') + ' \u2014 '
+        : '';
+      return '<li>' + requirement + '<strong>' + escapeHtml_(i.product_name || '') + '</strong></li>';
     }).join('');
     card.innerHTML =
       '<div class="rmc-title">' + escapeHtml_(r.title || 'Recipe') + '</div>' +
@@ -250,48 +317,85 @@ async function refreshActiveRecipesExpander() {
 }
 
 /**
- * Wire the Generate-from-selected-recipes button. Call this once
- * from the inline body's init() AFTER the DOM is ready.
+ * Initialize the production Grocery UI once, after the DOM is ready.
+ * This is the sole owner of Grocery action listeners; the injected helpers
+ * retain the existing cart rendering and backend contracts.
  *
  * @param {object} deps
- * @param {Function} deps.flash            toast notification (msg, kind)
- * @param {Function} deps.refreshGrocery   grocery-list refresh (defaults to module's refreshGrocery)
+ * @param {Function} deps.buildCart authoritative cart build/render helper
+ * @param {Function} deps.searchProductPrice quick product search helper
+ * @param {Function} deps.restoreGroceryRetailerSelection retailer restore helper
+ * @param {Function} deps.persistGroceryRetailerSelection retailer persistence helper
+ * @param {Function} deps.initFinishedShoppingFlow Finished Shopping initializer
  */
-function setupGroceryInit(deps) {
+async function setupGroceryInit(deps) {
   deps = deps || {};
+  const groceryRoot = document.getElementById('grocery');
+  if (groceryRoot && groceryRoot.__rungGroceryInitialized) return;
+  if (groceryRoot) groceryRoot.__rungGroceryInitialized = true;
+
   // Bind module-scoped placeholder used by the click handlers above.
   // Inline-script globals fall through when deps don't provide them;
   // typeof guards keep the read safe in Node tests where `flash` is
   // undeclared (would otherwise throw ReferenceError).
   flash_ = (deps && typeof deps.flash === 'function') ? deps.flash
          : (typeof flash === 'function' ? flash : null);
-  const refreshFn = deps.refreshGrocery || refreshGrocery;
-  const flashFn   = deps.flash || flash;
+  api_ = (deps && typeof deps.api === 'function') ? deps.api : api_;
 
-  const btn = document.getElementById('generateGroceryBtn');
-  if (!btn) return;
-  btn.addEventListener('click', async () => {
-    const ids = getSelectedRecipeIds();
-    if (ids.length === 0) {
-      if (flashFn) flashFn('Select at least one recipe in the Recipes tab first', 'error');
-      return;
-    }
-    const resp = // Phase 5: 'Generate Recipes' button -> /api/grocery/generate-pay-period-plan
-    await fetchGrocery_('POST', '/api/grocery/generate-pay-period-plan', {
-      recipe_ids: ids,
-      store_name: (document.getElementById('storeSel') || {}).value,
-      budget_limit: parseFloat((document.getElementById('budgetInput') || {}).value) || null,
+  const buildCartFn = deps.buildCart;
+  const rebalanceCartFn = deps.rebalanceCart;
+  const searchProductPriceFn = deps.searchProductPrice;
+  const persistRetailerFn = deps.persistGroceryRetailerSelection;
+  const restoreRetailerFn = deps.restoreGroceryRetailerSelection;
+  const initFinishedShoppingFn = deps.initFinishedShoppingFlow;
+
+  if (typeof buildCartFn !== 'function') {
+    if (groceryRoot) groceryRoot.__rungGroceryInitialized = false;
+    throw new Error('setupGroceryInit requires buildCart');
+  }
+
+  try {
+    // Restore the saved retailer before any cart action can run so the first
+    // browser request uses the same retailer context shown in the selector.
+    if (typeof restoreRetailerFn === 'function') await restoreRetailerFn();
+
+    const generateBtn = document.getElementById('generateRecipesBtn');
+    if (generateBtn) generateBtn.addEventListener('click', function () {
+      buildCartFn(false);
     });
-    if (!resp.ok) {
-      const errMsg = (resp.data && (resp.data.error || resp.data.message)) || ('Generation failed (' + resp.status + ')');
-      if (flashFn) flashFn(errMsg, 'error');
-      return;
+
+    const rebalanceBtn = document.getElementById('buildCartBtn');
+    if (rebalanceBtn) rebalanceBtn.addEventListener('click', function () {
+      if (typeof rebalanceCartFn === 'function') return rebalanceCartFn();
+      return buildCartFn(false);
+    });
+
+    const storeSelect = document.getElementById('storeSel');
+    if (storeSelect) storeSelect.addEventListener('change', async function () {
+      if (typeof persistRetailerFn === 'function') {
+        await persistRetailerFn(storeSelect.value);
+      }
+      await buildCartFn();
+    });
+
+    const rapidBtn = document.getElementById('rapidSearchBtn');
+    const rapidInput = document.getElementById('rapidSearchInput');
+    if (rapidBtn && typeof searchProductPriceFn === 'function') {
+      rapidBtn.addEventListener('click', searchProductPriceFn);
     }
-    const data = resp.data || {};
-    const tax = data.applied_tax_pct != null ? ' · Tax: ' + data.applied_tax_pct + '%' : '';
-    if (flashFn) flashFn('Generated ' + ((data && data.recipes && data.recipes.length) || 0) + ' recipes for the pay period', 'success');
-    await refreshFn();
-  });
+    if (rapidInput && typeof searchProductPriceFn === 'function') {
+      rapidInput.addEventListener('keypress', function (event) {
+        if (event.key === 'Enter') searchProductPriceFn();
+      });
+    }
+
+    if (typeof initFinishedShoppingFn === 'function') {
+      await initFinishedShoppingFn();
+    }
+  } catch (error) {
+    if (groceryRoot) groceryRoot.__rungGroceryInitialized = false;
+    throw error;
+  }
 }
 
 // ----------------------------------------------------------------------------
@@ -317,6 +421,7 @@ if (typeof module !== 'undefined' && module.exports) {
     getSelectedRecipeIds,
     setupGroceryInit,
     refreshActiveRecipesExpander,
+    getCartSourcePresentation,
     _setMockFetch:   (fn) => { _groceryMockFetch = fn; },
     _resetMockFetch: () => { _groceryMockFetch = null; },
   };

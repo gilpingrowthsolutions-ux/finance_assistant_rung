@@ -86,7 +86,7 @@ async function refreshRecipes() {
   if (counter) counter.textContent = '0';
   const countLabel = document.getElementById('recipeCountLabel');
   if (!ok || !Array.isArray(data) || data.length === 0) {
-    list.innerHTML = '<div class="empty">No recipes available.</div>';
+    list.innerHTML = '<div class="empty">No recipes yet.</div>';
     if (countLabel) countLabel.textContent = '0 recipes';
     return;
   }
@@ -99,7 +99,13 @@ async function refreshRecipes() {
       var swapsRow = (i.swap_options && i.swap_options.length)
         ? '<div style="color:var(--text-mute); font-size:.78rem; margin-top:2px;">Swaps: ' + escapeHtml_(i.swap_options.join(', ')) + '</div>'
         : '';
-      return '<div style="margin-top:4px;">• ' + (i.quantity || 1) + ' ' + escapeHtml_(i.unit || 'item') + ' — <strong>' + escapeHtml_(i.product_name) + '</strong>' + swapsRow + '</div>';
+      if (i.display_text) {
+        return '<div style="margin-top:4px;">• <strong>' + escapeHtml_(i.display_text) + '</strong>' + swapsRow + '</div>';
+      }
+      var requirement = i.quantity != null
+        ? escapeHtml_(String(i.quantity)) + (i.unit ? ' ' + escapeHtml_(i.unit) : '') + ' — '
+        : '';
+      return '<div style="margin-top:4px;">• ' + requirement + '<strong>' + escapeHtml_(i.product_name) + '</strong>' + swapsRow + '</div>';
     };
     var allIngs = r.ingredients || [];
     var INGREDIENT_PREVIEW = 5;
@@ -242,7 +248,7 @@ async function refreshRecipes() {
     const delBtn = card.querySelector('[data-delete-id]');
     if (delBtn) {
       delBtn.addEventListener('click', async () => {
-        if (!confirm('Delete "' + (r.title || 'this recipe') + '"?')) return;
+        if (!confirm('Remove "' + (r.title || 'this recipe') + '" from your recipes?')) return;
         try {
           let resp;
           if (typeof api_ === 'function') {
@@ -252,14 +258,13 @@ async function refreshRecipes() {
             resp = { ok: r2.ok, data: await r2.json().catch(function () { return {}; }) };
           }
           if (resp && resp.ok) {
-            if (typeof flash_ === 'function') flash_('Recipe deleted', 'success');
+            if (typeof flash_ === 'function') flash_('Recipe removed', 'success');
             await refreshRecipes();
           } else {
-            const errMsg = (resp && resp.data && (resp.data.error || resp.data.message)) || 'Failed to delete';
-            if (typeof flash_ === 'function') flash_(errMsg, 'error');
+            if (typeof flash_ === 'function') flash_('Could not remove this recipe right now.', 'error');
           }
         } catch (_err) {
-          if (typeof flash_ === 'function') flash_('Delete failed: network error', 'error');
+          if (typeof flash_ === 'function') flash_('Network issue while removing recipe.', 'error');
         }
       });
     }
@@ -345,9 +350,9 @@ function setupRecipesInit(deps) {
       const title = document.getElementById('rTitle').value.trim();
       const servings = parseInt(document.getElementById('rServings').value, 10) || 4;
       const lines = document.getElementById('rIngredients').value.split('\n').map(l => l.trim()).filter(Boolean);
-      if (!title) { if (flash) flash('Title required', 'error'); return; }
+      if (!title) { if (flash) flash('Add a recipe title first.', 'error'); return; }
       const { ok, data } = await api('POST', '/api/recipes', { title, servings, ingredients: lines });
-      if (!ok) { if (flash) flash(data.error || 'Failed to add recipe', 'error'); return; }
+      if (!ok) { if (flash) flash('Could not add this recipe right now.', 'error'); return; }
       document.getElementById('rTitle').value = '';
       document.getElementById('rIngredients').value = '';
       if (flash) flash('Recipe added', 'success');
@@ -386,7 +391,7 @@ function setupRecipesInit(deps) {
       // `data.recipe.title` directly off the wrapper, which threw
       // `TypeError: Cannot read property 'title' of undefined`).
       if (!resp.ok) {
-        const errMsg = (resp.data && (resp.data.error || resp.data.message)) || ('Request failed (' + resp.status + ')');
+        const errMsg = 'We could not import that recipe right now.';
         throw new Error(errMsg);
       }
       const data = resp && resp.data ? resp.data : {};
@@ -411,7 +416,7 @@ function setupRecipesInit(deps) {
       const msg = (err && err.message) ? err.message : (typeof err === 'string' ? err : 'Import failed.');
       status.textContent = '✗ ' + msg;
       status.style.color = 'crimson';
-      if (flash) flash('Import failed: ' + msg, 'error');
+      if (flash) flash(msg, 'error');
     } finally {
       btn.disabled = false;
       btn.textContent = originalLabel;
@@ -488,9 +493,8 @@ function setupRecipesSearch(deps) {
     }
 
     if (!resp || !resp.ok) {
-      var errMsg = (resp && resp.data && resp.data.error) ? resp.data.error : 'Search failed.';
-      list.innerHTML = '<div class="empty" style="color:var(--danger);border-color:rgba(244,63,94,.3);">' + esc(errMsg) + '</div>';
-      if (flash) flash(errMsg, 'error');
+      list.innerHTML = '<div class="empty" style="color:var(--danger);border-color:rgba(244,63,94,.3);">We could not run that search right now.</div>';
+      if (flash) flash('Could not search recipes right now.', 'error');
       return;
     }
 

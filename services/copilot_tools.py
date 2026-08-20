@@ -23,8 +23,19 @@ import json
 import logging
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
+from services.household_context import household_id as current_household_id
+from services.financial_state import apply_balance_delta, get_household_account
+from services.selected_store import get_selected_store
 
 LOGGER = logging.getLogger("copilot_tools")
+
+
+def _touch_recipe_usage(recipe: Any) -> None:
+    """Implicit learning hook for tool-driven recipe selections."""
+    if recipe is None:
+        return
+    recipe.usage_frequency = int(getattr(recipe, "usage_frequency", 0) or 0) + 1
+    recipe.last_selected_date = datetime.utcnow()
 
 # ============================================================================
 # 1 — ADD RECURRING BILL
@@ -219,13 +230,15 @@ APP_TOOLS: List[Dict[str, Any]] = [
 def _execute_add_recurring_bill(**kwargs) -> Dict[str, Any]:
     """Insert a row into the ``Bill`` table."""
     # Defer module-level imports to avoid circular dependency at load time.
-    from app import app, db, Bill, Account
+    from flask import current_app
+    from extensions import db
+    from models import Bill, Account
 
     name = (kwargs.get("name") or "").strip()
     amount = float(kwargs.get("amount", 0))
     if not name or amount <= 0:
         return {"status": "error", "message": "Name and positive amount required."}
-    with app.app_context():
+    with current_app.app_context():
         due_date_str = kwargs.get("due_date", "")
         if due_date_str:
             try:
@@ -234,7 +247,7 @@ def _execute_add_recurring_bill(**kwargs) -> Dict[str, Any]:
                 due_date = datetime.utcnow() + timedelta(days=14)
         else:
             due_date = datetime.utcnow() + timedelta(days=14)
-        b = Bill(name=name.title(), amount=amount, due_date=due_date)
+        b = Bill(household_id=current_household_id(), name=name.title(), amount=amount, due_date=due_date)
         db.session.add(b)
         db.session.commit()
         LOGGER.info("Tool add_recurring_bill: %s $%.2f", name, amount)
@@ -246,15 +259,19 @@ def _execute_add_recurring_bill(**kwargs) -> Dict[str, Any]:
 
 def _execute_add_grocery_item(**kwargs) -> Dict[str, Any]:
     """Add a row to the ``GroceryItem`` table."""
-    from app import app, db, GroceryItem, Account
+    from flask import current_app
+    from extensions import db
+    from models import GroceryItem, Account
 
     item_name = (kwargs.get("item_name") or "").strip()
     if not item_name:
         return {"status": "error", "message": "Item name required."}
-    with app.app_context():
-        account = Account.query.first()
-        store = account.kroger_store_name if account else "Local Store"
-        gi = GroceryItem(item_name=item_name.title(), estimated_price=3.50, store_name=store)
+    with current_app.app_context():
+        hid = current_household_id()
+        account = get_household_account(hid)
+        selected = get_selected_store(hid, account=account)
+        store = selected.get("name") or "Local Store"
+        gi = GroceryItem(household_id=hid, item_name=item_name.title(), estimated_price=0.0, store_name=store)
         db.session.add(gi)
         db.session.commit()
         LOGGER.info("Tool add_grocery_item: %s", item_name)
@@ -263,14 +280,17 @@ def _execute_add_grocery_item(**kwargs) -> Dict[str, Any]:
 
 def _execute_select_active_recipe(**kwargs) -> Dict[str, Any]:
     """Add or remove a recipe from the ``MealPlanItem`` (meal plan) table."""
-    from app import app, db, Recipe, MealPlanItem, _match_recipe_by_title
+    from flask import current_app
+    from extensions import db
+    from models import Recipe, MealPlanItem
+    from app import _match_recipe_by_title
 
     raw = (kwargs.get("recipe_id_or_title") or "").strip()
     action = (kwargs.get("action") or "add").lower()
     if not raw:
         return {"status": "error", "message": "recipe_id_or_title required."}
 
-    with app.app_context():
+    with current_app.app_context():
         # Try integer ID first, then fuzzy title match
         recipe = None
         try:
@@ -290,7 +310,7 @@ def _execute_select_active_recipe(**kwargs) -> Dict[str, Any]:
             }
 
         if action == "remove":
-            deleted = MealPlanItem.query.filter_by(recipe_id=recipe.id).delete()
+            deleted = MealPlanItem.query.filter_by(household_id=current_household_id(), recipe_id=recipe.id).delete()
             db.session.commit()
             LOGGER.info("Tool select_active_recipe (remove): %s", recipe.title)
             return {
@@ -304,12 +324,13 @@ def _execute_select_active_recipe(**kwargs) -> Dict[str, Any]:
             }
 
         # Add
-        existing = MealPlanItem.query.filter_by(recipe_id=recipe.id).first()
+        existing = MealPlanItem.query.filter_by(household_id=current_household_id(), recipe_id=recipe.id).first()
         if existing:
             return {"status": "ok", "data": {"id": recipe.id, "title": recipe.title, "action": "already_in_plan"}}
-        if MealPlanItem.query.count() >= 14:
+        if MealPlanItem.query.filter_by(household_id=current_household_id()).count() >= 14:
             return {"status": "error", "message": "Meal plan is full (max 14 recipes). Remove one first."}
-        db.session.add(MealPlanItem(recipe_id=recipe.id, source="copilot"))
+        db.session.add(MealPlanItem(household_id=current_household_id(), recipe_id=recipe.id, source="copilot"))
+        _touch_recipe_usage(recipe)
         db.session.commit()
         LOGGER.info("Tool select_active_recipe (add): %s", recipe.title)
         return {"status": "ok", "data": {"id": recipe.id, "title": recipe.title, "action": "added"}}
@@ -317,18 +338,36 @@ def _execute_select_active_recipe(**kwargs) -> Dict[str, Any]:
 
 def _execute_log_discretionary_expense(**kwargs) -> Dict[str, Any]:
     """Log a discretionary expense and deduct from checking balance."""
-    from app import app, db, ExpenseTransaction, Account
+    from flask import current_app
+    from extensions import db
+    from models import ExpenseTransaction, Account
 
     item_name = (kwargs.get("item_name") or "").strip()
     amount = float(kwargs.get("amount", 0))
     if not item_name or amount <= 0:
         return {"status": "error", "message": "Item name and positive amount required."}
-    with app.app_context():
-        account = Account.query.first()
-        t = ExpenseTransaction(description=item_name, amount=amount, category="discretionary")
-        db.session.add(t)
+    with current_app.app_context():
+        hid = current_household_id()
+        account = get_household_account(hid)
         if account:
-            account.checking_balance -= amount
+            t = ExpenseTransaction(
+                household_id=hid,
+                description=item_name,
+                amount=amount,
+                category="discretionary",
+                source="manual",
+                local_account_id=account.id,
+            )
+            apply_balance_delta(hid, -amount)
+        else:
+            t = ExpenseTransaction(
+                household_id=hid,
+                description=item_name,
+                amount=amount,
+                category="discretionary",
+                source="manual",
+            )
+        db.session.add(t)
         db.session.commit()
         LOGGER.info("Tool log_discretionary_expense: %s $%.2f", item_name, amount)
         return {
@@ -356,17 +395,18 @@ def _execute_get_financial_overview(**kwargs) -> Dict[str, Any]:
     active meal plan, and the grocery cart so the LLM can answer questions
     with real numbers instead of guessing.
     """
-    from app import (
-        app, db, Account, Bill, ExpenseTransaction, MealPlanItem, Recipe,
-        GroceryItem, compute_liquidity_metrics,
-    )
+    from flask import current_app
+    from extensions import db
+    from models import Account, Bill, ExpenseTransaction, MealPlanItem, Recipe, GroceryItem
+    from app import _canonical_financial_metrics
 
-    with app.app_context():
-        account = Account.query.first()
+    with current_app.app_context():
+        hid = current_household_id()
+        account = Account.query.filter_by(household_id=hid).first()
         if not account:
             return {"status": "error", "message": "No account is set up yet."}
 
-        metrics = compute_liquidity_metrics(account)
+        metrics = _canonical_financial_metrics(account, owner_scope=f"household:{hid}")
 
         bills = [
             {
@@ -375,7 +415,7 @@ def _execute_get_financial_overview(**kwargs) -> Dict[str, Any]:
                 "due_date": b.due_date.strftime("%Y-%m-%d") if b.due_date else "",
                 "is_paid": b.is_paid,
             }
-            for b in Bill.query.order_by(Bill.due_date.asc()).limit(12)
+            for b in Bill.query.filter_by(household_id=hid).order_by(Bill.due_date.asc()).limit(12)
         ]
 
         recent_txns = [
@@ -385,10 +425,10 @@ def _execute_get_financial_overview(**kwargs) -> Dict[str, Any]:
                 "category": t.category,
                 "date": t.date.strftime("%Y-%m-%d") if t.date else "",
             }
-            for t in ExpenseTransaction.query.order_by(ExpenseTransaction.date.desc()).limit(8)
+            for t in ExpenseTransaction.query.filter_by(household_id=hid).order_by(ExpenseTransaction.date.desc()).limit(8)
         ]
 
-        plan_ids = [m.recipe_id for m in MealPlanItem.query.all()]
+        plan_ids = [m.recipe_id for m in MealPlanItem.query.filter_by(household_id=hid).all()]
         meal_plan = []
         if plan_ids:
             meal_plan = [
@@ -407,7 +447,7 @@ def _execute_get_financial_overview(**kwargs) -> Dict[str, Any]:
                 "store_name": g.store_name,
                 "is_purchased": g.is_purchased,
             }
-            for g in GroceryItem.query.all()
+            for g in GroceryItem.query.filter_by(household_id=hid).all()
         ]
 
         LOGGER.info("Tool get_financial_overview served snapshot")
@@ -415,6 +455,7 @@ def _execute_get_financial_overview(**kwargs) -> Dict[str, Any]:
             "status": "ok",
             "data": {
                 "metrics": metrics,
+                "financial_state": metrics.get("safe_to_spend"),
                 "upcoming_bills": bills,
                 "recent_transactions": recent_txns,
                 "active_meal_plan": meal_plan,

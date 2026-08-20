@@ -42,6 +42,7 @@ from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 
 import requests
+from services.usage_meter import check_optional_operation, estimate_usage_cost, record_usage_event
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -159,7 +160,7 @@ def _parse_products(raw: Dict[str, Any]) -> List[Dict[str, Any]]:
 
 def _fetch_from_cache(app, keyword: str, store_name_hint: Optional[str] = None) -> Optional[Dict[str, Any]]:
     """Return the freshest cached product for *keyword*, or ``None``."""
-    from app import RapidPriceCache
+    from models import RapidPriceCache
 
     with app.app_context():
         threshold = datetime.utcnow() - timedelta(hours=CACHE_TTL_HOURS)
@@ -195,7 +196,8 @@ def _save_to_cache(app, keyword: str, product: Dict[str, Any]) -> None:
     Uses (ingredient_keyword, title) as the dedup key so re-runs
     update the price instead of creating duplicates.
     """
-    from app import RapidPriceCache, db
+    from extensions import db
+    from models import RapidPriceCache
 
     with app.app_context():
         kw = keyword.lower().strip()
@@ -238,7 +240,7 @@ def _fallback_to_local_cache(
     Returns the cheapest cached product for *keyword*, optionally preferring
     rows whose store name matches *store_name_hint*.
     """
-    from app import StorePriceCache
+    from models import StorePriceCache
 
     with app.app_context():
         kw = keyword.lower().strip()
@@ -258,6 +260,7 @@ def _fallback_to_local_cache(
                 "title": best.product_title,
                 "price": best.price,
                 "store_name": best.store_name,
+                "package_size": best.package_size or "",
                 "product_url": "",
                 "source": "store_cache_fallback",
             }
@@ -277,6 +280,7 @@ def _fallback_to_local_cache(
                     "title": best.product_title,
                     "price": best.price,
                     "store_name": best.store_name,
+                    "package_size": best.package_size or "",
                     "product_url": "",
                     "source": "store_cache_fallback",
                 }
@@ -380,15 +384,48 @@ def search_local_product(
     # --- Stage 1: RapidPriceCache ---
     cached = _fetch_from_cache(app, kw, store_name_hint=store_name)
     if cached:
+        record_usage_event(
+            category="retail_cache",
+            provider="walmart_serpapi",
+            operation="product_lookup",
+            success=True,
+            external_call=False,
+            request_count=1,
+            cache_status="hit",
+        )
         LOGGER.debug("RapidPriceCache hit for '%s'", kw)
         return cached
+    record_usage_event(
+        category="retail_cache",
+        provider="walmart_serpapi",
+        operation="product_lookup",
+        success=True,
+        external_call=False,
+        request_count=1,
+        cache_status="miss",
+    )
 
     # --- Stage 2: Live RapidAPI ---
+    gate = check_optional_operation(None, "retail_external_call")
+    if not gate.get("allowed", True):
+        record_usage_event(
+            category="retail_provider",
+            provider="walmart_serpapi",
+            operation="product_search_blocked",
+            success=False,
+            external_call=False,
+            request_count=1,
+            cost_status="unknown",
+            metadata={"code": gate.get("code")},
+        )
+        return _fallback_to_local_cache(app, kw, store_name_hint=store_name)
+
     api_key = _get_rapidapi_key()
     if api_key:
         try:
-            # Build the query string
-            q = f"{kw} {store_name}" if store_name else kw
+            # Build the query string; storage keys use underscores, API expects spaces.
+            search_kw = kw.replace("_", " ")
+            q = f"{search_kw} {store_name}" if store_name else search_kw
             params: Dict[str, Any] = {
                 "q": q,
                 "country": "us",
@@ -408,6 +445,24 @@ def search_local_product(
             resp.raise_for_status()
             raw = resp.json()
 
+            cost = estimate_usage_cost(
+                category="retail_provider",
+                provider="walmart_serpapi",
+                operation="product_search",
+                request_count=1,
+            )
+            record_usage_event(
+                category="retail_provider",
+                provider="walmart_serpapi",
+                operation="product_search",
+                success=True,
+                external_call=True,
+                request_count=1,
+                estimated_cost_micros=cost.get("estimated_cost_micros"),
+                cost_status=cost.get("cost_status"),
+                cost_rate_key=cost.get("cost_rate_key"),
+            )
+
             products = _parse_products(raw)
             if products:
                 # Pick the cheapest product as the top match
@@ -420,10 +475,40 @@ def search_local_product(
             LOGGER.info("RapidAPI returned 0 products for '%s'", kw)
 
         except requests.exceptions.Timeout:
+            record_usage_event(
+                category="retail_provider",
+                provider="walmart_serpapi",
+                operation="product_search",
+                success=False,
+                external_call=True,
+                request_count=1,
+                cost_status="unknown",
+                metadata={"error": "timeout"},
+            )
             LOGGER.warning("RapidAPI request timed out for '%s'", kw)
         except requests.exceptions.RequestException as exc:
+            record_usage_event(
+                category="retail_provider",
+                provider="walmart_serpapi",
+                operation="product_search",
+                success=False,
+                external_call=True,
+                request_count=1,
+                cost_status="unknown",
+                metadata={"error": type(exc).__name__},
+            )
             LOGGER.warning("RapidAPI request failed for '%s': %s", kw, exc)
         except Exception as exc:
+            record_usage_event(
+                category="retail_provider",
+                provider="walmart_serpapi",
+                operation="product_search",
+                success=False,
+                external_call=True,
+                request_count=1,
+                cost_status="unknown",
+                metadata={"error": type(exc).__name__},
+            )
             LOGGER.warning("RapidAPI parse error for '%s': %s", kw, exc)
 
     # --- Stage 3: StorePriceCache fallback ---

@@ -519,6 +519,37 @@ for inp, exp in edge_cases:
 
 
 # ===========================================================================
+# 12b. _derive_clean_keyword  —  conjunction/connector guard
+#      Keywords must never begin with "and_", "or_", "with_", or similar
+#      meaningless connector tokens.
+# ===========================================================================
+print('12b. _derive_clean_keyword \u2014 connector guard')
+
+_CONNECTOR_PREFIX = ('and_', 'or_', 'with_', 'plus_', 'for_', 'of_')
+
+def _assert_no_connector_prefix(kw, label):
+    """Fail if kw starts with a meaningless connector token."""
+    for pfx in _CONNECTOR_PREFIX:
+        assert_truthy(not kw.startswith(pfx),
+                      f'{label}: keyword {kw!r} must not start with {pfx!r}')
+
+connector_cases = [
+    # (input,                          expected_keyword)
+    ('salt and pepper to taste',       'pepper'),
+    ('1/2 stick unsalted butter',      'unsalted_butter'),
+    ('extra virgin olive oil',         'olive_oil'),
+    ('boneless skinless chicken breast', 'chicken_breast'),
+    ('truffle oil',                    'truffle_oil'),
+    ('salt',                           'salt'),
+    ('black pepper',                   'black_pepper'),
+]
+for inp, exp in connector_cases:
+    got = _derive_clean_keyword(inp)
+    assert_eq(got, exp, 'keyword_connector(' + repr(inp) + ')')
+    _assert_no_connector_prefix(got, 'keyword_connector(' + repr(inp) + ')')
+
+
+# ===========================================================================
 # 13. _scrape_with_curl_cffi  —  JSON-LD parser unit tests (mocked HTTP)
 # ===========================================================================
 print('13. _scrape_with_curl_cffi \u2014 basic JSON-LD Recipe extraction')
@@ -734,5 +765,14 @@ except ImportError:
 # ===========================================================================
 # SUMMARY
 # ===========================================================================
-print('\n{} passed, {} failed'.format(passed, failed))
-sys.exit(1 if failed > 0 else 0)
+def _main():
+    print('\n{} passed, {} failed'.format(passed, failed))
+    sys.exit(1 if failed > 0 else 0)
+
+
+def test_import_script_checks() -> None:
+    assert failed == 0, f"import script checks failed: {failed}"
+
+
+if __name__ == '__main__':
+    _main()

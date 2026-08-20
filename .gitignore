@@ -19,3 +19,19 @@ secrets.json
 .DS_Store
 .vscode/
 .idea/
+# Local runtime / test artifacts
+*.bak
+test-results/
+debug-report/
+debug-report*.zip
+
+# Private local credentials/backups
+instance/backups/private_credentials/
+
+# Historical Rung agent reports / prompts
+/CIRCULAR_IMPORT_FIX_REPORT.md
+/SQLALCHEMY_FIX_SUMMARY.md
+/docs/GATE2B_POSTGRESQL_CUTOVER_READINESS.md
+/docs/PACKAGE7_ACTIVE_RECIPE_CART_REPORT.md
+/docs/RUNG_BETA_RELEASE_MANIFEST.md
+/docs/RUNG_PIPELINE_AUDIT_PROMPT.md

@@ -1,4 +1,5 @@
-from src.models.purchase import db
+from app import db
+
 
 class VehicleLog(db.Model):
     id = db.Column(db.Integer, primary_key=True)

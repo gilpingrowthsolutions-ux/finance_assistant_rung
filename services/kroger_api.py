@@ -271,6 +271,9 @@ def find_nearest_kroger(
         f"{addr.get('addressLine1', '')}, "
         f"{addr.get('city', '')}, {addr.get('state', '')} {addr.get('zipCode', '')}"
     ).strip(", ")
+    addr_zip = str(addr.get("zipCode", "") or "").strip()
+    addr_state = str(addr.get("state", "") or "").strip().upper()
+    addr_city = str(addr.get("city", "") or "").strip()
 
     LOGGER.info(
         "Found nearest store: %s (ID: %s) — %s",
@@ -285,4 +288,8 @@ def find_nearest_kroger(
         "address": addr_str,
         "chain": chain,
         "chain_display": "Gerbes" if chain.upper() == "GERBES" else chain.title(),
+        "zip_code": addr_zip,
+        "state_code": addr_state,
+        "city": addr_city,
+        "city_state": ", ".join(part for part in [addr_city, addr_state] if part),
     }

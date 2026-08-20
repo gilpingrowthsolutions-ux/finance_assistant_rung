@@ -12,6 +12,9 @@
 
 'use strict';
 
+const fs = require('fs');
+const path = require('path');
+
 // ---- Mock fetch infrastructure ----
 const mockRoutes = [];
 function mockRoute(method, path, status, responseBody, expectedBody) {
@@ -202,7 +205,7 @@ setupFakeDom({ 'transactionList': txList3 });
 mockRoute('GET', '/api/transactions', 500, { error: 'db unavailable' });
 SUT._setMockFetch(mockFetch);
 await SUT.refreshTransactions();
-assertEq(txList3.innerHTML, '<div class="empty">Could not load transactions.</div>', 'error empty state');
+assertEq(txList3.innerHTML, '<div class="empty">We could not load your transactions right now.</div>', 'error empty state');
 
 console.log('\n4. refreshTransactions Delete button: clicking triggers DELETE + refresh');
 reset();
@@ -237,24 +240,30 @@ setupFakeDom({
   'transactionList': new FakeEl('transactionList'),
 });
 let capturedExpenseBody = null;
+let expenseMutationCalls5 = 0;
 mockRoute('POST', '/api/transactions', 200, { id: 100, description: 'Coffee' }, { description: 'Coffee', amount: 4.5, category: 'discretionary' });
 SUT._setMockFetch((m, p, b) => {
-  if (p === '/api/transactions' && m === 'POST') { capturedExpenseBody = b; return mockFetch(m, p, b); }
+  if (p === '/api/transactions' && m === 'POST') { expenseMutationCalls5++; capturedExpenseBody = b; return mockFetch(m, p, b); }
   return mockFetch(m, p, b);
 });
 let refreshTxCalled5 = 0;
+let refreshOverviewCalled5 = 0;
 const capturedFlash5 = [];
 SUT.setupTransactionsInit({
   flash: (msg, kind) => capturedFlash5.push({ msg, kind }),
   refreshTransactions: () => { refreshTxCalled5++; },
+  refreshOverview: () => { refreshOverviewCalled5++; },
 });
+assertEq(fakeDom.get('logExpenseForm').eventListeners.submit.length, 1, 'one Transaction submit handler registered');
 await fakeDom.get('logExpenseForm').eventListeners.submit[0]({ preventDefault: () => {} });
+assertEq(expenseMutationCalls5, 1, 'one Transaction submit produces one mutation call');
 assertEq(capturedExpenseBody && capturedExpenseBody.description, 'Coffee', 'POST body has correct description');
 assertEq(capturedExpenseBody && capturedExpenseBody.amount, 4.5, 'POST body has correct amount');
 assertEq(fakeDom.get('tDesc').value, '', 'description input cleared after post');
 assertEq(capturedFlash5.length, 1, 'flash called on success');
 assertEq(capturedFlash5[0].kind, 'success', 'flash kind success');
 assertEq(refreshTxCalled5, 1, 'refreshTransactions called after post');
+assertEq(refreshOverviewCalled5, 1, 'refreshOverview called after transaction post');
 
 console.log('\n6. logExpenseForm empty description: rejected before fetch, no flash for success');
 reset();
@@ -295,7 +304,7 @@ SUT._setMockFetch(mockFetch);
 await fakeDom.get('logExpenseForm').eventListeners.submit[0]({ preventDefault: () => {} });
 assertEq(capturedFlash7.length, 1, 'flash called on server error');
 assertEq(capturedFlash7[0].kind, 'error', 'flash kind error');
-assertEq(capturedFlash7[0].msg, 'invalid amount', 'flash shows server error message');
+assertEq(capturedFlash7[0].msg, 'We could not add this expense right now.', 'flash shows user-safe error message');
 assertEq(refreshTxCalled7, 0, 'refreshTransactions NOT called on error');
 
 console.log('\n8. refreshBills happy path: GET returns array, renders rows with badges');
@@ -312,7 +321,7 @@ assertEq(billsList8.children.length, 2, 'renders 2 bills');
 assertEq(billsList8.children[0].innerHTML.includes('Electric'), true, 'row 1 name correct');
 assertEq(billsList8.children[0].innerHTML.includes('Mark Paid'), true, 'row 1 shows Mark Paid (unpaid)');
 assertEq(billsList8.children[1].innerHTML.includes('Internet'), true, 'row 2 name correct');
-assertEq(billsList8.children[1].innerHTML.includes('Unmark'), true, 'row 2 shows Unmark (paid)');
+assertEq(billsList8.children[1].innerHTML.includes('Mark Unpaid'), true, 'row 2 shows Mark Unpaid (paid)');
 
 console.log('\n9. refreshBills toggle-paid button: triggers POST /bills/<id>/pay');
 reset();
@@ -359,23 +368,29 @@ setupFakeDom({
   'bDate':       (() => { const e = new FakeEl('bDate'); e.value = '2025-04-01'; return e; })(),
 });
 let capturedBillBody = null;
+let billMutationCalls11 = 0;
 mockRoute('POST', '/bills', 200, { id: 50, name: 'Rent' }, { name: 'Rent', amount: 1200, due_date: '2025-04-01' });
 SUT._setMockFetch((m, p, b) => {
-  if (p === '/bills' && m === 'POST') { capturedBillBody = b; return mockFetch(m, p, b); }
+  if (p === '/bills' && m === 'POST') { billMutationCalls11++; capturedBillBody = b; return mockFetch(m, p, b); }
   return mockFetch(m, p, b);
 });
 let refreshBillsCalled11 = 0;
+let refreshOverviewCalled11 = 0;
 const capturedFlash11 = [];
 SUT.setupBillsInit({
   flash: (msg, kind) => capturedFlash11.push({ msg, kind }),
   refreshBills: () => { refreshBillsCalled11++; },
+  refreshOverview: () => { refreshOverviewCalled11++; },
 });
+assertEq(fakeDom.get('addBillForm').eventListeners.submit.length, 1, 'one Bill submit handler registered');
 await fakeDom.get('addBillForm').eventListeners.submit[0]({ preventDefault: () => {} });
+assertEq(billMutationCalls11, 1, 'one Bill submit produces one mutation call');
 assertEq(capturedBillBody && capturedBillBody.name, 'Rent', 'POST body has correct name');
 assertEq(capturedBillBody && capturedBillBody.amount, 1200, 'POST body has correct amount');
 assertEq(fakeDom.get('bName').value, '', 'bName input cleared after add');
 assertEq(capturedFlash11.length, 1, 'flash called on bill add success');
 assertEq(refreshBillsCalled11, 1, 'refreshBills called after add');
+assertEq(refreshOverviewCalled11, 1, 'refreshOverview called after bill post');
 
 console.log('\n12. addBillForm empty name: rejected before fetch, error flash');
 
@@ -398,7 +413,7 @@ SUT._setMockFetch(mockFetch);
 await fakeDom.get('addBillForm').eventListeners.submit[0]({ preventDefault: () => {} });
 assertEq(capturedFlash13.length, 1, 'flash called on addBill server error');
 assertEq(capturedFlash13[0].kind, 'error', 'flash kind error on addBill server error');
-assertEq(capturedFlash13[0].msg, 'amount must be positive', 'flash shows server error');
+assertEq(capturedFlash13[0].msg, 'We could not add this bill right now.', 'flash shows user-safe error');
 assertEq(refreshBillsCalled13, 0, 'refreshBills NOT called on error');
 
 console.log('\n14. refreshTransactions Delete with refreshOverview undefined: handler does not crash');
@@ -444,6 +459,13 @@ await fakeDom.get('addBillForm').eventListeners.submit[0]({ preventDefault: () =
 assertEq(fetchCalled12, false, 'fetch NOT called on empty bill name');
 assertEq(capturedFlash12.length, 1, 'flash called for empty bill name');
 assertEq(capturedFlash12[0].kind, 'error', 'flash kind error for empty bill name');
+
+console.log('\n15. served template delegates Transaction and Bill submits only to transactions.js');
+const template = fs.readFileSync(path.join(__dirname, '..', 'templates', 'index.html'), 'utf8');
+assertEq(template.includes("setupTransactionsInit({"), true, 'production initializes Transaction module handler');
+assertEq(template.includes("setupBillsInit({"), true, 'production initializes Bill module handler');
+assertEq(template.includes("logForm.addEventListener('submit'"), false, 'production has no duplicate inline Transaction submit handler');
+assertEq(template.includes("billForm.addEventListener('submit'"), false, 'production has no duplicate inline Bill submit handler');
 
 console.log('\n' + passed + ' passed, ' + failed + ' failed');
 process.exit(failed > 0 ? 1 : 0);

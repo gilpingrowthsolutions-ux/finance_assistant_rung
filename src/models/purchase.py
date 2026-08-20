@@ -1,7 +1,9 @@
-from flask_sqlalchemy import SQLAlchemy
 from datetime import datetime
 
-db = SQLAlchemy()
+# Compatibility shim: keep legacy src.models imports on the app's registered
+# SQLAlchemy instance instead of creating a second, unbound database object.
+from app import db
+
 
 class Purchase(db.Model):
     id = db.Column(db.Integer, primary_key=True)

@@ -293,5 +293,14 @@ assert_eq(after_count, before_count,
 # ===========================================================================
 # SUMMARY
 # ===========================================================================
-print('\n{} passed, {} failed'.format(passed, failed))
-sys.exit(1 if failed > 0 else 0)
+def _main():
+    print('\n{} passed, {} failed'.format(passed, failed))
+    sys.exit(1 if failed > 0 else 0)
+
+
+def test_ingest_script_checks() -> None:
+    assert failed == 0, f"ingest script checks failed: {failed}"
+
+
+if __name__ == '__main__':
+    _main()

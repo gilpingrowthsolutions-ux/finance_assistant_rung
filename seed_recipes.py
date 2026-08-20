@@ -35,25 +35,22 @@ import time
 # The Flask app doesn't need to listen on a port; we just use its db object.
 # ---------------------------------------------------------------------------
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from app import app, db, Recipe, RecipeIngredient  # noqa: E402 — intentional late import
+from app import (  # noqa: E402 — intentional late import
+    DEFAULT_STARTER_RECIPE_TITLES,
+    app,
+    db,
+    Recipe,
+    RecipeIngredient,
+)
+from services.recipe_ingredients import coerce_recipe_ingredient
 
 
 def parse_ingredient(raw: str):
     """Convert a plain ingredient string to the shape RecipeIngredient expects.
 
-    Follows the same logic as ``app.py`` → ``recipes_crud()`` for string
-    ingredients: product_name is the trimmed string, clean_keyword is a
-    lowercased underscore-key, quantity defaults to 1, unit defaults to "item".
+    Uses the same deterministic quantity/unit parser as the live recipe APIs.
     """
-    name = raw.strip()
-    if not name:
-        return None
-    return {
-        "product_name": name,
-        "clean_keyword": name.lower().replace(" ", "_"),
-        "quantity": 1.0,
-        "unit": "item",
-    }
+    return coerce_recipe_ingredient(raw)
 
 
 def normalize_title(title: str) -> str:
@@ -122,13 +119,9 @@ def seed_recipes(json_path: str, dry_run: bool = False) -> dict:
                 if parsed:
                     parsed_ingredients.append(parsed)
             elif isinstance(ing_str, dict):
-                # Accept structured ingredient objects too
-                parsed_ingredients.append({
-                    "product_name": (ing_str.get("product_name") or ing_str.get("name") or "").strip(),
-                    "clean_keyword": (ing_str.get("clean_keyword") or "").strip(),
-                    "quantity": float(ing_str.get("quantity", 1)),
-                    "unit": ing_str.get("unit", "item"),
-                })
+                parsed = coerce_recipe_ingredient(ing_str)
+                if parsed:
+                    parsed_ingredients.append(parsed)
 
         # --- Build instructions (optionally prepend category / area) ---
         instructions = (entry.get("instructions") or "").strip()
@@ -158,6 +151,7 @@ def seed_recipes(json_path: str, dry_run: bool = False) -> dict:
                     servings=entry.get("servings", 4),
                     estimated_cost_per_serving=entry.get("estimated_cost_per_serving", 3.50),
                     instructions=instructions,
+                    is_favorite=normalize_title(title) in {normalize_title(item) for item in DEFAULT_STARTER_RECIPE_TITLES},
                 )
                 db.session.add(recipe)
                 db.session.flush()  # get recipe.id

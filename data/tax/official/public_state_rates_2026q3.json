@@ -1,0 +1,20 @@
+{
+  "source_key": "public_state_rates",
+  "source_type": "manual_unverified",
+  "source_name": "Public state-level planning rates snapshot",
+  "source_reference": "Planning-only state-level defaults used by Rung; not an authoritative jurisdiction source",
+  "version_tag": "2026Q3",
+  "published_at": "2026-07-01T00:00:00Z",
+  "effective_from": "2026-07-01",
+  "effective_to": null,
+  "states": [
+    {"state": "MO", "general_rate_bps": 423, "grocery_rate_bps": 123, "prepared_rate_bps": 423, "confidence": "medium"},
+    {"state": "CA", "general_rate_bps": 725, "grocery_rate_bps": 0, "prepared_rate_bps": 725, "confidence": "medium"},
+    {"state": "TX", "general_rate_bps": 625, "grocery_rate_bps": 0, "prepared_rate_bps": 625, "confidence": "medium"},
+    {"state": "FL", "general_rate_bps": 600, "grocery_rate_bps": 0, "prepared_rate_bps": 600, "confidence": "medium"},
+    {"state": "OH", "general_rate_bps": 575, "grocery_rate_bps": 0, "prepared_rate_bps": 575, "confidence": "medium"},
+    {"state": "WA", "general_rate_bps": 650, "grocery_rate_bps": 0, "prepared_rate_bps": 650, "confidence": "medium"},
+    {"state": "NY", "general_rate_bps": 400, "grocery_rate_bps": 0, "prepared_rate_bps": 400, "confidence": "medium"},
+    {"state": "CO", "general_rate_bps": 290, "grocery_rate_bps": 0, "prepared_rate_bps": 290, "confidence": "medium"}
+  ]
+}

@@ -1,4 +1,4 @@
-from src.models.purchase import db
+from app import db
 
 
 class Grocery(db.Model):

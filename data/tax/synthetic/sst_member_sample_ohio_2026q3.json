@@ -1,0 +1,23 @@
+{
+  "source_key": "sst_member_sample",
+  "source_type": "synthetic_test",
+  "source_name": "SST-format member-state sample for architecture tests",
+  "source_reference": "SYNTHETIC TEST DATA - validates adapter and effective-dated import behavior only",
+  "version_tag": "SYNTH-2026Q3",
+  "published_at": "2026-07-01T00:00:00Z",
+  "effective_from": "2026-07-01",
+  "effective_to": null,
+  "records": [
+    {
+      "state": "OH",
+      "jurisdiction_code": "OH-STATE",
+      "jurisdiction_name": "Ohio",
+      "jurisdiction_type": "state",
+      "tax_code": "OH-COMBINED",
+      "general_rate_bps": 575,
+      "grocery_rate_bps": 0,
+      "prepared_rate_bps": 575,
+      "assignment": {"key_type": "zip5", "key": "43215", "precision": "ZIP5"}
+    }
+  ]
+}

@@ -10,7 +10,10 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 # so db.drop_all()/create_all() can never wipe rung_finance.db.
 os.environ["RUNG_DB_PATH"] = ":memory:"
 
-from app import app, db, Account, Bill, ExpenseTransaction, GroceryItem
+from app import app, db, Account, Bill, ExpenseTransaction, GroceryItem, Recipe, RecipeIngredient, MealPlanItem, ActionAudit
+import services.copilot_intent as ci
+import services.copilot_service as cs
+from services.household_context import household_id as current_household_id
 
 # ---------------------------------------------------------------------------
 # helpers
@@ -31,7 +34,7 @@ def _setup():
     with app.app_context():
         db.drop_all()
         db.create_all()
-        db.session.add(Account(checking_balance=1250.00))
+        db.session.add(Account(household_id=current_household_id(), checking_balance=1250.00))
         db.session.commit()
 
 
@@ -51,6 +54,33 @@ def _assert_truthy(val, msg=""):
     else:
         _fail += 1
         print(f"  FAIL {msg}: value is falsy")
+
+
+def _seed_recipes():
+    """Seed a small recipe library for meal-plan auto-fill tests."""
+    with app.app_context():
+        rows = [
+            ("Chicken Rice Bowl", 3.20, [("chicken", "chicken"), ("rice", "rice")]),
+            ("Flank Steak Fajitas", 4.10, [("steak", "steak"), ("pepper", "pepper"), ("tortilla", "tortilla")]),
+            ("Turkey Chili", 2.60, [("turkey", "turkey"), ("bean", "bean")]),
+            ("Veggie Stir Fry", 3.00, [("broccoli", "broccoli"), ("rice", "rice")]),
+            ("Pasta Marinara", 2.40, [("pasta", "pasta"), ("tomato", "tomato")]),
+            ("Salmon Sheet Pan", 5.00, [("salmon", "salmon"), ("potato", "potato")]),
+            ("Black Bean Tacos", 2.10, [("bean", "bean"), ("tortilla", "tortilla")]),
+        ]
+        for title, cost, ingredients in rows:
+            r = Recipe(title=title, servings=4, estimated_cost_per_serving=cost)
+            db.session.add(r)
+            db.session.flush()
+            for name, kw in ingredients:
+                db.session.add(RecipeIngredient(
+                    recipe_id=r.id,
+                    product_name=name,
+                    clean_keyword=kw,
+                    quantity=1.0,
+                    unit="oz",
+                ))
+        db.session.commit()
 
 
 # ---------------------------------------------------------------------------
@@ -296,7 +326,7 @@ def test_copilot_no_error_without_key():
 
 
 def test_copilot_endpoint_passes_llm_error():
-    """/api/copilot/parse returns the llm_error field for the frontend."""
+    """/api/copilot/parse returns a customer-safe llm_error field."""
     _setup()
     import services.copilot_service as cs
 
@@ -326,7 +356,13 @@ def test_copilot_endpoint_passes_llm_error():
 
     d = resp.get_json() or {}
     _assert_truthy(d.get("llm_error"), "endpoint includes llm_error")
-    _assert_truthy("401" in d.get("llm_error", ""), "llm_error mentions 401")
+    _assert_eq(
+        d.get("llm_error"),
+        "Copilot is temporarily unavailable. Please try again later.",
+        "llm_error is customer-safe",
+    )
+    _assert_truthy("401" not in d.get("llm_error", ""), "llm_error omits HTTP status")
+    _assert_truthy("groq" not in d.get("llm_error", "").lower(), "llm_error omits provider name")
 
 
 # ---------------------------------------------------------------------------
@@ -402,9 +438,189 @@ def test_chat_endpoint_with_llm_error():
 
     d = resp.get_json() or {}
     _assert_truthy(d.get("llm_error"), "llm_error surfaced")
-    _assert_truthy("401" in d.get("llm_error", ""), "llm_error mentions 401")
+    _assert_eq(
+        d.get("llm_error"),
+        "Copilot is temporarily unavailable. Please try again later.",
+        "llm_error is customer-safe",
+    )
+    _assert_truthy("401" not in d.get("llm_error", ""), "llm_error omits HTTP status")
     items = d.get("actions_taken", {}).get("grocery_items_added", [])
     _assert_eq(len(items), 1, "grocery item still parsed via regex")
+
+
+def test_chat_endpoint_plain_text_response_falls_back_to_parser():
+    """A plain-text chat reply may still require execution via the parser."""
+    _setup()
+    import services.copilot_service as cs
+
+    class FakeToolCall:
+        def __init__(self, name, arguments):
+            self.function = type("F", (), {"name": name, "arguments": arguments})()
+            self.id = "call_1"
+
+    class FakeMsg:
+        def __init__(self, content, tool_calls=None):
+            self.content = content
+            self.tool_calls = tool_calls or []
+
+    class FakeResponse:
+        def __init__(self, msg):
+            self.choices = [type("C", (), {"message": msg})()]
+
+    class FakeCompletions:
+        def __init__(self):
+            self.count = 0
+            self.creates = []
+
+        def create(self, **kwargs):
+            self.creates.append(kwargs)
+            self.count += 1
+            if self.count == 1:
+                return FakeResponse(FakeMsg("Sure, I set your meal target to 5 dinners."))
+            return FakeResponse(FakeMsg(None, [FakeToolCall("set_target_meals", '{"count": 5}')]))
+
+    class FakeChat:
+        def __init__(self):
+            self.completions = FakeCompletions()
+
+    class FakeGroq:
+        def __init__(self, api_key):
+            self.chat = FakeChat()
+
+    orig_groq = cs._Groq
+    cs._Groq = FakeGroq
+    os.environ["GROQ_API_KEY"] = "gsk_test_plain_text_fallback"
+    try:
+        resp = client.post(
+            "/api/copilot/chat",
+            json={"messages": [{"role": "user", "content": "plan 5 dinners"}]},
+        )
+    finally:
+        os.environ.pop("GROQ_API_KEY", None)
+        cs._Groq = orig_groq
+
+    _assert_eq(resp.status_code, 200, "chat returns 200")
+    d = resp.get_json() or {}
+    _assert_eq(d.get("_fallback"), False, "not fallback")
+    _assert_eq(d.get("actions_taken", {}).get("target_meals"), 5, "target meals persisted")
+    tr = d.get("tool_results", [])
+    _assert_eq(len(tr), 0, "no tool_results when using regex fallback")
+
+
+def test_chat_endpoint_plain_text_response_executes_intent_pipeline():
+    """A plain-text chat reply with no tool calls should still execute parsed actions."""
+    _setup()
+    import services.copilot_service as cs
+
+    class FakeMsg:
+        def __init__(self, content, tool_calls=None):
+            self.content = content
+            self.tool_calls = tool_calls or []
+
+    class FakeResponse:
+        def __init__(self, msg):
+            self.choices = [type("C", (), {"message": msg})()]
+
+    class FakeCompletions:
+        def create(self, **kwargs):
+            return FakeResponse(FakeMsg("Sure, I added those items for you."))
+
+    class FakeChat:
+        def __init__(self):
+            self.completions = FakeCompletions()
+
+    class FakeGroq:
+        def __init__(self, api_key):
+            self.chat = FakeChat()
+
+    orig_groq = cs._Groq
+    orig_json = cs._call_groq_json
+    cs._Groq = FakeGroq
+    cs._call_groq_json = lambda prompt, api_key="": {
+        "tool_results": [],
+        "selected_recipes": [],
+        "grocery_additions": ["dish soap"],
+        "discretionary_events": [],
+        "bill_updates": [{"name": "netflix", "amount": 22.99, "action": "add"}],
+        "target_meals": None,
+        "_fallback": False,
+    }
+    os.environ["GROQ_API_KEY"] = "gsk_test_plain_text_intent_pipeline"
+    try:
+        resp = client.post(
+            "/api/copilot/chat",
+            json={"messages": [{"role": "user", "content": "Add Netflix $22.99/mo and dish soap"}]},
+        )
+    finally:
+        os.environ.pop("GROQ_API_KEY", None)
+        cs._Groq = orig_groq
+        cs._call_groq_json = orig_json
+
+    _assert_eq(resp.status_code, 200, "chat returns 200")
+    d = resp.get_json() or {}
+    _assert_eq(d.get("_fallback"), False, "not fallback")
+    actions = d.get("actions_taken", {})
+    _assert_eq(len(actions.get("bills_added", [])), 1, "bill action executed")
+    _assert_eq(len(actions.get("grocery_items_added", [])), 1, "grocery action executed")
+    _assert_eq(actions.get("grocery_items_added", [])[0], "dish soap", "grocery item persisted")
+    with app.app_context():
+        _assert_eq(Bill.query.count(), 1, "bill persisted")
+        _assert_eq(GroceryItem.query.count(), 1, "grocery item persisted")
+
+
+def test_chat_plan_speak_auto_fill_persists_meal_plan():
+    """Plan language in chat should persist target meals and auto-filled recipes."""
+    _setup()
+    _seed_recipes()
+    import services.copilot_service as cs
+
+    class FakeMsg:
+        def __init__(self, content, tool_calls=None):
+            self.content = content
+            self.tool_calls = tool_calls or []
+
+    class FakeResponse:
+        def __init__(self, msg):
+            self.choices = [type("C", (), {"message": msg})()]
+
+    class FakeCompletions:
+        def __init__(self):
+            self.count = 0
+            self.creates = []
+
+        def create(self, **kwargs):
+            self.creates.append(kwargs)
+            self.count += 1
+            if self.count == 1:
+                return FakeResponse(FakeMsg("Sure, I can plan 5 dinners for you."))
+            return FakeResponse(FakeMsg(None, []))
+
+    class FakeChat:
+        def __init__(self):
+            self.completions = FakeCompletions()
+
+    class FakeGroq:
+        def __init__(self, api_key):
+            self.chat = FakeChat()
+
+    orig_groq = cs._Groq
+    cs._Groq = FakeGroq
+    os.environ["GROQ_API_KEY"] = "gsk_test_plan_speak_auto_fill"
+    try:
+        resp = client.post(
+            "/api/copilot/chat",
+            json={"messages": [{"role": "user", "content": "plan 5 dinners"}]},
+        )
+    finally:
+        os.environ.pop("GROQ_API_KEY", None)
+        cs._Groq = orig_groq
+
+    _assert_eq(resp.status_code, 200, "chat returns 200")
+    d = resp.get_json() or {}
+    _assert_eq(d.get("_fallback"), False, "not fallback")
+    _assert_eq(d.get("actions_taken", {}).get("target_meals"), 5, "target meals persisted")
+    with app.app_context():
+        _assert_eq(MealPlanItem.query.count(), 5, "meal plan auto-filled to 5 recipes")
 
 
 def test_chat_prompt_multi_turn_history():
@@ -660,6 +876,364 @@ def test_chat_multi_intent_end_to_end():
         _assert_eq(gi.item_name.lower(), "laundry detergent", "grocery item in DB")
 
 
+def test_execute_intent_payload_directly_handles_groceries_bills_and_expenses():
+    """The intent pipeline should persist groceries, bills, and one-time expenses."""
+    _setup()
+    with app.app_context():
+        payload = ci.CopilotIntentPayload(
+            groceries=[ci.GroceryAddition(item_name="dish soap")],
+            bill_adjustments=[ci.BillAdjustment(bill_name="Internet", amount=59.99)],
+            expenses=[ci.OneTimeExpense(category="coffee", estimated_amount=4.50)],
+        )
+        actions = ci.execute_intent_payload(payload)
+
+        _assert_eq(actions["grocery_items_added"], ["dish soap"], "grocery item added")
+        _assert_eq(actions["bills_added"][0]["name"], "Internet", "bill added")
+        _assert_eq(actions["bills_added"][0]["amount"], 59.99, "bill amount stored")
+        _assert_eq(actions["expenses_logged"][0]["amount"], 4.5, "expense amount logged")
+
+        _assert_eq(GroceryItem.query.count(), 1, "grocery item persisted")
+        _assert_eq(Bill.query.count(), 1, "bill persisted")
+        _assert_eq(ExpenseTransaction.query.count(), 1, "expense persisted")
+
+
+def test_process_copilot_command_orchestrates_parsing_and_intent_execution():
+    """process_copilot_command should use parsed results to execute the intent payload."""
+    _setup()
+    with app.app_context():
+        original_parse = cs.parse_copilot_prompt
+        cs.parse_copilot_prompt = lambda text, groq_api_key="": {
+            "grocery_additions": ["paper towels"],
+            "bill_updates": [{"name": "Hulu", "amount": 14.99, "action": "add"}],
+            "discretionary_events": [{"description": "movie tickets", "amount": 20.0}],
+            "selected_recipes": [],
+            "target_meals": None,
+            "tool_results": [],
+        }
+        try:
+            result = ci.process_copilot_command("Add Hulu and paper towels", groq_api_key="")
+        finally:
+            cs.parse_copilot_prompt = original_parse
+
+        _assert_truthy(result.get("actions_taken"), "actions_taken is present")
+        actions = result["actions_taken"]
+        _assert_eq(actions["grocery_items_added"], ["paper towels"], "grocery item executed")
+        _assert_eq(actions["bills_added"][0]["name"], "Hulu", "bill executed")
+        _assert_eq(actions["expenses_logged"][0]["description"], "movie tickets", "expense executed")
+        _assert_eq(GroceryItem.query.count(), 1, "grocery item persisted via orchestrator")
+        _assert_eq(Bill.query.count(), 1, "bill persisted via orchestrator")
+        _assert_eq(ExpenseTransaction.query.count(), 1, "expense persisted via orchestrator")
+
+
+def test_chat_endpoint_multi_turn_plain_text_executes_intent_pipeline():
+    """Multi-turn chat should still execute intent actions when the model replies in plain text."""
+    _setup()
+
+    class FakeMsg:
+        def __init__(self, content):
+            self.content = content
+            self.tool_calls = []
+
+    class FakeResponse:
+        def __init__(self, msg):
+            self.choices = [type("C", (), {"message": msg})()]
+
+    class FakeCompletions:
+        def create(self, **kwargs):
+            return FakeResponse(FakeMsg("Sure, I added those items for you."))
+
+    class FakeChat:
+        def __init__(self):
+            self.completions = FakeCompletions()
+
+    class FakeGroq:
+        def __init__(self, api_key):
+            self.chat = FakeChat()
+
+    orig_groq = cs._Groq
+    orig_json = cs._call_groq_json
+    cs._Groq = FakeGroq
+    cs._call_groq_json = lambda prompt, api_key="": {
+        "tool_results": [],
+        "selected_recipes": [],
+        "grocery_additions": ["paper towels"],
+        "discretionary_events": [],
+        "bill_updates": [{"name": "netflix", "amount": 22.99, "action": "add"}],
+        "target_meals": None,
+        "_fallback": False,
+    }
+    os.environ["GROQ_API_KEY"] = "gsk_test_multi_turn_plain_text"
+    try:
+        resp = client.post(
+            "/api/copilot/chat",
+            json={
+                "messages": [
+                    {"role": "assistant", "content": "How can I help?"},
+                    {"role": "user", "content": "Add Netflix $22.99/mo and paper towels"},
+                ]
+            },
+        )
+    finally:
+        os.environ.pop("GROQ_API_KEY", None)
+        cs._Groq = orig_groq
+        cs._call_groq_json = orig_json
+
+    _assert_eq(resp.status_code, 200, "chat returns 200")
+    d = resp.get_json() or {}
+    _assert_eq(d.get("_fallback"), False, "not fallback")
+    _assert_eq(d.get("tool_results", []), [], "no native tool_results")
+    actions = d.get("actions_taken", {})
+    _assert_eq(len(actions.get("bills_added", [])), 1, "bill action executed")
+    _assert_eq(len(actions.get("grocery_items_added", [])), 1, "grocery action executed")
+    _assert_eq(actions.get("grocery_items_added", [])[0], "paper towels", "grocery item persisted")
+    with app.app_context():
+        _assert_eq(Bill.query.count(), 1, "bill persisted")
+        _assert_eq(GroceryItem.query.count(), 1, "grocery item persisted")
+
+
+def test_confirm_endpoint_applies_pending_risky_actions():
+    """When chat returns plain text and parser marks a high-value bill,
+    the chat response should indicate confirmation is required, and the
+    `/api/copilot/confirm` endpoint should apply the pending actions.
+    """
+    _setup()
+    import services.copilot_service as cs
+
+    # Fake chat result: plain-text reply but parsed bill_updates with high amount
+    def fake_chat(messages, groq_api_key=""):
+        return {
+            "reply": "OK, I noted that for you.",
+            "tool_results": [],
+            "selected_recipes": [],
+            "grocery_additions": [],
+            "discretionary_events": [],
+            "bill_updates": [{"name": "Premium Service", "amount": 120.0, "action": "add"}],
+            "target_meals": None,
+            "_fallback": False,
+        }
+
+    orig_chat = cs.chat_copilot_prompt
+    cs.chat_copilot_prompt = fake_chat
+    try:
+        resp = client.post(
+            "/api/copilot/chat",
+            json={"messages": [{"role": "user", "content": "Add Premium Service $120"}]},
+        )
+    finally:
+        cs.chat_copilot_prompt = orig_chat
+
+    _assert_eq(resp.status_code, 200, "chat returns 200")
+    d = resp.get_json() or {}
+    actions = d.get("actions_taken", {})
+    _assert_eq(actions.get("requires_confirmation", True), True, "requires confirmation flagged")
+    pending = actions.get("pending_actions", {})
+    _assert_truthy(pending.get("bills"), "pending bills present")
+
+    # Now call confirm endpoint to persist the pending bill
+    resp2 = client.post("/api/copilot/confirm", json={"text": "Add Premium Service $120"})
+    _assert_eq(resp2.status_code, 200, "confirm returns 200")
+    d2 = resp2.get_json() or {}
+    actions2 = d2.get("actions_taken", {})
+    _assert_truthy(actions2.get("bills_added"), "bill added on confirm")
+    undo_token = d2.get("actions_taken", {}).get("undo_token")
+    _assert_truthy(undo_token, "undo token returned")
+    with app.app_context():
+        _assert_eq(Bill.query.count(), 1, "bill persisted after confirm")
+
+    resp3 = client.post("/api/copilot/undo", json={"undo_token": undo_token})
+    _assert_eq(resp3.status_code, 200, "undo returns 200")
+    d3 = resp3.get_json() or {}
+    _assert_truthy(d3.get("undone_actions", {}), "undo actions present")
+    with app.app_context():
+        _assert_eq(Bill.query.count(), 0, "bill removed after undo")
+
+
+def test_confirm_endpoint_records_action_audit_user_id():
+    """Confirmed actions should record the requesting user id in the audit log."""
+    _setup()
+    import services.copilot_service as cs
+
+    def fake_chat(messages, groq_api_key=""):
+        return {
+            "reply": "OK, I noted that for you.",
+            "tool_results": [],
+            "selected_recipes": [],
+            "grocery_additions": [],
+            "discretionary_events": [],
+            "bill_updates": [{"name": "Premium Service", "amount": 120.0, "action": "add"}],
+            "target_meals": None,
+            "_fallback": False,
+        }
+
+    orig_chat = cs.chat_copilot_prompt
+    cs.chat_copilot_prompt = fake_chat
+    try:
+        resp = client.post(
+            "/api/copilot/chat",
+            json={"messages": [{"role": "user", "content": "Add Premium Service $120"}]},
+            headers={"X-User-Id": "tester-123"},
+        )
+    finally:
+        cs.chat_copilot_prompt = orig_chat
+
+    _assert_eq(resp.status_code, 200, "chat returns 200")
+    d = resp.get_json() or {}
+    _assert_truthy(d.get("confirmation_prompt"), "confirmation prompt returned")
+    actions = d.get("actions_taken", {})
+    _assert_eq(actions.get("requires_confirmation", True), True, "requires confirmation flagged")
+
+    resp2 = client.post(
+        "/api/copilot/confirm",
+        json={"text": "Add Premium Service $120"},
+        headers={"X-User-Id": "tester-123"},
+    )
+    _assert_eq(resp2.status_code, 200, "confirm returns 200")
+    d2 = resp2.get_json() or {}
+    undo_token = d2.get("actions_taken", {}).get("undo_token")
+    _assert_truthy(undo_token, "undo token returned")
+
+    with app.app_context():
+        audit = ActionAudit.query.filter_by(undo_token=undo_token).first()
+        _assert_truthy(audit, "audit row exists")
+        _assert_eq(audit.user_id, "tester-123", "audit row records header user_id")
+
+
+def test_confirm_endpoint_records_action_audit_body_user_id():
+    """Confirmed actions should record JSON payload user_id in the audit log."""
+    _setup()
+    import services.copilot_service as cs
+
+    def fake_chat(messages, groq_api_key=""):
+        return {
+            "reply": "OK, I noted that for you.",
+            "tool_results": [],
+            "selected_recipes": [],
+            "grocery_additions": [],
+            "discretionary_events": [],
+            "bill_updates": [{"name": "Premium Service", "amount": 120.0, "action": "add"}],
+            "target_meals": None,
+            "_fallback": False,
+        }
+
+    orig_chat = cs.chat_copilot_prompt
+    cs.chat_copilot_prompt = fake_chat
+    try:
+        resp = client.post(
+            "/api/copilot/chat",
+            json={"messages": [{"role": "user", "content": "Add Premium Service $120"}], "user_id": "payload-456"},
+        )
+    finally:
+        cs.chat_copilot_prompt = orig_chat
+
+    _assert_eq(resp.status_code, 200, "chat returns 200")
+    d = resp.get_json() or {}
+    _assert_truthy(d.get("confirmation_prompt"), "confirmation prompt returned")
+
+    resp2 = client.post(
+        "/api/copilot/confirm",
+        json={"text": "Add Premium Service $120", "user_id": "payload-456"},
+    )
+    _assert_eq(resp2.status_code, 200, "confirm returns 200")
+    d2 = resp2.get_json() or {}
+    undo_token = d2.get("actions_taken", {}).get("undo_token")
+    _assert_truthy(undo_token, "undo token returned")
+
+    with app.app_context():
+        audit = ActionAudit.query.filter_by(undo_token=undo_token).first()
+        _assert_truthy(audit, "audit row exists")
+        _assert_eq(audit.user_id, "payload-456", "audit row records body user_id")
+
+
+def test_copilot_stage_endpoint_is_dry_run_and_non_mutating():
+    """/api/copilot/stage should build a proposal without writing to DB."""
+    _setup()
+    _seed_recipes()
+
+    orig_json = cs._call_groq_json
+    cs._call_groq_json = lambda prompt, api_key="": {
+        "tool_results": [],
+        "selected_recipes": [{"title": "chicken rice bowl", "action": "add"}],
+        "grocery_additions": ["paper towels"],
+        "discretionary_events": [{"description": "gas", "amount": 40}],
+        "bill_updates": [{"name": "Internet", "amount": 65, "action": "set"}],
+        "target_meals": 3,
+        "meal_servings": 4,
+        "_fallback": False,
+    }
+    os.environ["GROQ_API_KEY"] = "gsk_test_stage"
+    try:
+        resp = client.post("/api/copilot/stage", json={"text": "Plan 3 meals and add internet + gas + paper towels"})
+    finally:
+        os.environ.pop("GROQ_API_KEY", None)
+        cs._call_groq_json = orig_json
+
+    _assert_eq(resp.status_code, 200, "stage returns 200")
+    data = resp.get_json() or {}
+    actions = data.get("actions_taken", {})
+    _assert_eq(actions.get("staged", False), True, "staged flag set")
+    _assert_eq(actions.get("requires_confirmation", False), True, "requires confirmation set")
+    _assert_truthy(actions.get("recipes_added") or actions.get("recipes_auto_filled"), "staged recipe proposal exists")
+    _assert_truthy(actions.get("grocery_items_added"), "staged grocery additions exist")
+    _assert_truthy(actions.get("expenses_logged"), "staged expenses exist")
+    _assert_truthy(actions.get("bills_added") or actions.get("bills_updated"), "staged bill changes exist")
+
+    with app.app_context():
+        _assert_eq(MealPlanItem.query.count(), 0, "dry-run should not add meal plan items")
+        _assert_eq(GroceryItem.query.count(), 0, "dry-run should not add grocery items")
+        _assert_eq(ExpenseTransaction.query.count(), 0, "dry-run should not add expenses")
+        _assert_eq(Bill.query.count(), 0, "dry-run should not add bills")
+
+
+def test_copilot_apply_endpoint_persists_reviewed_staged_actions():
+    """/api/copilot/apply should persist edited staged actions and return undo token."""
+    _setup()
+    _seed_recipes()
+
+    orig_json = cs._call_groq_json
+    cs._call_groq_json = lambda prompt, api_key="": {
+        "tool_results": [],
+        "selected_recipes": [{"title": "chicken rice bowl", "action": "add"}],
+        "grocery_additions": ["paper towels"],
+        "discretionary_events": [{"description": "gas", "amount": 40}],
+        "bill_updates": [{"name": "Internet", "amount": 65, "action": "set"}],
+        "target_meals": 2,
+        "meal_servings": 4,
+        "_fallback": False,
+    }
+    os.environ["GROQ_API_KEY"] = "gsk_test_apply"
+    try:
+        stage_resp = client.post("/api/copilot/stage", json={"text": "Plan meals and add internet"})
+    finally:
+        os.environ.pop("GROQ_API_KEY", None)
+        cs._call_groq_json = orig_json
+
+    _assert_eq(stage_resp.status_code, 200, "stage returns 200")
+    staged = (stage_resp.get_json() or {}).get("actions_taken") or {}
+
+    # Simulate user review edits before apply.
+    if staged.get("expenses_logged"):
+        staged["expenses_logged"][0]["amount"] = 25.0
+    staged["grocery_items_added"].append({"item_name": "dish soap", "estimated_price": 4.25})
+
+    apply_resp = client.post(
+        "/api/copilot/apply",
+        json={"text": "Plan meals and add internet", "staged_actions": staged},
+    )
+    _assert_eq(apply_resp.status_code, 200, "apply returns 200")
+
+    applied = (apply_resp.get_json() or {}).get("actions_taken", {})
+    _assert_truthy(applied.get("undo_token"), "undo token returned")
+    _assert_truthy(applied.get("recipes_added") or applied.get("recipes_auto_filled"), "recipe actions applied")
+    _assert_truthy(applied.get("grocery_items_added"), "grocery actions applied")
+    _assert_truthy(applied.get("bills_added") or applied.get("bills_updated"), "bill actions applied")
+
+    with app.app_context():
+        _assert_truthy(MealPlanItem.query.count() >= 1, "meal plan persisted")
+        _assert_truthy(GroceryItem.query.count() >= 1, "grocery persisted")
+        _assert_truthy(ExpenseTransaction.query.count() >= 1, "expense persisted")
+        _assert_truthy(Bill.query.count() >= 1, "bill persisted")
+
+
 # ---------------------------------------------------------------------------
 # 6 — Bill removal (placeholder — regex fallback won't catch this)
 # ---------------------------------------------------------------------------
@@ -671,7 +1245,7 @@ def test_copilot_bill_removal():
     from datetime import datetime, timedelta
 
     with app.app_context():
-        b = Bill(name="Hulu", amount=15.99, due_date=datetime.utcnow() + timedelta(days=10))
+        b = Bill(household_id=current_household_id(), name="Hulu", amount=15.99, due_date=datetime.utcnow() + timedelta(days=10))
         db.session.add(b)
         db.session.commit()
 

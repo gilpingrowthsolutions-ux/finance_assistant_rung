@@ -1178,10 +1178,18 @@
       background: var(--bg-elev); box-shadow: var(--shadow-md);
     }
     .auth-dialog::backdrop { background: rgba(15,17,21,.58); backdrop-filter: blur(3px); }
-    .auth-shell { padding: 28px; }
-    .auth-brand { display:flex; align-items:center; gap:10px; margin-bottom:22px; }
+    .auth-shell { padding: 32px 28px; }
+    .auth-brand { display:flex; align-items:center; gap:10px; margin-bottom:26px; }
     .auth-brand .brand-mark { flex:0 0 auto; }
-    .auth-error { min-height:20px; margin-top:8px; color:var(--danger); font-size:.84rem; }
+    .auth-title { font-size: 1.55rem; margin-top: 2px; }
+    .auth-subtitle { margin: 6px 0 22px; }
+    .auth-form .field { margin-bottom: 14px; }
+    .auth-form .input-with-toggle input { padding-right: 58px; }
+    .auth-form .input-toggle { font-size: .78rem; font-weight: 700; letter-spacing: .02em; }
+    .auth-submit { width: 100%; justify-content: center; margin-top: 6px; }
+    .auth-error { min-height:20px; margin-top:10px; color:var(--danger); font-size:.84rem; }
+    .auth-divider { height: 1px; background: var(--border); margin: 22px 0 16px; }
+    .auth-secondary-note { text-align: center; margin: 0; }
     .account-security { display:flex; flex-direction:column; gap:8px; }
     .account-security-row { display:flex; justify-content:space-between; gap:12px; font-size:.86rem; }
 
@@ -2539,15 +2547,22 @@
   <dialog class="auth-dialog" id="authDialog" aria-labelledby="authTitle">
     <div class="auth-shell">
       <div class="auth-brand"><div class="brand-mark">R</div><div><strong>Rung</strong><div class="panel-sub">Protect what matters. Spend with confidence.</div></div></div>
-      <h1 id="authTitle" style="font-size:1.45rem;">Sign in</h1>
-      <div class="panel-sub" style="margin:5px 0 18px;">Use your Rung beta account to continue.</div>
-      <form id="authLoginForm">
+      <h1 id="authTitle" class="auth-title">Welcome back</h1>
+      <div class="panel-sub auth-subtitle">Log in to your Rung account to continue.</div>
+      <form id="authLoginForm" class="auth-form">
         <div class="field"><label for="authEmail">Email</label><input id="authEmail" type="email" autocomplete="username" required /></div>
-        <div class="field"><label for="authPassword">Password</label><input id="authPassword" type="password" autocomplete="current-password" required /></div>
-        <button class="btn is-primary" id="authLoginBtn" type="submit" style="width:100%;justify-content:center;">Sign In</button>
+        <div class="field">
+          <label for="authPassword">Password</label>
+          <div class="input-with-toggle">
+            <input id="authPassword" type="password" autocomplete="current-password" required />
+            <button class="input-toggle" id="authPasswordToggle" type="button" aria-label="Show password" aria-pressed="false">Show</button>
+          </div>
+        </div>
+        <button class="btn is-primary auth-submit" id="authLoginBtn" type="submit">Log In</button>
         <div class="auth-error" id="authError" role="alert"></div>
       </form>
-      <div class="panel-sub" style="margin-top:14px;">Beta accounts are provisioned by your Rung organizer. Self-service account creation is not currently supported.</div>
+      <div class="auth-divider"></div>
+      <div class="panel-sub auth-secondary-note">Beta accounts are provisioned by your Rung organizer. Self-service account creation is not currently supported.</div>
     </div>
   </dialog>
 
@@ -2743,19 +2758,31 @@
       var form = document.getElementById('authLoginForm');
       var logout = document.getElementById('logoutBtn');
       var dialog = document.getElementById('authDialog');
+      var pwToggle = document.getElementById('authPasswordToggle');
+      var pwInput = document.getElementById('authPassword');
+      if (pwToggle && pwInput && !pwToggle.dataset.bound) {
+        pwToggle.dataset.bound = 'true';
+        pwToggle.addEventListener('click', function () {
+          var revealed = pwInput.type === 'text';
+          pwInput.type = revealed ? 'password' : 'text';
+          pwToggle.textContent = revealed ? 'Show' : 'Hide';
+          pwToggle.setAttribute('aria-pressed', revealed ? 'false' : 'true');
+          pwToggle.setAttribute('aria-label', revealed ? 'Show password' : 'Hide password');
+        });
+      }
       if (form && !form.dataset.bound) {
         form.dataset.bound = 'true';
         form.addEventListener('submit', async function (event) {
           event.preventDefault();
           var button = document.getElementById('authLoginBtn');
           var error = document.getElementById('authError');
-          if (button) { button.disabled = true; button.textContent = 'Signing in…'; }
+          if (button) { button.disabled = true; button.textContent = 'Logging in…'; }
           if (error) error.textContent = '';
           var response = await api('POST', '/api/auth/login', {
             email: String((document.getElementById('authEmail') || {}).value || '').trim(),
             password: String((document.getElementById('authPassword') || {}).value || '')
           });
-          if (button) { button.disabled = false; button.textContent = 'Sign In'; }
+          if (button) { button.disabled = false; button.textContent = 'Log In'; }
           if (!response.ok) {
             if (error) error.textContent = response.status === 429
               ? 'Too many attempts. Please wait and try again.'
@@ -2769,6 +2796,7 @@
       if (logout && !logout.dataset.bound) {
         logout.dataset.bound = 'true';
         logout.addEventListener('click', async function () {
+          logout.disabled = true;
           await api('POST', '/api/auth/logout');
           window.location.reload();
         });

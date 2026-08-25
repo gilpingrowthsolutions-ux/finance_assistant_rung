@@ -17,7 +17,7 @@ from flask import Flask, render_template, request, jsonify, session
 from flask_migrate import Migrate
 from sqlalchemy import text
 from sqlalchemy.engine import make_url
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, OperationalError
 from werkzeug.security import check_password_hash, generate_password_hash
 
 def _load_local_env_files() -> None:
@@ -132,6 +132,47 @@ def _redacted_database_uri(uri: str) -> str:
         return "<invalid-database-uri>"
 
 
+def _positive_int_env(name: str, default: int, *, minimum: int = 1, maximum: int = 1000) -> int:
+    raw = str(os.environ.get(name) or "").strip()
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise RuntimeError(f"{name} must be an integer.") from exc
+    if value < minimum or value > maximum:
+        raise RuntimeError(f"{name} must be between {minimum} and {maximum}.")
+    return value
+
+
+def _resolve_engine_options(database_uri: str) -> dict[str, Any]:
+    """Return small, bounded connection settings for the configured database.
+
+    SQLite keeps SQLAlchemy's dialect-specific pooling behavior. PostgreSQL
+    receives a conservative per-process pool suitable for the friends-and-
+    family beta; hosting may tune it without changing application code.
+    """
+    options: dict[str, Any] = {
+        "pool_pre_ping": True,
+        "pool_recycle": _positive_int_env("RUNG_DB_POOL_RECYCLE_SECONDS", 1800, maximum=86400),
+    }
+    try:
+        driver = make_url(database_uri).drivername
+    except Exception:
+        return options
+    if driver.startswith("postgresql"):
+        statement_timeout_ms = _positive_int_env(
+            "RUNG_DB_STATEMENT_TIMEOUT_MS", 30000, minimum=1000, maximum=300000
+        )
+        options.update({
+            "pool_size": _positive_int_env("RUNG_DB_POOL_SIZE", 5, maximum=50),
+            "max_overflow": _positive_int_env("RUNG_DB_MAX_OVERFLOW", 5, minimum=0, maximum=50),
+            "pool_timeout": _positive_int_env("RUNG_DB_POOL_TIMEOUT_SECONDS", 10, maximum=120),
+            "connect_args": {"options": f"-c statement_timeout={statement_timeout_ms}"},
+        })
+    return options
+
+
 app.config["SQLALCHEMY_DATABASE_URI"] = _resolve_database_uri()
 app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
 app.config["SECRET_KEY"] = _resolve_secret_key()
@@ -139,9 +180,7 @@ app.config["SESSION_COOKIE_HTTPONLY"] = True
 app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
 app.config["SESSION_COOKIE_SECURE"] = _cookie_secure_enabled()
 app.config["SESSION_COOKIE_NAME"] = "rung_session"
-app.config.setdefault("SQLALCHEMY_ENGINE_OPTIONS", {})
-app.config["SQLALCHEMY_ENGINE_OPTIONS"].setdefault("pool_pre_ping", True)
-app.config["SQLALCHEMY_ENGINE_OPTIONS"].setdefault("pool_recycle", 1800)
+app.config["SQLALCHEMY_ENGINE_OPTIONS"] = _resolve_engine_options(app.config["SQLALCHEMY_DATABASE_URI"])
 
 # Initialize the shared SQLAlchemy instance with this Flask app.
 # This must happen BEFORE any model definitions.
@@ -205,6 +244,13 @@ from models import (
     User,
     HouseholdMembership,
     LoginThrottle,
+    SavingsAllocationRun,
+    SavingsDestination,
+    SavingsGoal,
+    SavingsReserve,
+    SavingsTransfer,
+    BehaviorIntelligenceDecision,
+    IncomePlanVersion,
     UsageEvent,
     Household,
     StoreTaxProfile,
@@ -215,10 +261,31 @@ from models import (
     TaxabilityRule,
     RetailProductTaxClass,
 )
+from services.savings_allocation import (
+    SavingsError,
+    allocation_plan as savings_allocation_plan,
+    apply_allocation as apply_savings_allocation,
+    create_goal as create_savings_goal,
+    create_reserve as create_savings_reserve,
+    list_state as savings_state,
+    match_reserve_purpose,
+    transfer as savings_transfer,
+    update_goal as update_savings_goal,
+    update_reserve as update_savings_reserve,
+)
+from services.paycheck_timeline import build_paycheck_timeline, resolve_cycle
+from services.payday_recap import build_payday_recap
+from services.behavior_intelligence import build_behavior_intelligence
+from services.income_plan import (
+    IncomePlanError,
+    income_plan_payload,
+    record_income_plan,
+    resolve_income_plan,
+)
 from services.tax_engine import (
     TAX_CLASS_GENERAL_MERCHANDISE,
     TAX_CLASS_GROCERY_FOOD,
-    calculate_cart_tax,
+    canonical_tax_decision,
     cents_to_float as tax_cents_to_float,
     ensure_bootstrap_tax_dataset,
     has_paid_provider_tax_keys,
@@ -277,6 +344,11 @@ SAFE_BUFFER_SETTING_KEY = "safe_to_spend_buffer_usd"
 PYF_TARGET_SETTING_KEY = "pyf_long_term_target_percent"
 LOCATION_SHARING_SETTING_KEY = "location_sharing_enabled"
 NEXT_PAYDAY_SETTING_KEY = "next_payday_date"
+REQUIRED_EXPENSE_REVIEW_SETTING_KEY = "onboarding_required_expense_review"
+REQUIRED_EXPENSE_UNANSWERED = "unanswered"
+REQUIRED_EXPENSE_NONE = "no_expenses_reviewed"
+REQUIRED_EXPENSE_PENDING = "has_expenses_pending_review"
+REQUIRED_EXPENSE_REVIEWED = "has_expenses_reviewed"
 APP_SCHEMA_VERSION = "m10-beta-readiness-1"
 
 
@@ -287,6 +359,15 @@ def get_setting(key: str, default: str = '') -> str:
         key=key,
     ).first()
     return row.value if row else default
+
+
+def _required_expense_review_state() -> str:
+    """Return the explicit, household-scoped onboarding expense-review state."""
+    state = get_setting(REQUIRED_EXPENSE_REVIEW_SETTING_KEY, REQUIRED_EXPENSE_UNANSWERED)
+    return state if state in {
+        REQUIRED_EXPENSE_UNANSWERED, REQUIRED_EXPENSE_NONE,
+        REQUIRED_EXPENSE_PENDING, REQUIRED_EXPENSE_REVIEWED,
+    } else REQUIRED_EXPENSE_UNANSWERED
 
 
 def _resolve_request_user_id(data: Any) -> str:
@@ -303,9 +384,15 @@ def _resolve_request_user_id(data: Any) -> str:
 def _current_auth_session_payload() -> dict[str, Any]:
     principal = get_current_principal()
     if principal is None:
-        return {"authenticated": False, "user": None, "household": None}
+        return {
+            "authenticated": False,
+            "auth_required": bool(auth_required_mode()),
+            "user": None,
+            "household": None,
+        }
     return {
         "authenticated": True,
+        "auth_required": bool(auth_required_mode()),
         "user": {
             "id": principal.user_id,
             "email": principal.email,
@@ -892,6 +979,8 @@ def _onboarding_state_payload() -> dict:
     buffer = _explicit_household_setting_decimal(SAFE_BUFFER_SETTING_KEY)
     shopping = _load_household_shopping_defaults()
 
+    plan = income_plan_payload(hid, at=datetime.now(timezone.utc))
+    current_plan = plan.get("current") or {}
     return {
         'is_onboarded': bool(account.is_onboarded),
         'show_onboarding': not bool(account.is_onboarded),
@@ -904,7 +993,10 @@ def _onboarding_state_payload() -> dict:
             'baseline_fuel_cost': fuel_baseline,
             'checking_balance': round(float(account.checking_balance), 2) if account.checking_balance is not None else None,
             'pay_period_days': int(account.pay_period_days or 0),
-            'expected_paycheck': round(float(account.expected_paycheck), 2) if account.expected_paycheck is not None else None,
+            'expected_paycheck': current_plan.get("expected_income"),
+            'expected_paycheck_suggested': (round(float(account.expected_paycheck), 2)
+                                             if not current_plan and account.expected_paycheck is not None else None),
+            'income_plan': plan,
             'next_payday': get_setting(NEXT_PAYDAY_SETTING_KEY, '') or None,
             'long_term_savings_target_percent': float(pyf_target) if pyf_target is not None else None,
             'protected_buffer': float(buffer) if buffer is not None else None,
@@ -914,6 +1006,7 @@ def _onboarding_state_payload() -> dict:
         },
         'bill_templates': bill_templates,
         'readiness': _onboarding_readiness(account),
+        'required_expense_review': _required_expense_review_state(),
     }
 
 
@@ -966,15 +1059,15 @@ def _persist_onboarding_financial_basics(account: Account, data: dict[str, Any])
             if pay_period_days < 1:
                 errors.append("pay_period_days must be at least 1 day.")
 
-    expected_paycheck = None
+    expected_paycheck_cents = None
     if "expected_paycheck" in data and data["expected_paycheck"] not in (None, ""):
         try:
-            expected_paycheck = round(float(data["expected_paycheck"]), 2)
-        except (TypeError, ValueError):
+            expected_paycheck_cents = _money_to_cents(data["expected_paycheck"], field_name="expected_paycheck")
+        except (TypeError, ValueError) as exc:
             errors.append("expected_paycheck must be a valid amount.")
         else:
-            if expected_paycheck < 0:
-                errors.append("expected_paycheck cannot be negative.")
+            if expected_paycheck_cents <= 0:
+                errors.append("expected_paycheck must be greater than zero.")
 
     next_payday = None
     if "next_payday" in data and data["next_payday"] not in (None, ""):
@@ -1010,10 +1103,30 @@ def _persist_onboarding_financial_basics(account: Account, data: dict[str, Any])
         set_balance_absolute(hid, _cents_to_float(balance_cents))
     if pay_period_days is not None:
         account.pay_period_days = pay_period_days
-    if expected_paycheck is not None:
-        account.expected_paycheck = expected_paycheck
     if next_payday is not None:
         set_setting(NEXT_PAYDAY_SETTING_KEY, next_payday.isoformat(), commit=False)
+    if expected_paycheck_cents is not None:
+        operation_id = str(data.get("expected_paycheck_operation_id") or "").strip()
+        if not operation_id:
+            return ["expected_paycheck_operation_id is required when confirming an expected paycheck."]
+        effective_payday = None
+        if IncomePlanVersion.query.filter_by(household_id=hid).first() is not None:
+            if next_payday is not None:
+                candidate = datetime.combine(next_payday, datetime.min.time(), tzinfo=timezone.utc)
+                cycle = resolve_cycle(account=account, now=datetime.now(timezone.utc),
+                                      next_income={"known": True, "date": candidate, "source": "user_pay_schedule"})
+                effective_payday = cycle.get("end") if cycle.get("available") else None
+            else:
+                inferred = _infer_next_income(account, datetime.now(timezone.utc))
+                cycle = resolve_cycle(account=account, now=datetime.now(timezone.utc), next_income=inferred)
+                effective_payday = cycle.get("end") if cycle.get("available") else None
+        try:
+            record_income_plan(hid, operation_id=operation_id,
+                               expected_income_cents=expected_paycheck_cents,
+                               now=datetime.now(timezone.utc), next_payday=effective_payday,
+                               source="onboarding_confirmation")
+        except IncomePlanError as exc:
+            return [str(exc)]
     if pyf_target is not None:
         set_setting(PYF_TARGET_SETTING_KEY, format(pyf_target.normalize(), "f"), commit=False)
     if buffer_cents is not None:
@@ -1390,16 +1503,23 @@ def _normalize_store_tax_context(
     store_id: str,
     store_address: str,
     postal_code: str,
+    city_state: str = "",
 ) -> dict[str, Any]:
+    address = str(store_address or "").strip()
+    explicit_city_state = str(city_state or "").strip()
+    if not explicit_city_state and address:
+        match = re.search(r",\s*([^,]+),\s*([A-Za-z]{2})\s+\d{5}(?:-\d{4})?\s*$", address)
+        if match:
+            explicit_city_state = f"{match.group(1).strip()}, {match.group(2).upper()}"
     return {
         "retailer": str(retailer or "").strip().lower() or "unknown",
         "retailer_store_id": str(store_id or "").strip() or "unknown",
         "store_name": str(store_name or "").strip(),
-        "store_address": str(store_address or "").strip(),
-        "zip_code": _normalize_zip_code(postal_code or account.zip_code or ""),
-        "city_state": str(account.city_state or "").strip(),
-        "latitude": account.latitude,
-        "longitude": account.longitude,
+        "store_address": address,
+        "zip_code": _normalize_zip_code(postal_code or ""),
+        "city_state": explicit_city_state,
+        "latitude": None,
+        "longitude": None,
     }
 
 
@@ -1413,6 +1533,10 @@ def _apply_owned_tax_to_cart(
     store_id: str,
     store_address: str,
     postal_code: str,
+    city_state: str = "",
+    purchase_context: str = "selected_physical_store",
+    actual_tax_cents: int | None = None,
+    actual_total_cents: int | None = None,
 ) -> dict[str, Any]:
     calculation_date = datetime.now(timezone.utc).date()
     context = _normalize_store_tax_context(
@@ -1422,6 +1546,7 @@ def _apply_owned_tax_to_cart(
         store_id=store_id,
         store_address=store_address,
         postal_code=postal_code,
+        city_state=city_state,
     )
 
     profile = resolve_store_tax_profile(
@@ -1437,40 +1562,37 @@ def _apply_owned_tax_to_cart(
         owner_scope=owner_scope,
     )
 
-    tax_result = calculate_cart_tax(
+    decision = canonical_tax_decision(
         store_tax_profile=profile,
         cart_items=cart_items,
         calculation_date=calculation_date,
         owner_scope=owner_scope,
+        purchase_context=purchase_context,
+        city=context["city_state"].split(",", 1)[0],
+        postal_code=context["zip_code"],
+        actual_tax_cents=actual_tax_cents,
+        actual_total_cents=actual_total_cents,
     )
 
     weighted_rate = 0.0
-    if tax_result.subtotal_cents > 0:
-        weighted_rate = float(tax_result.tax_cents / tax_result.subtotal_cents)
-
-    configured_grocery_rate = account.grocery_tax_rate
-    if configured_grocery_rate is None:
-        configured_grocery_rate = account.sales_tax_rate
-    if configured_grocery_rate is None:
-        configured_grocery_rate = 0.0
+    if decision["subtotal_cents"] > 0 and decision["tax_cents"] is not None:
+        weighted_rate = float(decision["tax_cents"] / decision["subtotal_cents"])
 
     return {
-        "subtotal": tax_cents_to_float(tax_result.subtotal_cents),
-        "tax_amount": tax_cents_to_float(tax_result.tax_cents),
-        "total_cart_cost": tax_cents_to_float(tax_result.estimated_total_cents),
-        "grocery_tax_rate": round(float(configured_grocery_rate) * 100, 3),
+        "subtotal": tax_cents_to_float(decision["subtotal_cents"]),
+        "tax_amount": tax_cents_to_float(decision["tax_cents"]) if decision["tax_cents"] is not None else None,
+        "total_cart_cost": tax_cents_to_float(decision["total_cents"]) if decision["total_cents"] is not None else None,
+        "grocery_tax_rate": round(weighted_rate * 100, 3),
         "applied_tax_pct": round(weighted_rate * 100, 3),
-        "tax_engine": {
+        "tax_engine": {**decision,
             "provider": "rung_owned",
-            "precision": tax_result.precision,
-            "confidence": tax_result.confidence,
-            "source_version": tax_result.source_version,
-            "unknown_class_count": tax_result.unknown_class_count,
-            "degraded_reason": tax_result.degraded_reason,
-            "subtotal_by_class_cents": tax_result.subtotal_by_class_cents,
-            "tax_by_class_cents": tax_result.tax_by_class_cents,
-            "effective_rate_bps": tax_result.effective_rate_bps,
-            "unknown_policy": "conservative:" + "unknown_uses_general_merchandise_rate",
+            "precision": decision["jurisdiction"]["precision"],
+            "confidence": decision["status"],
+            "source_version": decision["source"]["version"],
+            "unknown_class_count": decision["taxability_basis"]["unknown_class_count"],
+            "subtotal_by_class_cents": decision["taxability_basis"]["subtotal_by_class_cents"],
+            "tax_by_class_cents": decision["taxability_basis"]["tax_by_class_cents"],
+            "unknown_policy": "tax_not_included_until_supported",
         },
     }
 
@@ -1525,13 +1647,11 @@ def _planned_grocery_commitment_cents(account: Account, bills_total_cents: int, 
     if pct <= 0:
         return 0, "none"
 
-    expected_paycheck_cents = _money_to_cents(
-        getattr(account, "expected_paycheck", 0) or 0,
-        field_name="expected_paycheck",
-    )
+    plan = resolve_income_plan(account.household_id, at=datetime.now(timezone.utc))
+    expected_paycheck_cents = int(plan.expected_income_cents) if plan else 0
     if expected_paycheck_cents > 0:
         planning_base_cents = max(0, expected_paycheck_cents - bills_total_cents - gas_cents)
-        source = "expected_paycheck"
+        source = "income_plan_v1"
     else:
         checking_cents = _money_to_cents(account.checking_balance, field_name="checking_balance")
         planning_base_cents = max(0, checking_cents - bills_total_cents - gas_cents)
@@ -1565,7 +1685,8 @@ def _infer_next_income(account: Account, now_utc: datetime) -> dict[str, Any]:
                 "known": True,
                 "date": datetime.combine(next_date, datetime.min.time(), tzinfo=timezone.utc),
                 "days_until": max(0, (next_date - now_utc.date()).days),
-                "amount": round(float(account.expected_paycheck or 0.0), 2) or None,
+                "amount": (round(resolve_income_plan(account.household_id, at=now_utc).expected_income_cents / 100, 2)
+                           if resolve_income_plan(account.household_id, at=now_utc) else None),
                 "source": "user_pay_schedule",
             }
     latest_income = (
@@ -1579,7 +1700,8 @@ def _infer_next_income(account: Account, now_utc: datetime) -> dict[str, Any]:
             "known": False,
             "date": None,
             "days_until": None,
-            "amount": round(float(account.expected_paycheck or 0.0), 2) or None,
+            "amount": (round(resolve_income_plan(account.household_id, at=now_utc).expected_income_cents / 100, 2)
+                       if resolve_income_plan(account.household_id, at=now_utc) else None),
             "source": "missing_income_history",
         }
 
@@ -1593,15 +1715,14 @@ def _infer_next_income(account: Account, now_utc: datetime) -> dict[str, Any]:
     while next_dt.date() <= now_utc.date():
         next_dt = next_dt + timedelta(days=period_days)
 
-    amount = float(account.expected_paycheck or 0.0)
-    if amount <= 0:
-        amount = float(latest_income.amount or 0.0)
+    plan = resolve_income_plan(account.household_id, at=now_utc)
+    amount = (int(plan.expected_income_cents) / 100) if plan else None
 
     return {
         "known": True,
         "date": next_dt,
         "days_until": max(0, (next_dt.date() - now_utc.date()).days),
-        "amount": round(amount, 2),
+        "amount": round(amount, 2) if amount is not None else None,
         "source": "derived_from_income_history",
     }
 
@@ -1624,13 +1745,13 @@ def _household_readiness(account: Account | None, owner_scope: str = "anonymous"
         missing_financial.append("checking_balance")
 
     pay_period_days = int(account.pay_period_days or 0)
-    expected_paycheck = float(account.expected_paycheck or 0.0)
+    expected_paycheck = resolve_income_plan(account.household_id, at=datetime.now(timezone.utc))
     has_income_history = bool(
         _household_tx_query()
         .filter(ExpenseTransaction.category == "income")
         .first()
     )
-    if pay_period_days <= 0 or (expected_paycheck <= 0 and not has_income_history):
+    if pay_period_days <= 0 or (expected_paycheck is None and not has_income_history):
         missing_financial.append("pay_period_or_income_history")
 
     zip_code = str(account.zip_code or "").strip()
@@ -1893,8 +2014,9 @@ def _compute_safe_to_spend_snapshot(account: Account, owner_scope: str = "anonym
         missing.append("payday")
 
     period_income_cents = None
-    if account is not None and float(account.expected_paycheck or 0) > 0:
-        period_income_cents = _money_to_cents(account.expected_paycheck, field_name="expected_paycheck")
+    income_plan = resolve_income_plan(account.household_id, at=now) if account is not None else None
+    if income_plan is not None:
+        period_income_cents = int(income_plan.expected_income_cents)
     elif next_income.get("amount") is not None and float(next_income.get("amount") or 0) > 0:
         period_income_cents = _money_to_cents(next_income["amount"], field_name="period_income")
     else:
@@ -1912,9 +2034,23 @@ def _compute_safe_to_spend_snapshot(account: Account, owner_scope: str = "anonym
     else:
         protected_buffer_cents = _money_to_cents(buffer_cents, field_name="protected_buffer")
 
+    # Required-expense review is a presence/readiness fact, not a financial
+    # input. In particular, no rows must never be interpreted as the user
+    # having reviewed and confirmed that they have no required expenses.
+    # An explicit reviewed-none answer makes missing grocery/fuel components
+    # known zero for this snapshot only; it does not synthesize settings,
+    # Bills, or transactions.
+    required_expense_review = _required_expense_review_state()
+    no_expenses_reviewed = required_expense_review == REQUIRED_EXPENSE_NONE
+    if required_expense_review in {REQUIRED_EXPENSE_UNANSWERED, REQUIRED_EXPENSE_PENDING}:
+        missing.append("required_expenses_review")
+
     grocery_baseline_cents = _explicit_household_preference_cents("baseline_grocery_cost")
     if grocery_baseline_cents is None:
-        missing.append("grocery_need")
+        if no_expenses_reviewed:
+            grocery_baseline_cents = 0
+        else:
+            missing.append("grocery_need")
 
     window_end = next_income.get("date") if isinstance(next_income.get("date"), datetime) else None
     if window_end is None and pay_period_days > 0:
@@ -1931,8 +2067,11 @@ def _compute_safe_to_spend_snapshot(account: Account, owner_scope: str = "anonym
 
     fuel_bill = _household_bill_query().filter_by(is_gas_estimate=True, is_paid=False).first()
     if fuel_bill is None:
-        fuel_cents = None
-        missing.append("fuel_or_transport_need")
+        if no_expenses_reviewed:
+            fuel_cents = 0
+        else:
+            fuel_cents = None
+            missing.append("fuel_or_transport_need")
     else:
         fuel_cents = _money_to_cents(fuel_bill.amount, field_name="fuel need")
 
@@ -1975,12 +2114,14 @@ def _compute_safe_to_spend_snapshot(account: Account, owner_scope: str = "anonym
         "usable_money": _cents_to_float(checking_cents) if checking_cents is not None else None,
         "actual_forecast_needs": snapshot.get("needs_total"),
         "bills_before_payday": _cents_to_float(bills_total_cents),
+        "bills_before_payday_count": len(bills) if window_end is not None else 0,
         "grocery_commitment_total": _cents_to_float(grocery_baseline_cents) if grocery_baseline_cents is not None else None,
         "grocery_spend_to_date": _cents_to_float(grocery_spend_cents),
         "groceries_remaining": _cents_to_float(grocery_remaining_cents) if grocery_remaining_cents is not None else None,
         "other_committed_spending": _cents_to_float(fuel_cents) if fuel_cents is not None else None,
         "protected_buffer": _cents_to_float(protected_buffer_cents) if protected_buffer_cents is not None else None,
         "grocery_commitment_source": "explicit_onboarding_baseline" if grocery_baseline_cents is not None else "missing_setup",
+        "required_expense_review": required_expense_review,
     }
     if snapshot.get("complete"):
         lines = [
@@ -2079,9 +2220,11 @@ def compute_liquidity_metrics(account):
         "location": {
             "zip_code": location_zip,
             "city_state": location_city_state,
-            "sales_tax_rate": account.sales_tax_rate if account.sales_tax_rate is not None else 0.0825,
-            "sales_tax_pct": round(((account.sales_tax_rate if account.sales_tax_rate is not None else 0.0825) * 100), 3),
-            "grocery_tax_rate": account.grocery_tax_rate if account.grocery_tax_rate is not None else 0.0125,
+            "sales_tax_rate": None,
+            "sales_tax_pct": None,
+            "grocery_tax_rate": None,
+            "tax_authority": "canonical_tax_engine_at_purchase",
+            "legacy_tax_rates_authoritative": False,
             "store_name": selected_store.get("name") or "",
             "location_id": selected_store.get("store_id") or "",
             "selected_store": selected_store,
@@ -2754,9 +2897,6 @@ def location_select_store():
     if city_state and "," in city_state:
         state_code = city_state.rsplit(",", 1)[-1].strip().upper()
 
-    explicit_sales_tax = data.get("sales_tax_rate")
-    explicit_grocery_tax = data.get("grocery_tax_rate")
-
     store_address = str(data.get("store_address") or "").strip()
     store_city = str(data.get("city") or "").strip()
     if not store_city and city_state:
@@ -2773,15 +2913,6 @@ def location_select_store():
         account=account,
     )
 
-    if explicit_sales_tax is not None:
-        account.sales_tax_rate = _coerce_rate(explicit_sales_tax)
-    if explicit_grocery_tax is not None:
-        account.grocery_tax_rate = _coerce_rate(explicit_grocery_tax)
-    if explicit_sales_tax is None and explicit_grocery_tax is None and zip_code:
-        inferred_sales_tax, inferred_grocery_tax = _estimate_tax_rates_for_location(zip_code, state_code)
-        account.sales_tax_rate = inferred_sales_tax
-        account.grocery_tax_rate = inferred_grocery_tax
-
     try:
         db.session.commit()
     except Exception:
@@ -2797,8 +2928,7 @@ def location_select_store():
         "location": {
             "zip_code": account.zip_code or "",
             "city_state": account.city_state or "",
-            "sales_tax_rate": float(account.sales_tax_rate if account.sales_tax_rate is not None else 0.0825),
-            "grocery_tax_rate": float(account.grocery_tax_rate if account.grocery_tax_rate is not None else 0.0125),
+            "tax_authority": "canonical_tax_engine_at_purchase",
             "store_name": selected["name"],
             "location_id": selected["store_id"],
             "is_saved": True,
@@ -3542,7 +3672,13 @@ def transactions_crud():
         db.session.add(t)
         apply_balance_delta(hid, -amount)
         db.session.commit()
-        return jsonify({"message": "Expense logged", "id": t.id, "new_balance": _household_account().checking_balance if account else None})
+        return jsonify({
+            "message": "Expense logged",
+            "id": t.id,
+            "new_balance": _household_account().checking_balance if account else None,
+            "amount_authority": "confirmed_transaction_total",
+            "tax_estimate_applied": False,
+        })
     # GET list
     txns = _household_tx_query().order_by(ExpenseTransaction.date.desc()).all()
     return jsonify([{
@@ -4142,6 +4278,32 @@ def onboarding_state():
     return jsonify(_onboarding_state_payload())
 
 
+@app.route("/api/onboarding/required-expenses-review", methods=["POST"])
+def onboarding_required_expenses_review():
+    """Persist the household's explicit required-expense review transition.
+
+    This intentionally changes only the canonical review state. It never
+    creates, modifies, or deletes Bills/Needs, so an explicit "no expenses"
+    answer cannot manufacture financial data or erase real financial data.
+    """
+    data = request.json or {}
+    answer = str(data.get("answer") or "").strip().lower()
+    if answer == "no":
+        state = REQUIRED_EXPENSE_NONE
+    elif answer == "yes":
+        state = REQUIRED_EXPENSE_REVIEWED if data.get("review_complete") is True else REQUIRED_EXPENSE_PENDING
+    else:
+        return jsonify({"error": "answer must be 'yes' or 'no'."}), 400
+
+    set_setting(REQUIRED_EXPENSE_REVIEW_SETTING_KEY, state)
+    account = get_household_account(current_household_id())
+    return jsonify({
+        "saved": True,
+        "required_expense_review": state,
+        "readiness": _onboarding_readiness(account),
+    })
+
+
 @app.route("/api/onboarding/skip", methods=["POST"])
 def onboarding_skip():
     """Mark onboarding complete without requiring any setup input."""
@@ -4168,6 +4330,19 @@ def onboarding_complete():
 
     hid = current_household_id()
     account = get_household_account(hid)
+
+    # An explicit durable "no required expenses" review answer is authoritative
+    # over whatever the client happens to submit. This protects against a
+    # browser that switched a YES-review answer back to NO without clearing
+    # already-typed grocery/fuel/bill fields: those stale values must never
+    # manufacture Bills or baseline preferences once the household has
+    # explicitly reviewed and confirmed zero required expenses.
+    review_state = _required_expense_review_state()
+    if review_state == REQUIRED_EXPENSE_NONE:
+        data = dict(data)
+        data.pop('baseline_grocery_cost', None)
+        data.pop('baseline_fuel_cost', None)
+        data.pop('recurring_bills', None)
 
     household_size = data.get('household_size', account.household_size or 4)
     try:
@@ -4281,6 +4456,8 @@ def update_account():
     if not account:
         return jsonify({"error": "Account not found"}), 404
     data = request.json or {}
+    if "expected_paycheck" in data and not str(data.get("expected_paycheck_operation_id") or "").strip():
+        return jsonify({"error": "expected_paycheck_operation_id is required when confirming an expected paycheck."}), 400
     checking_balance = float(account.checking_balance or 0.0)
     if "checking_balance" in data:
         checking_balance = set_balance_absolute(current_household_id(), float(data["checking_balance"]))
@@ -4290,10 +4467,28 @@ def update_account():
         account.pay_period_days = int(data["pay_period_days"])
     if "meals_per_day" in data:
         account.meals_per_day = int(data["meals_per_day"])
+    plan_created = False
     if "expected_paycheck" in data:
-        account.expected_paycheck = float(data["expected_paycheck"])
+        try:
+            cents = _money_to_cents(data["expected_paycheck"], field_name="expected_paycheck")
+            if cents <= 0:
+                raise IncomePlanError("Expected paycheck must be greater than zero.")
+            now = datetime.now(timezone.utc)
+            inferred = _infer_next_income(account, now)
+            cycle = resolve_cycle(account=account, now=now, next_income=inferred)
+            _row, plan_created = record_income_plan(
+                current_household_id(), operation_id=str(data["expected_paycheck_operation_id"]).strip(),
+                expected_income_cents=cents, now=now,
+                next_payday=cycle.get("end") if cycle.get("available") else None,
+                source="settings_confirmation",
+            )
+        except (IncomePlanError, ValueError) as exc:
+            db.session.rollback()
+            return jsonify({"error": str(exc)}), 400
     db.session.commit()
-    return jsonify({"message": "Account updated", "checking_balance": round(checking_balance, 2)})
+    return jsonify({"message": "Account updated", "checking_balance": round(checking_balance, 2),
+                    "income_plan_created": plan_created,
+                    "income_plan": income_plan_payload(current_household_id(), at=datetime.now(timezone.utc))})
 
 # ----- GROCERY LIST (GET/DELETE) --------------------------------------------
 
@@ -4301,6 +4496,40 @@ def update_account():
 def grocery_list():
     if request.method == "POST":
         data = request.json or {}
+        # Shopping's direct-item entry writes an abstract household request,
+        # never a fabricated product, price, package, or store observation.
+        # Product resolution remains the responsibility of the canonical cart
+        # pipeline after the user has explicitly selected a physical store.
+        item_name = str(data.get("item_name") or "").strip()
+        if item_name:
+            if len(item_name) > 150:
+                return jsonify({"error": "Item name is too long."}), 400
+            existing = _household_grocery_query().filter(
+                GroceryItem.is_purchased.is_(False),
+                db.func.lower(GroceryItem.item_name) == item_name.lower(),
+                db.or_(GroceryItem.recipe_ids == '', GroceryItem.recipe_ids.is_(None)),
+            ).first()
+            if existing:
+                return jsonify({
+                    "message": "Item is already on this shopping list.",
+                    "item": {"id": existing.id, "item_name": existing.item_name},
+                    "created": False,
+                })
+            selected = get_selected_store(current_household_id(), account=_household_account())
+            row = GroceryItem(
+                household_id=current_household_id(),
+                item_name=item_name,
+                estimated_price=0.0,
+                store_name=str(selected.get("name") or ""),
+                location_context=str(selected.get("address") or ""),
+            )
+            db.session.add(row)
+            db.session.commit()
+            return jsonify({
+                "message": "Shopping item added.",
+                "item": {"id": row.id, "item_name": row.item_name},
+                "created": True,
+            }), 201
         recipe_ids = data.get("recipe_ids", [])
         store_name = data.get("store_name", "")
         # Build cart from recipes
@@ -4657,6 +4886,70 @@ def grocery_finished_shopping_status():
     })
 
 
+def _apply_canonical_tax_to_rebalance_preview(
+    preview: dict[str, Any],
+    cart_items: list[dict[str, Any]],
+    *,
+    retailer: str,
+    owner_scope: str,
+) -> dict[str, Any]:
+    """Replace optimizer subtotal comparisons with canonical store-tax totals."""
+    account = _household_account()
+    selected = get_selected_store(current_household_id(), account=account) if account else {}
+    if not account or not selected.get("canonical") or str(selected.get("retailer") or "").lower() != retailer:
+        return {**preview, "eligible": False, "status": "tax_context_required", "tax": {"status": "tax_not_included_yet", "label": "Tax not included yet"}}
+
+    proposed_items = json.loads(json.dumps(cart_items))
+    changes = {str(row.get("choice_key") or ""): row for row in preview.get("changes") or []}
+    for item in proposed_items:
+        requirement = item.get("requirement") or {}
+        key = " ".join(str(requirement.get("base_item") or item.get("keyword") or "").strip().lower().split())
+        change = changes.get(key)
+        if not change:
+            continue
+        product = dict(change.get("proposed_product") or {})
+        item["selected_product"] = {**dict(item.get("selected_product") or {}), **product, "retailer": retailer}
+        item["estimated_price"] = _cents_to_float(int(product.get("line_price_cents") or 0))
+        item["product_label"] = product.get("title") or item.get("product_label")
+
+    common = {
+        "account": account,
+        "owner_scope": owner_scope,
+        "retailer": retailer,
+        "store_name": str(selected.get("name") or "Selected store"),
+        "store_id": str(selected.get("store_id") or ""),
+        "store_address": str(selected.get("address") or ""),
+        "postal_code": str(selected.get("postal_code") or ""),
+        "city_state": ", ".join(filter(None, [str(selected.get("city") or "").strip(), str(selected.get("state") or "").strip()])),
+    }
+    base_tax = _apply_owned_tax_to_cart(cart_items=json.loads(json.dumps(cart_items)), **common)
+    proposed_tax = _apply_owned_tax_to_cart(cart_items=proposed_items, **common)
+    if base_tax["total_cart_cost"] is None or proposed_tax["total_cart_cost"] is None:
+        return {**preview, "eligible": False, "status": "tax_context_required", "tax": proposed_tax["tax_engine"]}
+
+    base_total = _money_to_cents(base_tax["total_cart_cost"], field_name="base total")
+    optimized_total = _money_to_cents(proposed_tax["total_cart_cost"], field_name="optimized total")
+    budget_cents = int(preview.get("budget_cents") or 0)
+    changes_list = preview.get("changes") or []
+    status = "within_budget" if base_total <= budget_cents else (
+        "rebalance_available" if changes_list and optimized_total <= budget_cents else (
+            "rebalance_partial" if changes_list else "over_budget_no_acceptable_savings"
+        )
+    )
+    return {
+        **preview,
+        "eligible": bool(changes_list),
+        "status": status,
+        "base_total_cents": base_total,
+        "optimized_total_cents": optimized_total,
+        "required_savings_cents": max(0, base_total - budget_cents),
+        "max_available_savings_cents": max(0, base_total - optimized_total),
+        "remaining_cents": max(0, budget_cents - optimized_total),
+        "still_over_budget_cents": max(0, optimized_total - budget_cents),
+        "tax": proposed_tax["tax_engine"],
+    }
+
+
 @app.route("/api/grocery/rebalance/preview", methods=["POST"])
 def grocery_rebalance_preview():
     from services.retail.cart import _load_household_shopping_defaults, propose_rebalance_preview
@@ -4664,7 +4957,6 @@ def grocery_rebalance_preview():
     data = request.json or {}
     cart_items = data.get("cart_items") or []
     budget_limit = float(data.get("budget_limit") or 0)
-    tax_rate = float(data.get("tax_rate") or 0)
     raw_context = data.get("cart_context")
     context: dict[str, Any] = raw_context if isinstance(raw_context, dict) else {}
     retailer = str(context.get("retailer") or data.get("retailer") or "walmart").strip().lower()
@@ -4680,12 +4972,13 @@ def grocery_rebalance_preview():
     preview = propose_rebalance_preview(
         cart_items=cart_items,
         budget_limit=budget_limit,
-        tax_rate=tax_rate,
+        tax_rate=0.0,
         retailer=retailer,
         defaults=_load_household_shopping_defaults(),
         protected_choice_keys=protected,
         context=context,
     )
+    preview = _apply_canonical_tax_to_rebalance_preview(preview, cart_items, retailer=retailer, owner_scope=_resolve_request_user_id(data))
     preview["protected_choice_keys"] = sorted(protected)
     return jsonify(preview)
 
@@ -4697,7 +4990,6 @@ def grocery_rebalance_apply():
     data = request.json or {}
     cart_items = data.get("cart_items") or []
     budget_limit = float(data.get("budget_limit") or 0)
-    tax_rate = float(data.get("tax_rate") or 0)
     raw_context = data.get("cart_context")
     context: dict[str, Any] = raw_context if isinstance(raw_context, dict) else {}
     retailer = str(context.get("retailer") or data.get("retailer") or "walmart").strip().lower()
@@ -4717,12 +5009,16 @@ def grocery_rebalance_apply():
     current_preview = propose_rebalance_preview(
         cart_items=cart_items,
         budget_limit=budget_limit,
-        tax_rate=tax_rate,
+        tax_rate=0.0,
         retailer=retailer,
         defaults=_load_household_shopping_defaults(),
         protected_choice_keys=protected,
         context=context,
     )
+    current_preview = _apply_canonical_tax_to_rebalance_preview(current_preview, cart_items, retailer=retailer, owner_scope=_resolve_request_user_id(data))
+
+    if current_preview.get("status") == "tax_context_required":
+        return jsonify({"error": "Confirm a supported selected-store tax context before applying a rebalance.", "code": "tax_context_required", "current_preview": current_preview}), 409
 
     if (
         str(preview_meta.get("context_fingerprint") or "") != str(current_preview.get("context_fingerprint") or "")
@@ -4740,6 +5036,118 @@ def grocery_rebalance_apply():
         "preview": current_preview,
     })
 
+def _savings_request_cents(data: dict[str, Any], key: str = "amount") -> int:
+    cents_key = key + "_cents"
+    if cents_key in data:
+        try: cents = int(data[cents_key])
+        except (TypeError, ValueError): raise SavingsError(f"{cents_key} must be whole cents.")
+        if cents <= 0: raise SavingsError(f"{cents_key} must be positive.")
+        return cents
+    return _money_to_cents(data.get(key), field_name=key)
+
+
+def _parse_optional_date(value: Any) -> date | None:
+    if value in (None, ""): return None
+    try: return date.fromisoformat(str(value))
+    except ValueError: raise SavingsError("target_date must use YYYY-MM-DD.")
+
+
+@app.route("/api/savings/state", methods=["GET"])
+def get_savings_state():
+    account = _household_account()
+    return jsonify(savings_state(current_household_id(), pay_period_days=max(1, int(account.pay_period_days or 14))))
+
+
+@app.route("/api/goals", methods=["POST"])
+def create_goal_api():
+    data = request.json or {}
+    try:
+        create_savings_goal(current_household_id(), operation_id=str(data.get("operation_id") or "").strip(), name=str(data.get("name") or ""), target_cents=_savings_request_cents(data, "target"), target_date=_parse_optional_date(data.get("target_date")), priority=int(data.get("priority", 100)))
+        return jsonify(savings_state(current_household_id(), pay_period_days=max(1, int(_household_account().pay_period_days or 14)))), 201
+    except (SavingsError, ValueError) as exc: db.session.rollback(); return jsonify({"error": str(exc)}), 400
+
+
+@app.route("/api/goals/<int:goal_id>", methods=["PATCH"])
+def update_goal_api(goal_id: int):
+    data = request.json or {}; changes: dict[str, Any] = {}
+    try:
+        for key in ("name", "priority", "status"):
+            if key in data: changes[key] = data[key]
+        if "target" in data or "target_cents" in data: changes["target_cents"] = _savings_request_cents(data, "target")
+        if "target_date" in data: changes["target_date"] = _parse_optional_date(data.get("target_date"))
+        update_savings_goal(current_household_id(), goal_id, changes)
+        return jsonify(savings_state(current_household_id(), pay_period_days=max(1, int(_household_account().pay_period_days or 14))))
+    except (SavingsError, ValueError) as exc: db.session.rollback(); return jsonify({"error": str(exc)}), 400
+
+
+@app.route("/api/reserves", methods=["POST"])
+def create_reserve_api():
+    data = request.json or {}
+    try:
+        create_savings_reserve(current_household_id(), operation_id=str(data.get("operation_id") or "").strip(), name=str(data.get("name") or ""), category=str(data.get("category") or "custom"), target_cents=_savings_request_cents(data, "target"), priority=int(data.get("priority", 100)))
+        return jsonify(savings_state(current_household_id(), pay_period_days=max(1, int(_household_account().pay_period_days or 14)))), 201
+    except (SavingsError, ValueError) as exc: db.session.rollback(); return jsonify({"error": str(exc)}), 400
+
+
+@app.route("/api/reserves/<int:reserve_id>", methods=["PATCH"])
+def update_reserve_api(reserve_id: int):
+    data = request.json or {}; changes: dict[str, Any] = {}
+    try:
+        for key in ("name", "priority", "status"):
+            if key in data: changes[key] = data[key]
+        if "target" in data or "target_cents" in data: changes["target_cents"] = _savings_request_cents(data, "target")
+        update_savings_reserve(current_household_id(), reserve_id, changes)
+        return jsonify(savings_state(current_household_id(), pay_period_days=max(1, int(_household_account().pay_period_days or 14))))
+    except (SavingsError, ValueError) as exc: db.session.rollback(); return jsonify({"error": str(exc)}), 400
+
+
+@app.route("/api/savings/transfer", methods=["POST"])
+def savings_transfer_api():
+    data = request.json or {}
+    if data.get("confirm") is not True: return jsonify({"error": "Review and confirm this transfer before saving.", "requires_confirmation": True}), 409
+    try:
+        source_id = int(data["source_destination_id"]) if data.get("source_destination_id") is not None else None
+        transfer_type = str(data.get("transfer_type") or "transfer")
+        purpose = str(data.get("purpose") or "")
+        if transfer_type == "reserve_use" and source_id is not None:
+            source_reserve = SavingsReserve.query.filter_by(household_id=current_household_id(), destination_id=source_id).first()
+            if source_reserve is None: raise SavingsError("Reserve use must come from a Reserve.")
+            match = match_reserve_purpose(purpose)
+            if source_reserve.category != "emergency" and match.get("category") != source_reserve.category:
+                return jsonify({"error": "The purpose does not clearly match this protected Reserve.", "purpose_match": match, "requires_review": True}), 409
+        row = savings_transfer(current_household_id(), operation_id=str(data.get("operation_id") or "").strip(), amount_cents=_savings_request_cents(data), source_id=source_id, destination_id=int(data["destination_id"]) if data.get("destination_id") is not None else None, transfer_type=transfer_type, purpose=purpose)
+        return jsonify({"transfer_id": row.id, "operation_id": row.operation_id, "is_expense": False, "state": savings_state(current_household_id(), pay_period_days=max(1, int(_household_account().pay_period_days or 14)))})
+    except (SavingsError, ValueError) as exc: db.session.rollback(); return jsonify({"error": str(exc)}), 400
+
+
+@app.route("/api/savings/allocation/preview", methods=["GET"])
+def savings_allocation_preview_api():
+    account = _household_account(); pyf = _compute_safe_to_spend_snapshot(account)
+    if not pyf.get("complete"): return jsonify({"error": "Complete financial setup before allocating savings.", "pyf": pyf}), 409
+    return jsonify(savings_allocation_plan(current_household_id(), int(pyf.get("feasible_savings_cents") or 0), pay_period_days=max(1, int(account.pay_period_days or 14))))
+
+
+@app.route("/api/savings/allocation/apply", methods=["POST"])
+def savings_allocation_apply_api():
+    data = request.json or {}
+    if data.get("confirm") is not True: return jsonify({"error": "Review and confirm the allocation before saving.", "requires_confirmation": True}), 409
+    operation_id = str(data.get("operation_id") or "").strip()
+    if not operation_id: return jsonify({"error": "operation_id is required."}), 400
+    account = _household_account(); pyf = _compute_safe_to_spend_snapshot(account)
+    if not pyf.get("complete"): return jsonify({"error": "Complete financial setup before allocating savings."}), 409
+    plan = savings_allocation_plan(current_household_id(), int(pyf.get("feasible_savings_cents") or 0), pay_period_days=max(1, int(account.pay_period_days or 14)))
+    try:
+        cycle_key = str(pyf.get("window_end") or "").split("T", 1)[0] or f"pay-period-{max(1, int(account.pay_period_days or 14))}"
+        run = apply_savings_allocation(current_household_id(), operation_id=operation_id, cycle_key=cycle_key, plan=plan)
+        return jsonify({"allocation_run_id": run.id, "operation_id": run.operation_id, "plan": plan, "state": savings_state(current_household_id(), pay_period_days=max(1, int(account.pay_period_days or 14)))})
+    except (SavingsError, IntegrityError) as exc: db.session.rollback(); return jsonify({"error": str(exc)}), 400
+
+
+@app.route("/api/reserves/purpose-match", methods=["POST"])
+def reserve_purpose_match_api():
+    return jsonify(match_reserve_purpose(str((request.json or {}).get("text") or "")))
+
+
 @app.route("/api/budget/summary", methods=["GET"])
 def get_budget_summary():
     account = _household_account()
@@ -4747,9 +5155,217 @@ def get_budget_summary():
         return jsonify({"error": "Account settings missing"}), 400
     owner_scope = _resolve_request_user_id({"user_id": request.args.get("user_id")})
     metrics = compute_liquidity_metrics(account)
+    plan = income_plan_payload(current_household_id(), at=datetime.now(timezone.utc))
+    metrics["account_state"] = {
+        "checking_balance": round(float(account.checking_balance), 2) if account.checking_balance is not None else None,
+        "pay_period_days": int(account.pay_period_days or 0),
+        "expected_paycheck": (plan.get("current") or {}).get("expected_income"),
+        "expected_paycheck_authority": "income_plan_v1",
+        "next_expected_paycheck": (plan.get("pending") or {}).get("expected_income"),
+        "next_expected_paycheck_effective_at": (plan.get("pending") or {}).get("effective_at"),
+        "legacy_expected_paycheck_suggestion": (round(float(account.expected_paycheck), 2)
+                                                  if not plan.get("current") and account.expected_paycheck is not None else None),
+    }
     metrics["readiness"] = _household_readiness(account, owner_scope=owner_scope)
     metrics["safe_to_spend"] = _compute_safe_to_spend_snapshot(account, owner_scope=owner_scope)
     return jsonify(metrics)
+
+
+@app.route("/api/paycheck-timeline", methods=["GET"])
+def paycheck_timeline_api():
+    """Read-only Package 15 projection; this endpoint never creates an account."""
+    account = _household_account(create_if_missing=False)
+    if account is None:
+        return jsonify({
+            "authority": "paycheck_timeline_v1", "read_only": True,
+            "status": "unavailable", "setup_needed": True,
+            "cycle": {"available": False, "missing": ["account", "authoritative_pay_schedule"]},
+            "events": [], "important_events": [],
+            "trajectory": {"status": "unavailable", "amount_cents": None, "amount": None,
+                           "reasons": ["Complete financial and pay-cycle setup to use the timeline."]},
+        })
+    hid = current_household_id()
+    owner_scope = _resolve_request_user_id({"user_id": request.args.get("user_id")})
+    now = datetime.now(timezone.utc)
+    next_income = _infer_next_income(account, now)
+    pyf = _compute_safe_to_spend_snapshot(account, owner_scope=owner_scope, now_utc=now)
+    payload = build_paycheck_timeline(
+        household_id=hid, account=account, now=now, next_income=next_income,
+        pyf_snapshot=pyf,
+        bill_query=lambda household_id, start, end: Bill.query.filter(
+            Bill.household_id == household_id, Bill.due_date >= start, Bill.due_date < end,
+        ).order_by(Bill.due_date.asc(), Bill.id.asc()).all(),
+        transaction_query=lambda household_id, start, end: ExpenseTransaction.query.filter(
+            ExpenseTransaction.household_id == household_id,
+            ExpenseTransaction.date >= start, ExpenseTransaction.date < end,
+        ).order_by(ExpenseTransaction.date.asc(), ExpenseTransaction.id.asc()).all(),
+        transfer_query=lambda household_id, start, end: SavingsTransfer.query.filter(
+            SavingsTransfer.household_id == household_id,
+            SavingsTransfer.created_at >= start, SavingsTransfer.created_at < end,
+        ).order_by(SavingsTransfer.created_at.asc(), SavingsTransfer.id.asc()).all(),
+        allocation_query=lambda household_id, cycle_key: SavingsAllocationRun.query.filter_by(
+            household_id=household_id, cycle_key=cycle_key,
+        ).order_by(SavingsAllocationRun.id.asc()).all(),
+        destination_query=lambda household_id: SavingsDestination.query.filter_by(
+            household_id=household_id,
+        ).order_by(SavingsDestination.id.asc()).all(),
+    )
+    payload["safe_to_spend_proof"] = {
+        "authority": pyf.get("authority"),
+        "safe_to_spend_cents": pyf.get("safe_to_spend_cents"),
+        "trajectory_affects_safe_to_spend": False,
+    }
+    return jsonify(payload)
+
+
+@app.route("/api/payday-recap", methods=["GET"])
+def payday_recap_api():
+    """Read-only Package 17 completed-cycle recap."""
+    hid = current_household_id()
+    account = Account.query.filter_by(household_id=hid).first()
+    if account is None:
+        return jsonify({
+            "authority": "payday_recap_v1", "read_only": True,
+            "status": "missing_setup", "completed_cycle": None,
+            "finish_status": "unavailable", "finish_amount_cents": None,
+            "finish_amount": None,
+            "finish_reasons": ["Complete financial and pay-cycle setup before Rung can identify a finished cycle."],
+            "protected_summary": None, "biggest_changes": [],
+            "completed_cycle_detail": None, "current_cycle": None,
+            "next_payday": None, "current_safe_to_spend_cents": None,
+            "current_safe_to_spend": None,
+            "safe_to_spend_authority": "canonical_pyf_v1",
+            "current_setup_complete": False,
+            "current_setup_missing": ["account", "authoritative_pay_schedule"],
+            "informational_only": True, "financial_mutations": False,
+            "safe_to_spend_effect_cents": 0,
+        })
+    now = datetime.now(timezone.utc)
+    owner_scope = _resolve_request_user_id({"user_id": request.args.get("user_id")})
+    current_safe = _compute_safe_to_spend_snapshot(account, owner_scope=owner_scope, now_utc=now)
+    return jsonify(build_payday_recap(
+        household_id=hid, account=account, now=now,
+        next_income=_infer_next_income(account, now),
+        current_safe_snapshot=current_safe,
+        bill_query=lambda household_id, start, end: Bill.query.filter(
+            Bill.household_id == household_id, Bill.due_date >= start, Bill.due_date < end,
+        ).order_by(Bill.due_date.asc(), Bill.id.asc()).all(),
+        transaction_query=lambda household_id, start, end: ExpenseTransaction.query.filter(
+            ExpenseTransaction.household_id == household_id,
+            ExpenseTransaction.date >= start, ExpenseTransaction.date < end,
+        ).order_by(ExpenseTransaction.date.asc(), ExpenseTransaction.id.asc()).all(),
+        transfer_query=lambda household_id, start, end: SavingsTransfer.query.filter(
+            SavingsTransfer.household_id == household_id,
+            SavingsTransfer.created_at >= start, SavingsTransfer.created_at < end,
+        ).order_by(SavingsTransfer.created_at.asc(), SavingsTransfer.id.asc()).all(),
+        allocation_query=lambda household_id, cycle_key: SavingsAllocationRun.query.filter_by(
+            household_id=household_id, cycle_key=cycle_key,
+        ).order_by(SavingsAllocationRun.id.asc()).all(),
+        destination_query=lambda household_id: SavingsDestination.query.filter_by(
+            household_id=household_id,
+        ).order_by(SavingsDestination.id.asc()).all(),
+        income_plan_resolver=lambda household_id, cycle_start: resolve_income_plan(
+            household_id, at=cycle_start,
+        ),
+    ))
+
+
+def _behavior_intelligence_snapshot() -> dict[str, Any]:
+    hid = current_household_id()
+    now = datetime.now(timezone.utc)
+    # Intelligence is useful before balance setup and must not create an
+    # Account merely because a household reads or saves an advisory choice.
+    account = Account.query.filter_by(household_id=hid).first()
+    return build_behavior_intelligence(
+        household_id=hid,
+        transactions=ExpenseTransaction.query.filter_by(household_id=hid).order_by(
+            ExpenseTransaction.date.asc(), ExpenseTransaction.id.asc()).all(),
+        bills=Bill.query.filter_by(household_id=hid).order_by(Bill.id.asc()).all(),
+        decisions=BehaviorIntelligenceDecision.query.filter_by(household_id=hid).order_by(
+            BehaviorIntelligenceDecision.created_at.asc(), BehaviorIntelligenceDecision.id.asc()).all(),
+        now=now,
+        checking_cents=_money_to_cents(account.checking_balance, field_name="checking_balance") if account and account.checking_balance is not None else None,
+    )
+
+
+@app.route("/api/behavior-intelligence", methods=["GET"])
+def behavior_intelligence_api():
+    return jsonify(_behavior_intelligence_snapshot())
+
+
+@app.route("/api/behavior-intelligence/decision", methods=["POST"])
+def behavior_intelligence_decision_api():
+    data = request.json or {}
+    operation_id = str(data.get("operation_id") or "").strip()
+    candidate_key = str(data.get("candidate_key") or "").strip().lower()
+    action = str(data.get("action") or "").strip().lower()
+    classification = str(data.get("classification") or "").strip().lower() or None
+    if not operation_id or not candidate_key or action not in {"ignore", "important", "classify"}:
+        return jsonify({"error": "operation_id, candidate_key, and a supported action are required."}), 400
+    if action == "classify" and classification not in {"need", "discretionary", "transfer"}:
+        return jsonify({"error": "A supported household classification is required."}), 400
+    if action != "classify": classification = None
+    hid = current_household_id()
+    existing = BehaviorIntelligenceDecision.query.filter_by(household_id=hid, operation_id=operation_id).first()
+    requested = (candidate_key, action, classification)
+    if existing:
+        if (existing.candidate_key, existing.action, existing.classification) != requested:
+            return jsonify({"error": "operation_id was already used for a different decision."}), 409
+        return jsonify({"decision_id": existing.id, "already_applied": True, "intelligence": _behavior_intelligence_snapshot()})
+    try:
+        row = BehaviorIntelligenceDecision(
+            household_id=hid, operation_id=operation_id, candidate_key=candidate_key,
+            action=action, classification=classification,
+            pattern_signature=str(data.get("pattern_signature") or "").strip() or None,
+            typical_amount_cents=int(data["typical_amount_cents"]) if data.get("typical_amount_cents") is not None else None,
+            cadence_days=int(data["cadence_days"]) if data.get("cadence_days") is not None else None,
+            occurrence_count=int(data["occurrence_count"]) if data.get("occurrence_count") is not None else None,
+        )
+        db.session.add(row); db.session.commit()
+    except (TypeError, ValueError):
+        db.session.rollback(); return jsonify({"error": "Decision evidence must use whole-number values."}), 400
+    except IntegrityError:
+        db.session.rollback()
+        existing = BehaviorIntelligenceDecision.query.filter_by(household_id=hid, operation_id=operation_id).first()
+        if existing:
+            if (existing.candidate_key, existing.action, existing.classification) != requested:
+                return jsonify({"error": "operation_id was already used for a different decision."}), 409
+            return jsonify({"decision_id": existing.id, "already_applied": True, "intelligence": _behavior_intelligence_snapshot()})
+        raise
+    return jsonify({"decision_id": row.id, "already_applied": False, "intelligence": _behavior_intelligence_snapshot()}), 201
+
+
+@app.route("/api/behavior-intelligence/stage-recurring-bill", methods=["POST"])
+def behavior_intelligence_stage_recurring_bill_api():
+    data = request.json or {}; candidate_key = str(data.get("candidate_key") or "").strip().lower()
+    candidate = next((row for row in _behavior_intelligence_snapshot()["recurring_candidates"] if row["candidate_key"] == candidate_key), None)
+    if candidate is None or candidate.get("existing_bill"):
+        return jsonify({"error": "That recurring candidate is unavailable or already represented by a Bill."}), 404
+    evidence = candidate["evidence"]; due = datetime.now(timezone.utc) + timedelta(days=max(1, int(evidence.get("cadence_days") or 30)))
+    staged = {
+        "operation_id": "op_behavior_bill_" + uuid.uuid4().hex,
+        "bills_added": [{"name": candidate["canonical_merchant"].title(), "amount": _cents_to_float(int(evidence["typical_amount_cents"])), "due_date": due.date().isoformat()}],
+        "requires_confirmation": True, "staged": True,
+        "summary": "Review this possible recurring charge before adding one recurring Bill.",
+    }
+    return jsonify({"staged_actions": staged, "candidate": candidate, "financial_mutations": False})
+
+
+@app.route("/api/behavior-intelligence/savings-preview", methods=["POST"])
+def behavior_intelligence_savings_preview_api():
+    data = request.json or {}; candidate_key = str(data.get("candidate_key") or "").strip().lower()
+    try: percent = int(data.get("reduction_percent") or 50)
+    except (TypeError, ValueError): return jsonify({"error": "reduction_percent must be 25, 50, or 75."}), 400
+    if percent not in {25, 50, 75}: return jsonify({"error": "reduction_percent must be 25, 50, or 75."}), 400
+    opportunity = next((row for row in _behavior_intelligence_snapshot()["opportunities"] if row["candidate_key"] == candidate_key), None)
+    if opportunity is None: return jsonify({"error": "That savings opportunity is unavailable."}), 404
+    amount_cents = int(opportunity["projection"]["reductions"][str(percent)]["period_savings_cents"])
+    hid = current_household_id(); account = _household_account(create_if_missing=False)
+    kinds = {row.kind for row in SavingsDestination.query.filter_by(household_id=hid).all()}
+    plan = None
+    if {"flexible", "wealth_cash", "wealth_investment"} <= kinds:
+        plan = savings_allocation_plan(hid, amount_cents, pay_period_days=max(1, int(account.pay_period_days or 14)) if account else 14)
+    return jsonify({"candidate_key": candidate_key, "reduction_percent": percent, "hypothetical_cents": amount_cents, "hypothetical": _cents_to_float(amount_cents), "allocation_preview": plan, "basis": opportunity["projection"]["basis"], "requires_confirmation_for_any_future_change": True, "mutated": False})
 
 
 @app.route("/api/settings/safe-to-spend", methods=["GET", "POST"])
@@ -4791,6 +5407,61 @@ def pay_yourself_first_settings():
     set_setting(PYF_TARGET_SETTING_KEY, format(target.normalize(), "f"))
     return jsonify({"long_term_savings_target_percent": float(target)})
 
+@app.route("/api/settings/location-sharing", methods=["GET", "POST"])
+def location_sharing_settings():
+    """Read or toggle Location Sharing for the current household.
+
+    Location Sharing controls whether device-location-based nearby-store
+    discovery is permitted. It never selects or changes the canonical
+    shopping store.
+    """
+    if request.method == "GET":
+        enabled = get_setting(LOCATION_SHARING_SETTING_KEY, 'false') == 'true'
+        return jsonify({"location_sharing_enabled": enabled})
+
+    data = request.json or {}
+    if "location_sharing_enabled" not in data:
+        return jsonify({"error": "location_sharing_enabled is required."}), 400
+    if not isinstance(data.get("location_sharing_enabled"), bool):
+        return jsonify({"error": "location_sharing_enabled must be true or false."}), 400
+
+    set_setting(
+        LOCATION_SHARING_SETTING_KEY,
+        "true" if data["location_sharing_enabled"] else "false",
+    )
+    return jsonify({"location_sharing_enabled": data["location_sharing_enabled"]})
+
+
+@app.route("/api/settings/current-location", methods=["GET"])
+def current_location_settings():
+    """Read-only current device-location context from persisted account state.
+
+    Returns the stored ZIP, city/state, and selected-store information so
+    Settings can display a read-only location context. Device GPS may
+    refresh nearby-store discovery context but must never silently
+    select or change the canonical shopping store.
+    """
+    account = _household_account()
+    if not account:
+        return jsonify({"error": "Account not found"}), 404
+
+    selected = get_selected_store(current_household_id(), account=account)
+    return jsonify({
+        "zip_code": account.zip_code or "",
+        "city_state": account.city_state or "",
+        "latitude": account.latitude,
+        "longitude": account.longitude,
+        "selected_store": {
+            "retailer": selected.get("retailer", ""),
+            "name": selected.get("name", ""),
+            "store_id": selected.get("store_id", ""),
+            "address": selected.get("address", ""),
+            "canonical": selected.get("canonical", False),
+        },
+        "location_sharing_enabled": get_setting(LOCATION_SHARING_SETTING_KEY, 'false') == 'true',
+    })
+
+
 @app.route("/api/decision/can-i-buy", methods=["POST"])
 def can_i_buy():
     """Deterministic affordability check against current Safe-to-Spend.
@@ -4809,6 +5480,54 @@ def can_i_buy():
         return jsonify({"error": str(exc)}), 400
 
     owner_scope = _resolve_request_user_id(data)
+    purchase_context = str(data.get("purchase_context") or "selected_physical_store").strip().lower()
+    category = str(data.get("tax_category") or "unknown").strip().lower()
+    category_evidence = {
+        "general_merchandise": "household soap",
+        "grocery_food": "grocery milk",
+        "prepared_food": "prepared takeout meal",
+        "exempt": "prescription medicine",
+    }.get(category, item_name)
+    selected_store = get_selected_store(current_household_id(), account=account)
+    if purchase_context == "selected_physical_store" and selected_store.get("canonical"):
+        retailer = str(selected_store.get("retailer") or "unknown")
+        store_id = str(selected_store.get("store_id") or "unknown")
+        store_name = str(selected_store.get("name") or "Selected store")
+        store_address = str(selected_store.get("address") or "")
+        postal_code = str(selected_store.get("postal_code") or "")
+        city_state = ", ".join(filter(None, [str(selected_store.get("city") or "").strip(), str(selected_store.get("state") or "").strip()]))
+    elif purchase_context in {"manual_local", "online_delivery"}:
+        retailer = "manual"
+        context_state = str(data.get("state") or "").strip().upper()
+        context_postal = _normalize_zip_code(data.get("postal_code") or "")
+        store_id = f"{purchase_context}:{context_state or 'unknown'}:{context_postal or 'unknown'}"
+        store_name = "Confirmed purchase location" if purchase_context == "manual_local" else "Delivery destination"
+        store_address = ""
+        postal_code = context_postal
+        city_state = ", ".join(filter(None, [str(data.get("city") or "").strip(), str(data.get("state") or "").strip().upper()]))
+    else:
+        retailer, store_id, store_name, store_address, postal_code, city_state = "unknown", "unknown", "Unspecified purchase", "", "", ""
+
+    try:
+        actual_tax_cents = _money_to_cents(data.get("actual_tax"), field_name="actual_tax") if data.get("actual_tax") not in (None, "") else None
+        actual_total_cents = _money_to_cents(data.get("actual_total"), field_name="actual_total") if data.get("actual_total") not in (None, "") else None
+        tax_payload = _apply_owned_tax_to_cart(
+            account=account,
+            owner_scope=owner_scope,
+            cart_items=[{"item_name": category_evidence, "estimated_price": _cents_to_float(purchase_cents)}],
+            retailer=retailer,
+            store_name=store_name,
+            store_id=store_id,
+            store_address=store_address,
+            postal_code=postal_code,
+            city_state=city_state,
+            purchase_context=purchase_context,
+            actual_tax_cents=actual_tax_cents,
+            actual_total_cents=actual_total_cents,
+        )
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+
     safe = _compute_safe_to_spend_snapshot(account, owner_scope=owner_scope)
     if safe.get("state") == "needs_setup":
         return jsonify({
@@ -4817,21 +5536,39 @@ def can_i_buy():
             "readiness": safe.get("readiness") or _household_readiness(account, owner_scope=owner_scope),
         }), 409
     now_safe_cents = int(safe.get("safe_to_spend_cents") or 0)
-    after_cents = now_safe_cents - purchase_cents
+    decision = tax_payload["tax_engine"]
+    total_cents = decision.get("total_cents")
+    if total_cents is None:
+        return jsonify({
+            "item_name": item_name,
+            "purchase": _cents_to_float(purchase_cents),
+            "purchase_total": None,
+            "safe_to_spend_now": _cents_to_float(now_safe_cents),
+            "safe_to_spend_after": None,
+            "short_by": None,
+            "approved": None,
+            "tax": decision,
+            "message": "Tax is not included yet. Confirm the purchase jurisdiction and item category before relying on a final affordability answer.",
+            "financial_mutations": False,
+        })
+    after_cents = now_safe_cents - int(total_cents)
     short_by_cents = max(0, -after_cents)
     approved = after_cents >= 0
 
     return jsonify({
         "item_name": item_name,
         "purchase": _cents_to_float(purchase_cents),
+        "purchase_total": _cents_to_float(int(total_cents)),
         "safe_to_spend_now": _cents_to_float(now_safe_cents),
         "safe_to_spend_after": _cents_to_float(after_cents),
         "short_by": _cents_to_float(short_by_cents),
         "approved": approved,
+        "tax": decision,
+        "financial_mutations": False,
         "message": (
-            "Yes, this fits within your current Safe-to-Spend amount."
+            f"Yes, the {decision['label'].lower()} tax-inclusive amount fits within your current Safe-to-Spend amount."
             if approved
-            else f"This is ${_cents_to_float(short_by_cents):.2f} over your current Safe-to-Spend amount."
+            else f"The {decision['label'].lower()} tax-inclusive amount is ${_cents_to_float(short_by_cents):.2f} over your current Safe-to-Spend amount."
         ),
     })
 
@@ -5195,6 +5932,149 @@ def copilot_chat():
     return jsonify(response)
 
 
+def _copilot_read_only_financial_response(user_text: str, *, user_id: str) -> dict[str, Any] | None:
+    """Answer bounded financial questions from the canonical PYF snapshot.
+
+    This is deliberately a presentation adapter: it does not recalculate
+    Needs, savings feasibility, the protected buffer, or expected income, and
+    it performs no writes. Exact historical change attribution is not claimed
+    because Rung does not currently retain a complete before/after provenance
+    read model for Safe-to-Spend.
+    """
+    text = str(user_text or "").strip()
+    lowered = re.sub(r"\s+", " ", text.lower())
+    if not lowered or re.search(r"\bgoal\b", lowered):
+        return None
+
+    explanation_request = bool(
+        re.search(r"\bwhy\b.*\bsafe[ -]?to[ -]?spend\b", lowered)
+        or re.search(r"\bexplain\b.*\bsafe[ -]?to[ -]?spend\b", lowered)
+        or re.search(r"\bwhat(?:'s| is)?\s+(?:affecting|driving|determining)\b.*\bsafe[ -]?to[ -]?spend\b", lowered)
+    )
+    affordability_request = bool(
+        re.search(r"\bcan i (?:afford|spend|buy)\b", lowered)
+        or re.search(r"\bis\s+\$?[0-9][0-9,]*(?:\.\d{1,2})?\s+(?:safe|okay|ok)\s+(?:for me\s+)?to spend\b", lowered)
+    )
+    if not explanation_request and not affordability_request:
+        return None
+
+    account = _household_account(create_if_missing=False)
+    snapshot = _compute_safe_to_spend_snapshot(account, owner_scope=user_id) if account is not None else {
+        "complete": False,
+        "state": "needs_setup",
+        "missing_setup": ["account"],
+        "readiness": {"ready": False, "missing_critical": ["account"]},
+    }
+
+    base_actions: dict[str, Any] = {
+        "requires_confirmation": False,
+        "staged": False,
+        "read_only": True,
+        "financial_mutations": False,
+    }
+    base_response: dict[str, Any] = {
+        "parsed": {"path": "deterministic_financial_read_only_v1"},
+        "actions_taken": base_actions,
+        "tool_results": [],
+        "_fallback": False,
+        "llm_error": None,
+        "clarification_question": None,
+        "user_id": user_id,
+    }
+
+    if not snapshot.get("complete"):
+        missing = list(snapshot.get("missing_setup") or [])
+        labels = {
+            "account": "account setup",
+            "checking_balance": "current checking balance",
+            "pay_period_days": "pay-cycle schedule",
+            "payday": "payday",
+            "current_period_income": "effective-dated expected income",
+            "long_term_savings_target_percent": "Pay Yourself First target",
+            "protected_checking_buffer": "protected checking buffer",
+            "grocery_need": "required grocery amount",
+            "fuel_or_transport_need": "required fuel or transportation amount",
+        }
+        missing_text = ", ".join(labels.get(item, item.replace("_", " ")) for item in missing) or "financial setup"
+        base_actions.update({
+            "summary": f"I can’t answer that truthfully until Rung has: {missing_text}. No financial state was changed.",
+            "setup_needed": True,
+            "missing_setup": missing,
+        })
+        base_response["parsed"].update({"intent": "safe_to_spend_explanation" if explanation_request else "purchase_affordability"})
+        return base_response
+
+    safe_cents = int(snapshot.get("safe_to_spend_cents") or 0)
+    components = snapshot.get("components") or {}
+    breakdown = snapshot.get("breakdown") or {}
+    lines = {str(row.get("key")): row for row in (breakdown.get("lines") or []) if isinstance(row, dict)}
+
+    if explanation_request:
+        checking_cents = int((lines.get("checking") or {}).get("amount_cents") or 0)
+        needs_cents = abs(int((lines.get("needs") or {}).get("amount_cents") or 0))
+        savings_cents = abs(int((lines.get("savings") or {}).get("amount_cents") or 0))
+        buffer_cents = abs(int((lines.get("buffer") or {}).get("amount_cents") or 0))
+        summary = (
+            "I can explain what determines your current Safe-to-Spend, but Rung does not yet have complete verified "
+            "before-and-after provenance to attribute the exact change to one event. "
+            f"Your current Safe-to-Spend is ${_cents_to_float(safe_cents):,.2f}: current checking is "
+            f"${_cents_to_float(checking_cents):,.2f}, with ${_cents_to_float(needs_cents):,.2f} protected for "
+            f"current Needs, ${_cents_to_float(savings_cents):,.2f} protected for this cycle’s Pay Yourself First "
+            f"contribution, and ${_cents_to_float(buffer_cents):,.2f} kept as your checking buffer. "
+            "I won’t claim that a recent transaction caused the change without verified causal history."
+        )
+        base_actions.update({
+            "summary": summary,
+            "intent": "safe_to_spend_explanation",
+            "safe_to_spend_cents": safe_cents,
+            "causal_provenance": "not_available",
+            "canonical_components": {
+                "checking_cents": checking_cents,
+                "needs_cents": needs_cents,
+                "pyf_protection_cents": savings_cents,
+                "protected_buffer_cents": buffer_cents,
+            },
+        })
+        base_response["parsed"].update({"intent": "safe_to_spend_explanation"})
+        return base_response
+
+    amount_match = re.search(r"\$\s*([0-9][0-9,]*(?:\.\d{1,2})?)", text)
+    if amount_match is None:
+        amount_match = re.search(r"\b([0-9][0-9,]*(?:\.\d{1,2})?)\b", text)
+    if amount_match is None:
+        return None
+    try:
+        requested_cents = _money_to_cents(amount_match.group(1).replace(",", ""), field_name="purchase amount")
+    except ValueError:
+        return None
+    remaining_cents = safe_cents - requested_cents
+    fits = remaining_cents >= 0
+    if fits:
+        summary = (
+            f"Yes. ${_cents_to_float(requested_cents):,.2f} fits within your current "
+            f"${_cents_to_float(safe_cents):,.2f} Safe-to-Spend, leaving ${_cents_to_float(remaining_cents):,.2f}. "
+            "Current Needs, Pay Yourself First protection, and your checking buffer remain protected."
+        )
+    else:
+        summary = (
+            f"No. ${_cents_to_float(requested_cents):,.2f} is ${_cents_to_float(abs(remaining_cents)):,.2f} above your "
+            f"current ${_cents_to_float(safe_cents):,.2f} Safe-to-Spend. Rung does not treat protected savings, "
+            "current Needs, or your checking buffer as spending permission."
+        )
+    base_actions.update({
+        "summary": summary,
+        "intent": "purchase_affordability",
+        "requested_amount_cents": requested_cents,
+        "safe_to_spend_cents": safe_cents,
+        "remaining_after_purchase_cents": remaining_cents,
+        "fits": fits,
+        "canonical_authority": "canonical_pyf_v1",
+        "protected_components": components,
+    })
+    base_response["parsed"].update({"intent": "purchase_affordability", "requested_amount_cents": requested_cents})
+    return base_response
+
+
 @app.route("/api/copilot/stage", methods=["POST"])
 def copilot_stage():
     """Generate a dry-run Copilot proposal with zero DB mutations."""
@@ -5203,6 +6083,35 @@ def copilot_stage():
     user_id = _resolve_request_user_id(data)
     if not user_text:
         return jsonify({"error": "Provide 'text' field with your request"}), 400
+
+    # Goals use a deterministic financial parser before any optional model.
+    # This intentionally supports a narrow, reviewable form and leaves
+    # ambiguous language unresolved instead of granting an LLM write authority.
+    goal_match = re.search(
+        r"(?:add|create|save for|afford)\s+(?:a\s+)?(?P<name>[a-z][a-z0-9 '&-]{1,80}?)(?:\s+goal)?\s+(?:for|of|target(?:ing)?|cost(?:ing)?)\s*\$?(?P<amount>[0-9][0-9,]*(?:\.\d{1,2})?)",
+        user_text,
+        flags=re.IGNORECASE,
+    )
+    goal_language = bool(re.search(r"\bgoal\b", user_text, flags=re.IGNORECASE) or re.search(r"\b(?:save for|afford)\b", user_text, flags=re.IGNORECASE))
+    if goal_match and goal_language:
+        name = re.sub(r"\s+goal$", "", goal_match.group("name"), flags=re.IGNORECASE).strip().title()
+        amount_cents = _money_to_cents(goal_match.group("amount").replace(",", ""), field_name="goal target")
+        date_match = re.search(r"(?:by|before)\s+(\d{4}-\d{2}-\d{2})", user_text, flags=re.IGNORECASE)
+        target_date = date_match.group(1) if date_match else None
+        operation_id = "op_goal_" + uuid.uuid4().hex
+        account = _household_account()
+        preview_goal = {"name": name, "target_cents": amount_cents, "target_amount": _cents_to_float(amount_cents), "target_date": target_date, "priority": 100}
+        plan = savings_allocation_plan(current_household_id(), int((_compute_safe_to_spend_snapshot(account).get("feasible_savings_cents") or 0)), pay_period_days=max(1, int(account.pay_period_days or 14)))
+        staged = {"operation_id": operation_id, "goals_added": [preview_goal], "requires_confirmation": True, "staged": True, "summary": f"Add {name} as a Goal after review.", "allocation_effect": plan}
+        return jsonify({"parsed": {"goal": preview_goal, "path": "deterministic_goal_v1"}, "actions_taken": staged, "tool_results": [], "_fallback": False, "llm_error": None, "clarification_question": None, "user_id": user_id})
+
+    # Read-only financial questions use the same canonical PYF snapshot as
+    # Overview and /api/budget/summary. Keep this ahead of the generic parser:
+    # that parser treats words such as "afford" as a possible mutation and can
+    # otherwise ask for a balance Rung already authoritatively knows.
+    read_only_financial = _copilot_read_only_financial_response(user_text, user_id=user_id)
+    if read_only_financial is not None:
+        return jsonify(read_only_financial)
 
     llm_gate = check_optional_operation(user_id, "llm_call")
     parsed = _parse_copilot_prompt_compat(
@@ -5267,6 +6176,23 @@ def copilot_apply_staged():
     if not isinstance(staged_actions, dict):
         return jsonify({"error": "Provide 'staged_actions' object from /api/copilot/stage."}), 400
 
+    if isinstance(staged_actions.get("goals_added"), list) and staged_actions.get("goals_added"):
+        rows = staged_actions.get("goals_added") or []
+        if len(rows) != 1: return jsonify({"error": "Review one Goal at a time."}), 400
+        row = rows[0] if isinstance(rows[0], dict) else {}
+        operation_id = str(staged_actions.get("operation_id") or "").strip()
+        try:
+            target_cents = _money_to_cents(row.get("target_amount"), field_name="goal target") if row.get("target_amount") is not None else int(row.get("target_cents") or 0)
+            goal = create_savings_goal(current_household_id(), operation_id=operation_id, name=str(row.get("name") or ""), target_cents=target_cents, target_date=_parse_optional_date(row.get("target_date")), priority=int(row.get("priority", 100)))
+            return jsonify({"actions_taken": {"operation_id": operation_id, "goals_added": [{"id": goal.id, "name": row.get("name"), "target_cents": goal.target_cents}], "already_applied": SavingsGoal.query.filter_by(household_id=current_household_id(), create_operation_id=operation_id).count() == 1}, "undo_token": None})
+        except (SavingsError, ValueError) as exc:
+            db.session.rollback(); return jsonify({"error": str(exc)}), 400
+        except OperationalError as exc:
+            db.session.rollback()
+            if "database is locked" in str(exc).lower():
+                return jsonify({"error": "The database is busy. No changes were saved; retry this approved operation."}), 503
+            raise
+
     try:
         applied = apply_staged_actions(staged_actions, raw_user_text=user_text, user_id=user_id)
     except StagedActionValidationError as exc:
@@ -5276,6 +6202,11 @@ def copilot_apply_staged():
         return jsonify(payload), 400
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 400
+    except OperationalError as exc:
+        db.session.rollback()
+        if "database is locked" in str(exc).lower():
+            return jsonify({"error": "The database is busy. No changes were saved; retry this approved operation."}), 503
+        raise
     return jsonify({
         "actions_taken": applied,
         "undo_token": applied.get("undo_token"),
@@ -5601,7 +6532,8 @@ def generate_pay_period_plan():
             store_name=str(store_payload.get("name") or "Walmart").strip(),
             store_id=str(store_payload.get("store_id") or "357").strip(),
             store_address=str(store_payload.get("address") or "").strip(),
-            postal_code=str(store_payload.get("postal_code") or account.zip_code or "").strip(),
+            postal_code=str(store_payload.get("postal_code") or selected_store.get("postal_code") or "").strip(),
+            city_state=", ".join(filter(None, [str(selected_store.get("city") or "").strip(), str(selected_store.get("state") or "").strip()])),
         )
 
         verified_cart.update({
@@ -5617,8 +6549,8 @@ def generate_pay_period_plan():
                 "food_budget": round(food_budget, 2),
                 "food_budget_compatibility_alias": True,
                 "budget_source": grocery_budget_source,
-                "budget_exceeded": float(tax_payload["total_cart_cost"]) > food_budget,
-                "budget_remaining": round(food_budget - float(tax_payload["total_cart_cost"]), 2),
+                "budget_exceeded": (float(tax_payload["total_cart_cost"]) > food_budget) if tax_payload["total_cart_cost"] is not None else (float(tax_payload["subtotal"]) > food_budget),
+                "budget_remaining": round(food_budget - float(tax_payload["total_cart_cost"]), 2) if tax_payload["total_cart_cost"] is not None else None,
             },
             "store_config_warning": None,
         })
@@ -5697,7 +6629,8 @@ def generate_pay_period_plan():
             store_name=str(store_payload.get("name") or kroger_store.name or "Kroger").strip(),
             store_id=str(store_payload.get("store_id") or kroger_store.store_id or "").strip(),
             store_address=str(store_payload.get("address") or kroger_store.address or "").strip(),
-            postal_code=str(store_payload.get("postal_code") or kroger_store.postal_code or account.zip_code or "").strip(),
+            postal_code=str(store_payload.get("postal_code") or kroger_store.postal_code or "").strip(),
+            city_state=", ".join(filter(None, [str(selected_store.get("city") or "").strip(), str(selected_store.get("state") or "").strip()])),
         )
 
         verified_cart.update({
@@ -5713,8 +6646,8 @@ def generate_pay_period_plan():
                 "food_budget": round(food_budget, 2),
                 "food_budget_compatibility_alias": True,
                 "budget_source": grocery_budget_source,
-                "budget_exceeded": float(tax_payload["total_cart_cost"]) > food_budget,
-                "budget_remaining": round(food_budget - float(tax_payload["total_cart_cost"]), 2),
+                "budget_exceeded": (float(tax_payload["total_cart_cost"]) > food_budget) if tax_payload["total_cart_cost"] is not None else (float(tax_payload["subtotal"]) > food_budget),
+                "budget_remaining": round(food_budget - float(tax_payload["total_cart_cost"]), 2) if tax_payload["total_cart_cost"] is not None else None,
             },
             "store_config_warning": None,
         })
@@ -5926,14 +6859,15 @@ def generate_pay_period_plan():
         store_name=store_name,
         store_id=str(location_id or "unknown").strip(),
         store_address=str(selected_store.get("address") or "").strip(),
-        postal_code=str(selected_store.get("postal_code") or account.zip_code or "").strip(),
+        postal_code=str(selected_store.get("postal_code") or "").strip(),
+        city_state=", ".join(filter(None, [str(selected_store.get("city") or "").strip(), str(selected_store.get("state") or "").strip()])),
     )
 
     # Determine the food budget
     food_budget = float(grocery_budget)
 
-    budget_exceeded = float(tax_payload["total_cart_cost"]) > food_budget
-    budget_remaining = round(food_budget - float(tax_payload["total_cart_cost"]), 2)
+    budget_exceeded = (float(tax_payload["total_cart_cost"]) > food_budget) if tax_payload["total_cart_cost"] is not None else (float(tax_payload["subtotal"]) > food_budget)
+    budget_remaining = round(food_budget - float(tax_payload["total_cart_cost"]), 2) if tax_payload["total_cart_cost"] is not None else None
 
     return jsonify({
         "retailer": selected_retailer,
@@ -6185,17 +7119,6 @@ def update_location():
     auto_detect = bool(data.get("auto_detect"))
     zip_code = ""
 
-    def _safe_rate(value: Any) -> float | None:
-        if value is None:
-            return None
-        try:
-            parsed = _coerce_rate(value)
-            if parsed != parsed:
-                return None
-            return parsed
-        except Exception:
-            return None
-
     def _safe_coord(value: Any) -> float | None:
         try:
             return float(value)
@@ -6225,11 +7148,7 @@ def update_location():
         # Manual ZIP updates should not keep stale city/state labels from prior defaults.
         account.city_state = ""
 
-    explicit_sales_tax = _safe_rate(data.get("sales_tax_rate"))
-    explicit_grocery_tax = _safe_rate(data.get("grocery_tax_rate"))
-
     reverse_geo = {}
-    resolved_state_code = ""
     resolved_city_state = str(account.city_state or "").strip()
     if auto_detect and account.latitude is not None and account.longitude is not None:
         reverse_geo = _reverse_geocode_us_location(account.latitude, account.longitude)
@@ -6240,7 +7159,6 @@ def update_location():
                 "user_message": "We couldn't get your current location. Enter your ZIP code instead.",
             }), 422
         zip_code = resolved_zip
-        resolved_state_code = str(reverse_geo.get("state_code") or "").strip().upper()
         if reverse_geo.get("city_state"):
             resolved_city_state = str(reverse_geo["city_state"] or "").strip()
 
@@ -6248,11 +7166,6 @@ def update_location():
     if resolved_city_state:
         account.city_state = resolved_city_state
 
-    if explicit_sales_tax is not None:
-        account.sales_tax_rate = float(explicit_sales_tax)
-    if explicit_grocery_tax is not None:
-        account.grocery_tax_rate = float(explicit_grocery_tax)
-    
     selected = get_selected_store(current_household_id(), account=account)
     store_found = bool(str(selected.get("store_id") or "").strip())
     store_lookup_status = "not_attempted"
@@ -6286,17 +7199,6 @@ def update_location():
             store_lookup_status = "store_choice_required"
             user_message = "Location saved. Choose a nearby supported store to continue shopping."
 
-    if auto_detect and explicit_sales_tax is None and explicit_grocery_tax is None:
-        inferred_sales_tax, inferred_grocery_tax = _estimate_tax_rates_for_location(account.zip_code or "", resolved_state_code)
-        account.sales_tax_rate = inferred_sales_tax
-        account.grocery_tax_rate = inferred_grocery_tax
-    elif auto_detect and explicit_sales_tax is None and resolved_state_code:
-        inferred_sales_tax, _ = _estimate_tax_rates_for_location(account.zip_code or "", resolved_state_code)
-        account.sales_tax_rate = inferred_sales_tax
-    elif auto_detect and explicit_grocery_tax is None and resolved_state_code:
-        _, inferred_grocery_tax = _estimate_tax_rates_for_location(account.zip_code or "", resolved_state_code)
-        account.grocery_tax_rate = inferred_grocery_tax
-    
     try:
         db.session.commit()
     except Exception:
@@ -6308,14 +7210,13 @@ def update_location():
     
     selected = get_selected_store(current_household_id(), account=account)
     return jsonify({
-        "message": "Location and tax rates updated successfully",
+        "message": "Location updated successfully",
         "user_message": user_message,
         "zip": account.zip_code,
         "location": {
             "zip_code": account.zip_code or "",
             "city_state": account.city_state or "",
-            "sales_tax_rate": float(account.sales_tax_rate if account.sales_tax_rate is not None else 0.0825),
-            "grocery_tax_rate": float(account.grocery_tax_rate if account.grocery_tax_rate is not None else 0.0125),
+            "tax_authority": "canonical_tax_engine_at_purchase",
             "store_name": selected.get("name") or "",
             "location_id": selected.get("store_id") or "",
             "selected_store": selected,
@@ -6527,6 +7428,7 @@ def init_db():
             "household_membership",
             "auth_login_throttle",
             "account",
+            "income_plan_version",
             "bill",
             "expense_transactions",
             "shopping_trip_completion",

@@ -20,7 +20,7 @@ Usage
   # Dry-run: print what would be inserted without writing.
   python scripts/ingest_store_prices.py --config config.json --dry-run
 
-  # Real run: upsert into the configured DATABASE_URL SQLite.
+  # Real run: upsert into the configured DATABASE_URL.
   python scripts/ingest_store_prices.py --config config.json
 
   # One-off term at one location, ad hoc.
@@ -47,7 +47,7 @@ Environment
 -----------
 KROGER_CLIENT_ID      API client id from developer.kroger.com
 KROGER_CLIENT_SECRET  API client secret
-DATABASE_URL          sqlite:///finance.db (default) or any SQLAlchemy URL
+DATABASE_URL          PostgreSQL in beta/production; SQLite is local/disposable only
 
 Auth
 ----
@@ -63,6 +63,7 @@ import sys
 import time
 from typing import Optional, Dict, List, Any
 from datetime import datetime, timedelta
+from sqlalchemy.engine import make_url
 
 try:
     import requests
@@ -78,6 +79,19 @@ KROGER_TOKEN_URL = 'https://api.kroger.com/v1/connect/oauth2/token'
 KROGER_PRODUCTS_URL = 'https://api.kroger.com/v1/products'
 DEFAULT_SCOPE = 'product.compact'
 DEFAULT_LIMIT = 5
+
+
+def validate_database_contract() -> None:
+    """Fail closed if a hosted ingest job is pointed at SQLite."""
+    mode = str(os.getenv("RUNG_ENV") or "development").strip().lower()
+    if mode not in {"beta", "production", "prod"}:
+        return
+    raw_url = str(os.getenv("DATABASE_URL") or "").strip()
+    if not raw_url:
+        raise RuntimeError("DATABASE_URL is required for hosted ingest.")
+    driver = make_url(raw_url).drivername
+    if not driver.startswith("postgresql"):
+        raise RuntimeError("PostgreSQL is required for beta/production ingest.")
 
 # Known Kroger / regional store-brand strings the ingest uses to mark
 # rows is_store_brand=1. Add more as you discover them.
@@ -419,6 +433,12 @@ def main(argv: Optional[List[str]] = None) -> int:
         level=logging.DEBUG if args.verbose else logging.INFO,
         format='%(asctime)s %(levelname)s %(message)s',
     )
+
+    try:
+        validate_database_contract()
+    except (RuntimeError, ValueError) as exc:
+        LOGGER.error("%s", exc)
+        return 2
 
     client_id = os.getenv('KROGER_CLIENT_ID', '').strip()
     client_secret = os.getenv('KROGER_CLIENT_SECRET', '').strip()

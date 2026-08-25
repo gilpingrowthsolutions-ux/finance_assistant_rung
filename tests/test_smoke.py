@@ -277,21 +277,19 @@ check(d.get('pantry_items_skipped', 0) >= 1,
       'pantry_items_skipped >= 1')
 
 # ===========================================================================
-# SECTION 6: Tax computation — grocery tax (not sales tax)
+# SECTION 6: Tax confidence — legacy mutable rates are not authority
 # ===========================================================================
-print('\n6. Tax uses grocery_tax_rate (2.5%) not sales_tax_rate (8.25%)')
-tax_rate = d.get('grocery_tax_rate', 0)
-check(tax_rate == 2.5,
-      f'grocery_tax_rate is 2.5% (got {tax_rate}%)',
-      2.5, tax_rate)
+print('\n6. Tax waits for canonical selected-store jurisdiction')
+tax_engine = d.get('tax_engine') or {}
+check(tax_engine.get('status') == 'tax_not_included_yet',
+      'legacy account tax rate is not silently used',
+      'tax_not_included_yet', tax_engine.get('status'))
 
 subtotal = float(d.get('subtotal', 0))
-tax_amt = float(d.get('tax_amount', 0))
-total = float(d.get('total_cart_cost', 0))
-check(abs(round(subtotal * 0.025, 2) - round(tax_amt, 2)) <= 0.03,
-      f'tax_amount ≈ subtotal * 2.5% (subtotal={subtotal}, tax={tax_amt})')
-check(round(subtotal + tax_amt, 2) == round(total, 2),
-      f'subtotal + tax == total_cart_cost ({subtotal} + {tax_amt} == {total})')
+tax_amt = d.get('tax_amount')
+total = d.get('total_cart_cost')
+check(tax_amt is None and total is None,
+      'unsupported tax is not exposed as zero or a final total')
 
 # ===========================================================================
 # SECTION 7: Budget enforcement
@@ -301,16 +299,13 @@ budget = d.get('budget', {})
 check(budget.get('food_budget') == 25.00,
       'food_budget is exactly 25.00 (budget_limit honored)',
       25.00, budget.get('food_budget'))
-remaining = budget.get('budget_remaining', 0)
-check(isinstance(remaining, (int, float)), 'budget_remaining is numeric')
+remaining = budget.get('budget_remaining')
+check(remaining is None, 'budget_remaining waits for tax-inclusive total')
 # With all items from cache, subtotal should be around $12-16 (depends on store-brand picks)
 # so budget should NOT be exceeded at $25
 print(f'    subtotal={subtotal}, tax={tax_amt}, total={total}, remaining={remaining}')
-check(total < 25.00,
-      f'cart total ({total}) is under the 25.00 budget',
-      True, total < 25.00)
 check(budget.get('budget_exceeded') is False,
-      'budget_exceeded is False (not over budget)')
+      'pre-tax subtotal proves this cart is not yet over budget')
 
 # ===========================================================================
 # SECTION 8: Resolution stats
@@ -353,9 +348,8 @@ b2 = d2.get('budget', {})
 check(b2.get('budget_exceeded') is True,
       'budget_exceeded is True at $0.50',
       True, b2.get('budget_exceeded'))
-check(b2.get('budget_remaining', 0) < 0,
-      'budget_remaining is negative',
-      '<0', b2.get('budget_remaining'))
+check(b2.get('budget_remaining') is None,
+      'exact budget overage waits for tax-inclusive total')
 
 # ===========================================================================
 # SUMMARY

@@ -112,6 +112,149 @@ class Account(ModelBase):
     )
 
 
+class IncomePlanVersion(ModelBase):
+    """Append-only expected cycle-income authority."""
+    __tablename__ = 'income_plan_version'
+    id = db.Column(db.Integer, primary_key=True)
+    household_id = db.Column(db.Integer, db.ForeignKey('household.id'), nullable=False, index=True)
+    operation_id = db.Column(db.String(120), nullable=False)
+    expected_income_cents = db.Column(db.Integer, nullable=False)
+    effective_at = db.Column(db.DateTime, nullable=False, index=True)
+    source = db.Column(db.String(40), nullable=False)
+    created_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)
+
+    __table_args__ = (
+        db.UniqueConstraint('household_id', 'operation_id', name='uq_income_plan_household_operation'),
+        db.CheckConstraint('expected_income_cents > 0', name='ck_income_plan_expected_positive'),
+        {'extend_existing': True},
+    )
+
+
+class SavingsDestination(ModelBase):
+    """Household-owned destination whose balance is derived from the savings ledger."""
+    __tablename__ = 'savings_destination'
+    id = db.Column(db.Integer, primary_key=True)
+    household_id = db.Column(db.Integer, db.ForeignKey('household.id'), nullable=False, index=True)
+    kind = db.Column(db.String(30), nullable=False)
+    name = db.Column(db.String(120), nullable=False)
+    priority = db.Column(db.Integer, nullable=False, default=100)
+    active = db.Column(db.Boolean, nullable=False, default=True)
+    created_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)
+    updated_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc), nullable=False)
+
+    __table_args__ = (
+        db.UniqueConstraint('household_id', 'kind', 'name', name='uq_savings_destination_household_kind_name'),
+        db.CheckConstraint("kind IN ('goal','reserve','flexible','wealth_cash','wealth_investment')", name='ck_savings_destination_kind'),
+        {'extend_existing': True},
+    )
+
+
+class SavingsGoal(ModelBase):
+    __tablename__ = 'savings_goal'
+    id = db.Column(db.Integer, primary_key=True)
+    household_id = db.Column(db.Integer, db.ForeignKey('household.id'), nullable=False, index=True)
+    destination_id = db.Column(db.Integer, db.ForeignKey('savings_destination.id'), nullable=False, unique=True)
+    create_operation_id = db.Column(db.String(120), nullable=False)
+    target_cents = db.Column(db.Integer, nullable=False)
+    target_date = db.Column(db.Date, nullable=True)
+    status = db.Column(db.String(20), nullable=False, default='active')
+    completed_at = db.Column(db.DateTime, nullable=True)
+    created_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)
+    updated_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc), nullable=False)
+
+    __table_args__ = (
+        db.UniqueConstraint('household_id', 'create_operation_id', name='uq_savings_goal_household_create_operation'),
+        db.CheckConstraint('target_cents > 0', name='ck_savings_goal_target_positive'),
+        db.CheckConstraint("status IN ('active','paused','completed')", name='ck_savings_goal_status'),
+        {'extend_existing': True},
+    )
+
+
+class SavingsReserve(ModelBase):
+    __tablename__ = 'savings_reserve'
+    id = db.Column(db.Integer, primary_key=True)
+    household_id = db.Column(db.Integer, db.ForeignKey('household.id'), nullable=False, index=True)
+    destination_id = db.Column(db.Integer, db.ForeignKey('savings_destination.id'), nullable=False, unique=True)
+    create_operation_id = db.Column(db.String(120), nullable=False)
+    category = db.Column(db.String(40), nullable=False)
+    target_cents = db.Column(db.Integer, nullable=False)
+    status = db.Column(db.String(20), nullable=False, default='active')
+    created_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)
+    updated_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc), nullable=False)
+
+    __table_args__ = (
+        db.UniqueConstraint('household_id', 'create_operation_id', name='uq_savings_reserve_household_create_operation'),
+        db.CheckConstraint('target_cents > 0', name='ck_savings_reserve_target_positive'),
+        db.CheckConstraint("status IN ('active','paused')", name='ck_savings_reserve_status'),
+        {'extend_existing': True},
+    )
+
+
+class SavingsTransfer(ModelBase):
+    """Append-only authoritative movement between savings destinations or an external source."""
+    __tablename__ = 'savings_transfer'
+    id = db.Column(db.Integer, primary_key=True)
+    household_id = db.Column(db.Integer, db.ForeignKey('household.id'), nullable=False, index=True)
+    operation_id = db.Column(db.String(120), nullable=False)
+    source_destination_id = db.Column(db.Integer, db.ForeignKey('savings_destination.id'), nullable=True)
+    destination_id = db.Column(db.Integer, db.ForeignKey('savings_destination.id'), nullable=True)
+    amount_cents = db.Column(db.Integer, nullable=False)
+    transfer_type = db.Column(db.String(30), nullable=False)
+    purpose = db.Column(db.String(200), nullable=True)
+    metadata_version = db.Column(db.String(30), nullable=False, default='savings_ledger_v1')
+    created_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)
+
+    __table_args__ = (
+        db.UniqueConstraint('household_id', 'operation_id', name='uq_savings_transfer_household_operation'),
+        db.CheckConstraint('amount_cents > 0', name='ck_savings_transfer_amount_positive'),
+        db.CheckConstraint('source_destination_id IS NULL OR destination_id IS NULL OR source_destination_id <> destination_id', name='ck_savings_transfer_distinct_destinations'),
+        db.CheckConstraint("transfer_type IN ('pyf_allocation','deposit','transfer','reserve_use','goal_use','withdrawal','adjustment')", name='ck_savings_transfer_type'),
+        {'extend_existing': True},
+    )
+
+
+class SavingsAllocationRun(ModelBase):
+    __tablename__ = 'savings_allocation_run'
+    id = db.Column(db.Integer, primary_key=True)
+    household_id = db.Column(db.Integer, db.ForeignKey('household.id'), nullable=False, index=True)
+    operation_id = db.Column(db.String(120), nullable=False)
+    cycle_key = db.Column(db.String(80), nullable=False)
+    feasible_cents = db.Column(db.Integer, nullable=False)
+    allocated_cents = db.Column(db.Integer, nullable=False)
+    authority = db.Column(db.String(40), nullable=False, default='canonical_pyf_v1')
+    created_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)
+
+    __table_args__ = (
+        db.UniqueConstraint('household_id', 'operation_id', name='uq_savings_allocation_household_operation'),
+        db.UniqueConstraint('household_id', 'cycle_key', name='uq_savings_allocation_household_cycle'),
+        db.CheckConstraint('feasible_cents >= 0 AND allocated_cents >= 0 AND allocated_cents <= feasible_cents', name='ck_savings_allocation_bounds'),
+        {'extend_existing': True},
+    )
+
+
+class BehaviorIntelligenceDecision(ModelBase):
+    """Append-only household decision/correction history for advisory intelligence."""
+    __tablename__ = 'behavior_intelligence_decision'
+    id = db.Column(db.Integer, primary_key=True)
+    household_id = db.Column(db.Integer, db.ForeignKey('household.id'), nullable=False, index=True)
+    operation_id = db.Column(db.String(120), nullable=False)
+    candidate_key = db.Column(db.String(180), nullable=False, index=True)
+    action = db.Column(db.String(30), nullable=False)
+    classification = db.Column(db.String(30), nullable=True)
+    pattern_signature = db.Column(db.String(64), nullable=True)
+    typical_amount_cents = db.Column(db.Integer, nullable=True)
+    cadence_days = db.Column(db.Integer, nullable=True)
+    occurrence_count = db.Column(db.Integer, nullable=True)
+    created_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)
+
+    __table_args__ = (
+        db.UniqueConstraint('household_id', 'operation_id', name='uq_behavior_decision_household_operation'),
+        db.CheckConstraint("action IN ('ignore','important','classify')", name='ck_behavior_decision_action'),
+        db.CheckConstraint("classification IS NULL OR classification IN ('need','discretionary','transfer')", name='ck_behavior_decision_classification'),
+        {'extend_existing': True},
+    )
+
+
 class Bill(ModelBase):
     id = db.Column(db.Integer, primary_key=True)
     household_id = db.Column(db.Integer, db.ForeignKey('household.id'), nullable=False, index=True)

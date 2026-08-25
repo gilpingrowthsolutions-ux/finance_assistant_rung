@@ -9,6 +9,7 @@ Type=oneshot
 
 # ---- env-var contract -------------------------------------------------------
 # Required keys (set in EnvironmentFile):
+#   RUNG_ENV (production for hosted operation)
 #   KROGER_CLIENT_ID
 #   KROGER_CLIENT_SECRET
 #   DATABASE_URL

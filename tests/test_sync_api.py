@@ -25,9 +25,10 @@ os.environ['RUNG_DB_PATH'] = ':memory:'
 from app import (
     app, db, Account, Recipe, RecipeIngredient, BrandPreference,
     StorePriceCache, PantryItem, GroceryItem, PYF_TARGET_SETTING_KEY,
-    SAFE_BUFFER_SETTING_KEY,
+    SAFE_BUFFER_SETTING_KEY, REQUIRED_EXPENSE_REVIEWED,
+    REQUIRED_EXPENSE_REVIEW_SETTING_KEY,
 )
-from models import Bill, ExpenseTransaction, UserPreference, UserSetting
+from models import Bill, ExpenseTransaction, IncomePlanVersion, UserPreference, UserSetting
 from services.household_context import household_id as current_household_id
 app.testing = True
 
@@ -106,10 +107,16 @@ with app.app_context():
         db.session.flush()
         db.session.commit()
     account = Account.query.first()
+    if not IncomePlanVersion.query.filter_by(household_id=hid).first():
+        db.session.add(IncomePlanVersion(household_id=hid, operation_id='sync-api-plan',
+            expected_income_cents=100000, effective_at=datetime.now(timezone.utc)-timedelta(days=30),
+            source='test_confirmation'))
     if not UserSetting.query.filter_by(household_id=hid, key=PYF_TARGET_SETTING_KEY).first():
         db.session.add(UserSetting(household_id=hid, key=PYF_TARGET_SETTING_KEY, value='10'))
     if not UserSetting.query.filter_by(household_id=hid, key=SAFE_BUFFER_SETTING_KEY).first():
         db.session.add(UserSetting(household_id=hid, key=SAFE_BUFFER_SETTING_KEY, value='100.00'))
+    if not UserSetting.query.filter_by(household_id=hid, key=REQUIRED_EXPENSE_REVIEW_SETTING_KEY).first():
+        db.session.add(UserSetting(household_id=hid, key=REQUIRED_EXPENSE_REVIEW_SETTING_KEY, value=REQUIRED_EXPENSE_REVIEWED))
     if not UserPreference.query.filter_by(household_id=hid, key='baseline_grocery_cost').first():
         db.session.add(UserPreference(household_id=hid, key='baseline_grocery_cost', value='300.00'))
     if not Bill.query.filter_by(household_id=hid, is_gas_estimate=True).first():
@@ -237,14 +244,15 @@ assert_truthy(len(milk_rows) == 1, 'milk appears once after merge/dedupe')
 # ===========================================================================
 # TEST 3: plan subtotal + tax computed correctly
 # ===========================================================================
-print('3. generate-pay-period-plan subtotal and tax are computed')
+print('3. generate-pay-period-plan keeps unsupported tax truthful')
 subtotal = float(d.get('subtotal', 0))
-tax_amount = float(d.get('tax_amount', 0))
-total = float(d.get('total_cart_cost', 0))
+tax_amount = d.get('tax_amount')
+total = d.get('total_cart_cost')
 assert_truthy(subtotal > 0, 'subtotal is positive')
-assert_truthy(total > 0, 'total_cart_cost is positive')
-assert_eq(round(subtotal + tax_amount, 2), round(total, 2),
-          'subtotal + tax == total_cart_cost')
+assert_eq((d.get('tax_engine') or {}).get('status'), 'tax_not_included_yet',
+          'legacy location does not fabricate canonical jurisdiction')
+assert_truthy(tax_amount is None and total is None,
+              'tax and final total remain unavailable instead of silent zero')
 # Verify the response includes the enriched fields (package_size, resolution stats)
 stats = d.get('resolution_stats', {})
 assert_truthy(stats.get('total_terms', 0) >= 4, 'resolution_stats covers all terms')
@@ -301,8 +309,8 @@ assert_eq(resp.status_code, 200, 'plan returns 200 even when over budget')
 budget = d.get('budget', {})
 assert_eq(budget.get('budget_exceeded'), True,
           'budget_exceeded flag is True')
-assert_truthy(budget.get('budget_remaining', 0) < 0,
-              'budget_remaining is negative')
+assert_truthy(budget.get('budget_remaining') is None,
+              'exact budget overage waits for tax-inclusive total')
 
 
 # ===========================================================================

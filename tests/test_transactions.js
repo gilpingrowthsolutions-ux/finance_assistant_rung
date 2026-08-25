@@ -196,7 +196,8 @@ setupFakeDom({ 'transactionList': txList2 });
 mockRoute('GET', '/api/transactions', 200, []);
 SUT._setMockFetch(mockFetch);
 await SUT.refreshTransactions();
-assertEq(txList2.innerHTML, '<div class="empty">No transactions yet.</div>', 'empty state when no transactions');
+assertEq(txList2.innerHTML.includes('No transactions yet'), true, 'empty state when no transactions');
+assertEq(txList2.innerHTML.includes('data-money-open="transaction"'), true, 'transaction empty state offers one useful action');
 
 console.log('\n3. refreshTransactions error: GET fails, shows error empty state');
 reset();
@@ -205,7 +206,8 @@ setupFakeDom({ 'transactionList': txList3 });
 mockRoute('GET', '/api/transactions', 500, { error: 'db unavailable' });
 SUT._setMockFetch(mockFetch);
 await SUT.refreshTransactions();
-assertEq(txList3.innerHTML, '<div class="empty">We could not load your transactions right now.</div>', 'error empty state');
+assertEq(txList3.innerHTML.includes('Transactions could not be loaded'), true, 'error empty state');
+assertEq(txList3.innerHTML.includes('retry-transactions'), true, 'transaction error offers retry');
 
 console.log('\n4. refreshTransactions Delete button: clicking triggers DELETE + refresh');
 reset();

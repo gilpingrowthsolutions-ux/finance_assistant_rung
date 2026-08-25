@@ -244,23 +244,24 @@ async function refreshGrocery() {
  * to the Recipes tab.
  */
 async function refreshActiveRecipesExpander() {
-  const expander = document.getElementById('activeRecipesExpander');
-  if (!expander) return;
   const grid = document.getElementById('activeRecipesGrid');
   const countEl = document.getElementById('activeRecipeCount');
   if (!grid) return;
 
-  const ids = getSelectedRecipeIds();
-  // Union with the server-persisted meal plan (Copilot additions).
+  const ids = [];
+  // The persisted MealPlanItem set is the only Active Recipes authority.
   try {
     const planResp = await fetchGrocery_('GET', '/api/meal-plan', undefined);
     if (planResp && planResp.ok && planResp.data && Array.isArray(planResp.data.recipe_ids)) {
-      planResp.data.recipe_ids.forEach(function (rid) {
+        planResp.data.recipe_ids.forEach(function (rid) {
         const n = parseInt(rid, 10);
         if (Number.isFinite(n) && ids.indexOf(n) === -1) ids.push(n);
       });
     }
-  } catch (_e) { /* server plan unavailable — fall back to checked boxes */ }
+  } catch (_e) {
+    grid.innerHTML = '<div class="empty">We could not load active recipes right now. Try again.</div>';
+    return;
+  }
   var max = 14;
   var cappedIds = ids.slice(0, max);
   var truncated = ids.length > max;
@@ -330,7 +331,7 @@ async function refreshActiveRecipesExpander() {
  */
 async function setupGroceryInit(deps) {
   deps = deps || {};
-  const groceryRoot = document.getElementById('grocery');
+  const groceryRoot = document.getElementById('shopping');
   if (groceryRoot && groceryRoot.__rungGroceryInitialized) return;
   if (groceryRoot) groceryRoot.__rungGroceryInitialized = true;
 
@@ -364,10 +365,18 @@ async function setupGroceryInit(deps) {
       buildCartFn(false);
     });
 
-    const rebalanceBtn = document.getElementById('buildCartBtn');
+    const buildBtn = document.getElementById('buildCartBtn');
+    if (buildBtn) buildBtn.addEventListener('click', function () {
+      buildCartFn();
+    });
+    const headerBuildBtn = document.getElementById('shoppingHeaderBuildCartBtn');
+    if (headerBuildBtn) headerBuildBtn.addEventListener('click', function () {
+      buildCartFn();
+    });
+
+    const rebalanceBtn = document.getElementById('rebalanceCartBtn');
     if (rebalanceBtn) rebalanceBtn.addEventListener('click', function () {
       if (typeof rebalanceCartFn === 'function') return rebalanceCartFn();
-      return buildCartFn(false);
     });
 
     const storeSelect = document.getElementById('storeSel');
@@ -392,6 +401,127 @@ async function setupGroceryInit(deps) {
     if (typeof initFinishedShoppingFn === 'function') {
       await initFinishedShoppingFn();
     }
+
+    // --- Shopping store context ---
+    async function refreshShoppingStoreContext() {
+      var nameEl = document.getElementById('shoppingStoreName');
+      var addrEl = document.getElementById('shoppingStoreAddress');
+      if (!nameEl) return;
+      try {
+        var resp = api_ ? await api_('GET', '/api/settings/current-location') : null;
+        if (resp && resp.ok && resp.data) {
+          var ss = resp.data.selected_store || {};
+          globalThis.rungSelectedShoppingStore = ss.store_id ? ss : null;
+          if (ss.store_id) {
+            nameEl.textContent = ss.name || ss.retailer || 'Selected store';
+            addrEl.textContent = ss.address || (resp.data.zip_code ? 'ZIP ' + resp.data.zip_code : 'Selected store');
+          } else {
+            nameEl.textContent = 'No store selected';
+            addrEl.textContent = 'Select a store to get accurate prices and availability.';
+          }
+        }
+      } catch (_e) { /* non-fatal */ }
+    }
+    await refreshShoppingStoreContext();
+
+    // --- Shopping-owned exact-store discovery and explicit selection ---
+    var changeStoreBtn = document.getElementById('shoppingChangeStoreBtn');
+    var storeDialog = document.getElementById('shoppingStoreDialog');
+    var nearbyRoot = document.getElementById('shoppingNearbyStores');
+    var permissionState = document.getElementById('shoppingStorePermission');
+    var zipInput = document.getElementById('shoppingStoreZip');
+
+    function storeStatus(title, description, isError) {
+      if (!nearbyRoot) return;
+      nearbyRoot.innerHTML = '<div class="empty-state' + (isError ? ' error-banner' : '') + '"><div class="empty-title">' +
+        escapeHtml_(title) + '</div><div class="empty-desc">' + escapeHtml_(description || '') + '</div></div>';
+    }
+
+    function cityState(address) {
+      var parts = String(address || '').split(',').map(function (part) { return part.trim(); }).filter(Boolean);
+      return parts.length >= 3 ? parts[parts.length - 2] + ', ' + String(parts[parts.length - 1]).split(/\s+/)[0] : '';
+    }
+
+    function renderStores(data) {
+      var stores = (data && data.stores) || [];
+      var location = (data && data.location) || {};
+      if (!stores.length) {
+        storeStatus('No supported stores found', (data && data.user_message) || 'Try another location or ZIP code.', true);
+        return;
+      }
+      if (permissionState) permissionState.style.display = 'none';
+      nearbyRoot.innerHTML = '';
+      stores.forEach(function (store) {
+        var row = document.createElement('div');
+        row.className = 'store-choice-row';
+        row.innerHTML = '<div><strong>' + escapeHtml_(store.name || 'Store') + '</strong><div class="li-meta">' +
+          escapeHtml_(store.address || ('ZIP ' + (store.postal_code || location.zip_code || ''))) + '</div><div class="li-meta">' +
+          escapeHtml_(store.distance_miles != null ? String(store.distance_miles) + ' miles away' : 'Nearby supported store') + '</div></div>';
+        var choose = document.createElement('button');
+        choose.className = 'btn is-primary';
+        choose.type = 'button';
+        choose.textContent = 'Select Store';
+        choose.addEventListener('click', async function () {
+          choose.disabled = true;
+          var response = await api_('POST', '/api/location/select-store', {
+            retailer: store.retailer, store_id: store.store_id, store_name: store.name,
+            store_address: store.address || '', zip_code: store.postal_code || location.zip_code || '',
+            city_state: cityState(store.address) || location.city_state || ''
+          });
+          choose.disabled = false;
+          if (!response.ok) {
+            storeStatus('Store was not changed', (response.data && response.data.user_message) || 'Try selecting the store again.', true);
+            return;
+          }
+          await refreshShoppingStoreContext();
+          if (storeDialog && typeof storeDialog.close === 'function') storeDialog.close();
+          if (flash_) flash_('Shopping store updated', 'success');
+        });
+        row.appendChild(choose);
+        nearbyRoot.appendChild(row);
+      });
+    }
+
+    async function discoverStores(payload) {
+      storeStatus('Finding nearby stores…', 'Your selected shopping store will not change.', false);
+      var response = await api_('POST', '/api/location/nearby-stores', payload);
+      if (!response.ok || !response.data || response.data.status !== 'ok') {
+        storeStatus('Store search needs attention', (response.data && response.data.user_message) || 'Try again or use a ZIP code.', true);
+        return;
+      }
+      renderStores(response.data);
+    }
+
+    if (changeStoreBtn && storeDialog) changeStoreBtn.addEventListener('click', function () {
+      if (nearbyRoot) nearbyRoot.innerHTML = '';
+      if (permissionState) permissionState.style.display = 'flex';
+      storeDialog.showModal();
+    });
+    var closeStoreBtn = document.getElementById('shoppingStoreCloseBtn');
+    if (closeStoreBtn && storeDialog) closeStoreBtn.addEventListener('click', function () { storeDialog.close(); });
+    var findZipBtn = document.getElementById('shoppingFindByZipBtn');
+    if (findZipBtn) findZipBtn.addEventListener('click', function () {
+      var zip = String((zipInput && zipInput.value) || '').trim();
+      if (!zip) { storeStatus('Enter a ZIP code', 'A ZIP code is required for this search.', true); return; }
+      discoverStores({ zip_code: zip });
+    });
+    var useLocationBtn = document.getElementById('shoppingUseLocationBtn');
+    if (useLocationBtn) useLocationBtn.addEventListener('click', async function () {
+      var sharing = await api_('GET', '/api/settings/location-sharing');
+      if (!sharing.ok || !sharing.data || sharing.data.location_sharing_enabled !== true) {
+        storeStatus('Location sharing is off', 'Enable Location Sharing in Settings, or search by ZIP code.', true);
+        return;
+      }
+      if (typeof navigator === 'undefined' || !navigator.geolocation) {
+        storeStatus('Device location unavailable', 'Use a ZIP code to find stores.', true); return;
+      }
+      storeStatus('Requesting device location…', 'Your selected shopping store will not change.', false);
+      navigator.geolocation.getCurrentPosition(function (position) {
+        discoverStores({ auto_detect: true, latitude: position.coords.latitude, longitude: position.coords.longitude });
+      }, function () {
+        storeStatus('Location permission is blocked', 'Allow location access in your browser, or use a ZIP code.', true);
+      }, { enableHighAccuracy: false, timeout: 10000, maximumAge: 300000 });
+    });
   } catch (error) {
     if (groceryRoot) groceryRoot.__rungGroceryInitialized = false;
     throw error;

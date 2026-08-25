@@ -1,4 +1,4 @@
-const { test, expect } = require('@playwright/test');
+const { test, expect } = require('playwright/test');
 
 if (process.env.RUNG_PLAYWRIGHT_CHROMIUM) {
   test.use({ launchOptions: { executablePath: process.env.RUNG_PLAYWRIGHT_CHROMIUM } });
@@ -14,6 +14,13 @@ test('Package 11 manual-first onboarding is truthful, canonical, and single-subm
 
   await page.goto('http://127.0.0.1:5051/', { waitUntil: 'networkidle' });
   await expect(page.locator('#onboardingDialog')).toBeVisible();
+  await page.setViewportSize({ width: 1440, height: 1000 });
+  await page.screenshot({ path: '/tmp/rung-package18-20-onboarding-desktop.png', animations: 'disabled' });
+  await page.setViewportSize({ width: 390, height: 844 });
+  const onboardingBox = await page.locator('#onboardingDialog').boundingBox();
+  expect(onboardingBox.x).toBeGreaterThanOrEqual(0);
+  expect(onboardingBox.x + onboardingBox.width).toBeLessThanOrEqual(391);
+  await page.screenshot({ path: '/tmp/rung-package18-20-onboarding-mobile.png', animations: 'disabled' });
 
   const fresh = await page.evaluate(async () => (await fetch('/api/onboarding/state')).json());
   expect(fresh.defaults.checking_balance).toBeNull();

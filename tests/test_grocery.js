@@ -224,9 +224,10 @@ console.log('\n6. setupGroceryInit is the idempotent production controller for c
 // ============================================================================
 reset();
 setupFakeDom({
-  'grocery': new FakeEl('grocery'),
+  'shopping': new FakeEl('shopping'),
   'generateRecipesBtn': new FakeEl('generateRecipesBtn'),
   'buildCartBtn': new FakeEl('buildCartBtn'),
+  'rebalanceCartBtn': new FakeEl('rebalanceCartBtn'),
 });
 const buildCalls6 = [];
 let rebalanceCalls6 = 0;
@@ -237,10 +238,12 @@ const deps6 = {
 await SUT.setupGroceryInit(deps6);
 await SUT.setupGroceryInit(deps6);
 assertEq(fakeDom.get('generateRecipesBtn').eventListeners.click.length, 1, 'reinitialization does not duplicate Build Shopping Plan handlers');
-assertEq(fakeDom.get('buildCartBtn').eventListeners.click.length, 1, 'reinitialization does not duplicate Rebalance Cart handlers');
+assertEq(fakeDom.get('buildCartBtn').eventListeners.click.length, 1, 'reinitialization does not duplicate Build Cart handlers');
+assertEq(fakeDom.get('rebalanceCartBtn').eventListeners.click.length, 1, 'reinitialization does not duplicate Rebalance Cart handlers');
 await fakeDom.get('generateRecipesBtn').eventListeners.click[0]();
 await fakeDom.get('buildCartBtn').eventListeners.click[0]();
-assertEq(buildCalls6, [false], 'Build Shopping Plan uses the cart build runtime');
+await fakeDom.get('rebalanceCartBtn').eventListeners.click[0]();
+assertEq(buildCalls6.length, 2, 'Build Shopping Plan + Build Cart both use the cart build runtime');
 assertEq(rebalanceCalls6, 1, 'Rebalance Cart uses the preview-review-apply runtime');
 
 // ============================================================================
@@ -266,7 +269,7 @@ console.log('\n8. setupGroceryInit owns quick search and Finished Shopping initi
 // ============================================================================
 reset();
 setupFakeDom({
-  'grocery': new FakeEl('grocery'),
+  'shopping': new FakeEl('shopping'),
   'rapidSearchBtn': new FakeEl('rapidSearchBtn'),
   'rapidSearchInput': new FakeEl('rapidSearchInput'),
 });
@@ -346,6 +349,8 @@ assertEq(productionTemplate.includes('if (item.estimated_price != null && item.p
 assertEq(productionTemplate.includes("'/api/grocery/rebalance/preview'"), true, 'served browser calls authoritative rebalance preview endpoint');
 assertEq(productionTemplate.includes("'/api/grocery/rebalance/apply'"), true, 'served browser calls authoritative rebalance apply endpoint');
 assertEq(productionTemplate.includes('id="rebalanceReviewDialog"'), true, 'served browser renders an explicit rebalance review dialog');
+assertEq(productionTemplate.includes("normalizeCartContext(d, canonicalStore.retailer || '', storeName)"), true, 'cart context keeps canonical retailer identity separate from store display name');
+assertEq(productionTemplate.includes('normalizeCartContext(d, storeName, storeName)'), false, 'store display name is never used as the retailer key');
 
 // ============================================================================
 console.log('\n' + passed + ' passed, ' + failed + ' failed');

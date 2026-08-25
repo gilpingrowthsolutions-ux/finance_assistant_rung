@@ -63,6 +63,8 @@ spec:
                 - /etc/rung/ingest.json
                 - --verbose
               env:
+                - name: RUNG_ENV
+                  value: "production"
                 - name: PYTHONUNBUFFERED
                   value: "1"
                 - name: INGEST_LOG_LEVEL
@@ -86,8 +88,6 @@ spec:
                 - name: ingest-config
                   mountPath: /etc/rung
                   readOnly: true
-                - name: rung-data
-                  mountPath: /var/lib/rung
               resources:
                 requests:
                   cpu: 100m
@@ -107,6 +107,3 @@ spec:
                 items:
                   - key: ingest.json
                     path: ingest.json
-            - name: rung-data
-              persistentVolumeClaim:
-                claimName: rung-data-pvc

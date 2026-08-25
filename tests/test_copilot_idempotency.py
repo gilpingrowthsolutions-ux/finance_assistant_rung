@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import os
+import subprocess
 import sys
-import threading
+import tempfile
 import uuid
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
@@ -222,38 +223,32 @@ def test_g_invalid_operation_not_marked_applied() -> None:
 
 
 def test_h_concurrent_apply_same_operation() -> None:
-    print("\nH. concurrent apply attempts for the same operation")
+    """Use a fresh process-bound DB; never share pytest's singleton in-memory connection."""
+    fd, db_path = tempfile.mkstemp(prefix="rung_copilot_pytest_contention_", suffix=".sqlite")
+    os.close(fd)
+    env = os.environ.copy()
+    env["RUNG_DB_PATH"] = db_path
+    env["RUNG_HOUSEHOLD_CONTEXT_SECRET"] = "copilot-contention-disposable"
+    env["PYTHONPATH"] = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+    probe = os.path.join(os.path.dirname(__file__), "copilot_apply_contention_probe.py")
+    result = subprocess.run([sys.executable, probe], env=env, text=True, capture_output=True, timeout=45)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "'audit_rows': 1" in result.stdout
+    assert "'household_isolation': True" in result.stdout
+
+
+def test_i_conflicting_payload_reuse_fails_closed() -> None:
     _setup()
     operation_id = _make_operation_id()
-    payload = _staged_payload(operation_id)
-
-    barrier = threading.Barrier(2)
-    results = []
-
-    def worker():
-        local_client = app.test_client()
-        barrier.wait()
-        resp = local_client.post(
-            "/api/copilot/apply",
-            json={"text": "apply staged op", "staged_actions": payload, "user_id": "idem-user"},
-        )
-        results.append((resp.status_code, resp.get_json() or {}))
-
-    t1 = threading.Thread(target=worker)
-    t2 = threading.Thread(target=worker)
-    t1.start()
-    t2.start()
-    t1.join()
-    t2.join()
-
+    original = _staged_payload(operation_id, expense_amount=12.50)
+    conflict = _staged_payload(operation_id, expense_amount=99.00)
+    assert _post_apply(original).status_code == 200
+    rejected = _post_apply(conflict)
+    assert rejected.status_code == 400
+    assert "different staged content" in (rejected.get_json() or {}).get("error", "")
     with app.app_context():
-        c = (Bill.query.count(), ExpenseTransaction.query.count(), GroceryItem.query.count())
-        audits = ActionAudit.query.filter_by(operation_id=operation_id).count()
-
-    _check(len(results) == 2, "both concurrent requests returned responses", 2, len(results))
-    _check(all(code == 200 for code, _ in results), "both concurrent apply responses are 200")
-    _check(c == (1, 1, 1), "concurrent apply commits only one set of side effects", (1, 1, 1), c)
-    _check(audits == 1, "concurrent apply leaves exactly one operation audit row", 1, audits)
+        assert [row.amount for row in ExpenseTransaction.query.all()] == [12.50]
+        assert ActionAudit.query.filter_by(operation_id=operation_id).count() == 1
 
 
 def _main() -> None:

@@ -8,9 +8,9 @@ os.environ["RUNG_DB_PATH"] = ":memory:"
 
 import pytest
 
-from app import PYF_TARGET_SETTING_KEY, SAFE_BUFFER_SETTING_KEY, app
+from app import PYF_TARGET_SETTING_KEY, REQUIRED_EXPENSE_REVIEWED, REQUIRED_EXPENSE_REVIEW_SETTING_KEY, SAFE_BUFFER_SETTING_KEY, app
 from extensions import db
-from models import Account, Bill, ExpenseTransaction, GroceryItem, UserPreference, UserSetting
+from models import Account, Bill, ExpenseTransaction, GroceryItem, IncomePlanVersion, UserPreference, UserSetting
 from services.household_context import household_id
 from services.retail.base import RetailStore
 from services.selected_store import select_store
@@ -47,8 +47,10 @@ def client():
         db.session.add(account)
         db.session.flush()
         db.session.add_all([
+            IncomePlanVersion(household_id=hid,operation_id="legacy-retirement-plan",expected_income_cents=100000,effective_at=datetime.now(timezone.utc)-timedelta(days=30),source="test_confirmation"),
             UserSetting(household_id=hid, key=PYF_TARGET_SETTING_KEY, value="20"),
             UserSetting(household_id=hid, key=SAFE_BUFFER_SETTING_KEY, value="100.00"),
+            UserSetting(household_id=hid, key=REQUIRED_EXPENSE_REVIEW_SETTING_KEY, value=REQUIRED_EXPENSE_REVIEWED),
             UserPreference(household_id=hid, key="baseline_grocery_cost", value="200.00"),
             Bill(household_id=hid, name="Required fuel", amount=50.0,
                  due_date=datetime.now(timezone.utc) + timedelta(days=3),

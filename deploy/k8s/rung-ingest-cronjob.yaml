@@ -72,6 +72,8 @@ spec:
                 - /etc/rung/ingest.json
                 - --verbose
               env:
+                - name: RUNG_ENV
+                  value: "production"
                 - name: PYTHONUNBUFFERED
                   value: "1"
                 - name: INGEST_LOG_LEVEL
@@ -97,13 +99,6 @@ spec:
                 - name: ingest-config
                   mountPath: /etc/rung
                   readOnly: true
-                # Writable home for the SQLite database. In production
-                # the PVC backed by a StorageClass (e.g. gp3 / standard)
-                # provides durability across pod restarts. For dev /
-                # smoke jobs you can replace this with `emptyDir` and
-                # accept the loss-on-restart trade-off.
-                - name: rung-data
-                  mountPath: /var/lib/rung
               resources:
                 requests:
                   cpu: 100m
@@ -123,9 +118,3 @@ spec:
                 items:
                   - key: ingest.json
                     path: ingest.json
-            # Replace `claimName: rung-data-pvc` with your own PVC
-            # before applying. To create one quickly:
-            #   kubectl apply -f deploy/k8s/rung-ingest-pvc.yaml.example
-            - name: rung-data
-              persistentVolumeClaim:
-                claimName: rung-data-pvc

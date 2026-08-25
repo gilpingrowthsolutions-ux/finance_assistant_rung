@@ -1338,9 +1338,12 @@ def _decimal_to_cents(value: Decimal) -> int:
 
 
 def _total_with_tax_cents(subtotal_cents: int, tax_rate: Decimal) -> int:
-    subtotal = Decimal(subtotal_cents) / Decimal("100")
-    tax_amount = (subtotal * tax_rate).quantize(_MONEY_CENT, rounding=_ROUNDING)
-    return _decimal_to_cents(subtotal + tax_amount)
+    # Compatibility optimizer arithmetic delegates cent rounding to the
+    # canonical tax engine. Served endpoints supply zero here and replace the
+    # candidate total with the selected-store canonical decision before use.
+    from services.tax_engine import rounding_cents_from_subtotal_and_rate_bps
+    rate_bps = int((tax_rate * Decimal("10000")).to_integral_value(rounding=_ROUNDING))
+    return int(subtotal_cents) + rounding_cents_from_subtotal_and_rate_bps(int(subtotal_cents), rate_bps)
 
 
 def _cents_to_float(value: int) -> float:

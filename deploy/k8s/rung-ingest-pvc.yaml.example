@@ -1,10 +1,8 @@
 # Example PersistentVolumeClaim for the Rung ingest CronJob.
 #
-# The CronJob mounts this at /var/lib/rung so the SQLite
-# database (finance.db) survives pod restarts. SQLite is fine for a
-# single-writer schedule like this; if you need multi-writer or
-# multi-node durability, point DATABASE_URL at Postgres instead and
-# delete this PVC.
+# Local/disposable SQLite example only. Beta/production uses PostgreSQL and
+# the checked-in CronJobs do not mount this PVC. Do not attach this storage as
+# a hosted Rung database authority.
 #
 # Apply:
 #   kubectl apply -f deploy/k8s/rung-ingest-pvc.yaml.example

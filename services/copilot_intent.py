@@ -3,13 +3,14 @@ from __future__ import annotations
 import json
 import hashlib
 import re
+import time
 import uuid
 import calendar
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 
 from pydantic import BaseModel, Field, field_validator
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, OperationalError
 
 # Import models at module level - safe now that models.py imports from extensions, not app
 from models import (
@@ -280,6 +281,22 @@ def _replay_applied_operation(audit_row: Any) -> Dict[str, Any]:
     applied["operation_id"] = audit_row.operation_id
     applied["already_applied"] = True
     return applied
+
+
+def _replay_matching_operation(audit_row: Any, operation_fp: str) -> Dict[str, Any]:
+    """Replay only when an operation identity names the exact same payload."""
+    try:
+        existing_payload = json.loads(audit_row.actions_json or "{}")
+    except Exception:
+        existing_payload = {}
+    existing_fp = (str(existing_payload.get("operation_fingerprint") or "").strip()
+                   if isinstance(existing_payload, dict) else "")
+    if not existing_fp or existing_fp != operation_fp:
+        raise ValueError(
+            "operation_id was already used with different staged content; "
+            "re-stage to get a new operation_id."
+        )
+    return _replay_applied_operation(audit_row)
 
 
 def _parse_recipe_suggestion_resolution(rec: Any, index: int) -> Dict[str, Any]:
@@ -2183,7 +2200,7 @@ def stage_intent_payload(payload: CopilotIntentPayload, user_id: str = "anonymou
     return actions
 
 
-def apply_staged_actions(staged_actions: Dict[str, Any], raw_user_text: str = "", user_id: str = "anonymous") -> Dict[str, Any]:
+def _apply_staged_actions_once(staged_actions: Dict[str, Any], raw_user_text: str = "", user_id: str = "anonymous") -> Dict[str, Any]:
     """Apply a reviewed staging payload.
 
     Accepts a user-editable staged action structure and persists it.
@@ -2197,16 +2214,7 @@ def apply_staged_actions(staged_actions: Dict[str, Any], raw_user_text: str = ""
 
     existing = _audit_query().filter_by(operation_id=operation_id).first()
     if existing:
-        try:
-            existing_payload = json.loads(existing.actions_json or "{}")
-        except Exception:
-            existing_payload = {}
-        existing_fp = ""
-        if isinstance(existing_payload, dict):
-            existing_fp = str(existing_payload.get("operation_fingerprint") or "").strip()
-        if existing_fp and existing_fp != operation_fp:
-            raise ValueError("operation_id was already used with different staged content; re-stage to get a new operation_id.")
-        return _replay_applied_operation(existing)
+        return _replay_matching_operation(existing, operation_fp)
 
     normalized = _normalize_staged_actions_for_apply(staged_actions, operation_id)
 
@@ -2716,11 +2724,34 @@ def apply_staged_actions(staged_actions: Dict[str, Any], raw_user_text: str = ""
         db.session.rollback()
         duplicate = _audit_query().filter_by(operation_id=operation_id).first()
         if duplicate:
-            return _replay_applied_operation(duplicate)
+            return _replay_matching_operation(duplicate, operation_fp)
         raise
     except Exception:
         db.session.rollback()
         raise
+
+
+def apply_staged_actions(staged_actions: Dict[str, Any], raw_user_text: str = "", user_id: str = "anonymous") -> Dict[str, Any]:
+    """Apply once, with bounded SQLite lock retry around the atomic operation.
+
+    PostgreSQL converges through the household/operation unique claim. SQLite
+    is local/disposable but can reject a losing concurrent writer before that
+    writer observes the committed claim. Retrying the entire rolled-back
+    transaction lets it converge on the winner without weakening integrity.
+    """
+    for attempt in range(5):
+        try:
+            return _apply_staged_actions_once(
+                staged_actions, raw_user_text=raw_user_text, user_id=user_id
+            )
+        except OperationalError as exc:
+            db.session.rollback()
+            dialect = str(getattr(db.engine.dialect, "name", ""))
+            locked = "database is locked" in str(exc).lower()
+            if dialect != "sqlite" or not locked or attempt == 4:
+                raise
+            time.sleep(0.025 * (2 ** attempt))
+    raise RuntimeError("Copilot staged apply retry loop exhausted.")
 
 
 def process_copilot_command(

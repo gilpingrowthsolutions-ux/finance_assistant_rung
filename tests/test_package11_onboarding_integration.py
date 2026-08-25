@@ -27,6 +27,7 @@ from app import (  # noqa: E402
     ExpenseTransaction,
     Household,
     HouseholdShoppingDefault,
+    IncomePlanVersion,
     PYF_TARGET_SETTING_KEY,
     SAFE_BUFFER_SETTING_KEY,
     LOCATION_SHARING_SETTING_KEY,
@@ -46,6 +47,7 @@ app.testing = True
 HOUSEHOLD_SECRET = b"package11-test-secret"
 
 FULL_FINANCIAL_PAYLOAD = {
+    "expected_paycheck_operation_id": "package11-onboarding-plan",
     "household_size": 3,
     "favorite_proteins": ["chicken", "salmon"],
     "dietary_restrictions": ["low carb"],
@@ -103,10 +105,20 @@ def _headers_for(public_id: str) -> dict[str, str]:
     }
 
 
+def _review_required_expenses() -> None:
+    """Establish the explicit review fact required by Slice 8A readiness."""
+    response = client.post(
+        "/api/onboarding/required-expenses-review",
+        json={"answer": "yes", "review_complete": True},
+    )
+    assert response.status_code == 200
+
+
 # 1 + 2 + 3 + 4 + 5 + 6 + 7 — manual-first onboarding produces a calculable
 # household and every financial input persists to its canonical authority.
 def test_manual_first_onboarding_is_financially_calculable() -> None:
     _reset_db()
+    _review_required_expenses()
 
     resp = client.post("/api/onboarding/complete", json=FULL_FINANCIAL_PAYLOAD)
     assert resp.status_code == 200
@@ -136,9 +148,11 @@ def test_manual_first_onboarding_is_financially_calculable() -> None:
         assert buf is not None
         assert float(buf.value) == 150.0
 
-        # 5 — pay schedule / current-period inputs persisted to Account.
+        # 5 — pay schedule and expected income use separate canonical authorities.
         assert int(account.pay_period_days) == 14
-        assert round(float(account.expected_paycheck), 2) == 2000.0
+        assert account.expected_paycheck is None
+        plan = IncomePlanVersion.query.filter_by(household_id=hid).one()
+        assert plan.expected_income_cents == 200000
 
         # 6 — grocery Need baseline persisted to Package 10 authority.
         grocery = UserPreference.query.filter_by(household_id=hid, key="baseline_grocery_cost").first()
@@ -221,6 +235,7 @@ def test_onboarding_never_selects_or_replaces_store() -> None:
 def test_plaid_remains_optional() -> None:
     _reset_db()
     _seed_income()
+    _review_required_expenses()
     resp = client.post("/api/onboarding/complete", json=FULL_FINANCIAL_PAYLOAD)
     assert resp.status_code == 200
     assert (resp.get_json() or {}).get("readiness", {}).get("complete") is True
@@ -247,7 +262,8 @@ def test_revisit_does_not_erase_existing_data() -> None:
         assert round(float(account.checking_balance), 2) == 1750.50
         assert int(account.household_size) == 5  # the only field we changed
         assert int(account.pay_period_days) == 14
-        assert round(float(account.expected_paycheck), 2) == 2000.0
+        assert round(float(account.expected_paycheck), 2) == 2000.0  # legacy compatibility value only
+        assert IncomePlanVersion.query.filter_by(household_id=hid).one().expected_income_cents == 200000
 
         pyf = UserSetting.query.filter_by(household_id=hid, key=PYF_TARGET_SETTING_KEY).first()
         assert pyf is not None and float(pyf.value) == 12.5
@@ -265,6 +281,7 @@ def test_revisit_does_not_erase_existing_data() -> None:
 def test_reload_resume_reflects_persisted_state() -> None:
     _reset_db()
     _seed_income()
+    _review_required_expenses()
     assert client.post("/api/onboarding/complete", json=FULL_FINANCIAL_PAYLOAD).status_code == 200
 
     state = client.get("/api/onboarding/state").get_json() or {}
@@ -436,3 +453,33 @@ def test_omitted_optional_fields_preserve_existing_shopping_defaults() -> None:
     defaults = state.get("defaults") or {}
     assert defaults.get("shopping_style") == "save_most"
     assert (defaults.get("household_shopping_defaults") or {}).get("milk_type") == "whole"
+
+
+def test_explicit_no_expense_review_ignores_stale_bill_and_baseline_fields() -> None:
+    """A durable 'no required expenses' answer is authoritative.
+
+    A browser can flip YES -> NO without necessarily clearing already-typed
+    grocery/fuel/bill inputs before the final /api/onboarding/complete call.
+    The explicit reviewed-none answer must still win: it must not manufacture
+    Bills or baseline preferences from those leftover values.
+    """
+    _reset_db()
+    review = client.post("/api/onboarding/required-expenses-review", json={"answer": "no"})
+    assert review.status_code == 200
+    assert review.get_json()["required_expense_review"] == "no_expenses_reviewed"
+
+    payload = dict(FULL_FINANCIAL_PAYLOAD)
+    completed = client.post("/api/onboarding/complete", json=payload)
+    assert completed.status_code == 200
+
+    with app.app_context():
+        hid = current_household_id()
+        assert Bill.query.filter_by(household_id=hid).count() == 0
+        assert UserPreference.query.filter(
+            UserPreference.household_id == hid,
+            UserPreference.key.in_(["baseline_grocery_cost", "baseline_fuel_cost"]),
+        ).count() == 0
+
+    state = client.get("/api/onboarding/state").get_json() or {}
+    assert state["required_expense_review"] == "no_expenses_reviewed"
+    assert state["readiness"]["complete"] is True

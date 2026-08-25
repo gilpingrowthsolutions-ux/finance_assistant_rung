@@ -53,13 +53,13 @@ function planPayload() {
 
   await page.goto(baseURL, { waitUntil: 'networkidle' });
   await page.evaluate(() => { const d = document.querySelector('#onboardingDialog'); if (d && d.open) d.close(); });
-  await page.click('[data-tab="grocery"]');
+  await page.click('[data-tab="shopping"]');
   await page.evaluate(() => buildCart());
   await page.waitForSelector('#storeCartContainer .store-cart-item');
   const before = await page.locator('#storeCartContainer').innerText();
   if (!before.includes('Premium Flexible Cereal') || !before.includes('Chosen Exact Milk') || !before.includes('From Test Supper') || !before.includes('Direct Dish Soap')) throw new Error('controlled cart did not render all required authority states');
 
-  await page.click('#buildCartBtn');
+  await page.click('#rebalanceCartBtn');
   await page.waitForSelector('#rebalanceReviewDialog[open]');
   const previewText = await page.locator('#rebalanceReviewDialog').innerText();
   if (!previewText.includes('Premium Flexible Cereal') || !previewText.includes('Value Flexible Cereal') || !previewText.includes('Save $7.00')) throw new Error('before/after/savings preview missing: ' + previewText);
@@ -70,12 +70,12 @@ function planPayload() {
   if ((await page.locator('#storeCartContainer').innerText()) !== before || requests.apply.length !== 0) throw new Error('cancel mutated cart or applied');
   await page.reload({ waitUntil: 'networkidle' });
   await page.evaluate(() => { const d = document.querySelector('#onboardingDialog'); if (d && d.open) d.close(); });
-  await page.click('[data-tab="grocery"]');
+  await page.click('[data-tab="shopping"]');
   await page.evaluate(() => buildCart());
   await page.waitForSelector('#storeCartContainer .store-cart-item');
   if (!(await page.locator('#storeCartContainer').innerText()).includes('Premium Flexible Cereal')) throw new Error('cancel did not survive reload unchanged');
 
-  await page.click('#buildCartBtn');
+  await page.click('#rebalanceCartBtn');
   await page.waitForSelector('#rebalanceReviewDialog[open]');
   await page.evaluate(() => { const button = document.querySelector('#rebalanceApplyBtn'); button.click(); button.click(); });
   await page.waitForFunction(() => document.querySelector('#storeCartContainer').innerText.includes('Value Flexible Cereal'));
@@ -85,7 +85,7 @@ function planPayload() {
 
   await page.reload({ waitUntil: 'networkidle' });
   await page.evaluate(() => { const d = document.querySelector('#onboardingDialog'); if (d && d.open) d.close(); });
-  await page.click('[data-tab="grocery"]');
+  await page.click('[data-tab="shopping"]');
   await page.evaluate(() => buildCart());
   await page.waitForFunction(() => document.querySelector('#storeCartContainer').innerText.includes('Value Flexible Cereal'));
   const reloaded = await page.locator('#storeCartContainer').innerText();
@@ -93,7 +93,7 @@ function planPayload() {
 
   await page.fill('#budgetInput', '20');
   await page.evaluate(() => { activeCartBudgetLimit = 20; });
-  await page.click('#buildCartBtn');
+  await page.click('#rebalanceCartBtn');
   await page.waitForSelector('#rebalanceReviewDialog[open]');
   const impossible = await page.locator('#rebalanceReviewDialog').innerText();
   if (!impossible.includes('could not safely meet this budget') || !impossible.includes('required quantities')) throw new Error('impossible budget was not reported truthfully');

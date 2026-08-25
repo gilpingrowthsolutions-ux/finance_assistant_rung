@@ -47,7 +47,6 @@ CONFIDENCE_HIGH = "high"
 CONFIDENCE_MEDIUM = "medium"
 CONFIDENCE_LOW = "low"
 
-_UNKNOWN_FALLBACK_POLICY = "unknown_uses_general_merchandise_rate"
 _MONEY_CENT = Decimal("0.01")
 
 _AUTHORITATIVE_PROVENANCE = {
@@ -62,7 +61,7 @@ _LEGACY_SOURCE_TYPE_MAP = {
 
 _FOOD_TOKENS = {
     "milk", "eggs", "cheese", "bread", "banana", "apple", "rice", "beans", "flour", "sugar",
-    "chicken", "beef", "pork", "fish", "tomato", "lettuce", "broccoli", "cereal", "yogurt", "butter",
+    "chicken", "beef", "pork", "fish", "tomato", "lettuce", "broccoli", "cereal", "yogurt", "butter", "coffee",
 }
 _GENERAL_TOKENS = {
     "detergent", "shampoo", "paper", "toothpaste", "toothbrush", "battery", "cleaner", "soap", "towel",
@@ -87,6 +86,7 @@ class StoreTaxProfileResult:
     prepared_rate_bps: int
     resolved_tax_code: Optional[str]
     source_key: Optional[str]
+    source_type: Optional[str]
     source_version: Optional[str]
     source_hash: Optional[str]
     effective_from: date
@@ -107,6 +107,19 @@ class CartTaxResult:
     source_version: Optional[str]
     unknown_class_count: int
     degraded_reason: Optional[str]
+
+
+TAX_CONFIDENCE_CONFIRMED = "confirmed"
+TAX_CONFIDENCE_RUNG_CALCULATED = "rung_calculated"
+TAX_CONFIDENCE_ESTIMATED = "estimated"
+TAX_CONFIDENCE_NOT_INCLUDED = "tax_not_included_yet"
+
+_CUSTOMER_LABELS = {
+    TAX_CONFIDENCE_CONFIRMED: "Confirmed",
+    TAX_CONFIDENCE_RUNG_CALCULATED: "Rung-calculated",
+    TAX_CONFIDENCE_ESTIMATED: "Estimated",
+    TAX_CONFIDENCE_NOT_INCLUDED: "Tax not included yet",
+}
 
 
 def rounding_cents_from_subtotal_and_rate_bps(subtotal_cents: int, rate_bps: int) -> int:
@@ -460,6 +473,7 @@ def _lookup_profile_cache(
         prepared_rate_bps=int(cached.prepared_rate_basis_points or cached.general_rate_basis_points or 0),
         resolved_tax_code=cached.resolved_tax_code,
         source_key=dataset.source_key,
+        source_type=canonical_provenance_type(dataset.source_type),
         source_version=cached.source_version,
         source_hash=cached.source_hash,
         effective_from=cached.effective_from,
@@ -613,6 +627,7 @@ def resolve_store_tax_profile(
         prepared_rate_bps=prepared_rate_bps,
         resolved_tax_code=resolved_tax_code,
         source_key=dataset.source_key,
+        source_type=canonical_provenance_type(dataset.source_type),
         source_version=dataset.version_tag,
         source_hash=dataset.source_hash,
         effective_from=dataset.effective_from,
@@ -785,6 +800,125 @@ def calculate_cart_tax(
         unknown_class_count=unknown_count,
         degraded_reason=degraded,
     )
+
+
+def canonical_tax_decision(
+    *,
+    store_tax_profile: StoreTaxProfileResult,
+    cart_items: list[dict[str, Any]],
+    calculation_date: date,
+    owner_scope: str,
+    purchase_context: str,
+    city: str = "",
+    postal_code: str = "",
+    actual_tax_cents: Optional[int] = None,
+    actual_total_cents: Optional[int] = None,
+    actual_authority: str = "actual_checkout",
+) -> dict[str, Any]:
+    """Return the single customer-facing tax decision for a purchase.
+
+    The underlying rate math stays in ``calculate_cart_tax``.  This boundary
+    decides whether that math is sufficiently supported to expose as a total,
+    and gives supplied actual checkout evidence precedence over every estimate.
+    """
+    calculated = calculate_cart_tax(
+        store_tax_profile=store_tax_profile,
+        cart_items=cart_items,
+        calculation_date=calculation_date,
+        owner_scope=owner_scope,
+    )
+    subtotal_cents = int(calculated.subtotal_cents)
+
+    if actual_total_cents is not None or actual_tax_cents is not None:
+        if actual_total_cents is not None:
+            total_cents = int(actual_total_cents)
+            if total_cents < subtotal_cents:
+                raise ValueError("actual total cannot be less than subtotal")
+            tax_cents = total_cents - subtotal_cents
+        else:
+            tax_cents = int(actual_tax_cents or 0)
+            if tax_cents < 0:
+                raise ValueError("actual tax cannot be negative")
+            total_cents = subtotal_cents + tax_cents
+        status = TAX_CONFIDENCE_CONFIRMED
+        missing: list[str] = []
+        authority = str(actual_authority or "actual_checkout")
+        included = True
+    else:
+        authoritative_source = is_authoritative_provenance(store_tax_profile.source_type or "")
+        exact_location = store_tax_profile.location_precision in {
+            LOCATION_PRECISION_EXACT_ADDRESS,
+            LOCATION_PRECISION_ZIP_PLUS_4,
+            LOCATION_PRECISION_ZIP5,
+            LOCATION_PRECISION_CITY_COUNTY,
+        }
+        missing = []
+        if store_tax_profile.location_precision == LOCATION_PRECISION_STATE_ONLY:
+            missing.append("local_tax_components")
+        elif store_tax_profile.location_precision == LOCATION_PRECISION_UNRESOLVED:
+            missing.append("supported_purchase_jurisdiction")
+        if calculated.unknown_class_count:
+            missing.append("supported_taxability")
+        if purchase_context == "online_delivery":
+            missing.append("seller_marketplace_tax_handling")
+
+        if store_tax_profile.status == "unresolved" or calculated.unknown_class_count:
+            status = TAX_CONFIDENCE_NOT_INCLUDED
+            tax_cents = None
+            total_cents = None
+            authority = "insufficient_evidence"
+            included = False
+        elif authoritative_source and exact_location and purchase_context != "online_delivery":
+            status = TAX_CONFIDENCE_RUNG_CALCULATED
+            tax_cents = int(calculated.tax_cents)
+            total_cents = int(calculated.estimated_total_cents)
+            authority = "rung_supported_jurisdiction_rules"
+            included = True
+        else:
+            status = TAX_CONFIDENCE_ESTIMATED
+            tax_cents = int(calculated.tax_cents)
+            total_cents = int(calculated.estimated_total_cents)
+            authority = "supported_components_only"
+            included = True
+
+    return {
+        "status": status,
+        "label": _CUSTOMER_LABELS[status],
+        "authority": authority,
+        "purchase_context": str(purchase_context or "unspecified"),
+        "subtotal_cents": subtotal_cents,
+        "tax_cents": tax_cents,
+        "total_cents": total_cents,
+        "tax_included": included,
+        "jurisdiction": {
+            "country": "US",
+            "state": store_tax_profile.state or None,
+            "city": str(city or "").strip() or None,
+            "postal_code": _normalize_zip5(postal_code) or None,
+            "precision": store_tax_profile.location_precision,
+            "resolved_tax_code": store_tax_profile.resolved_tax_code,
+            "missing_components": missing,
+        },
+        "rate_components_bps": {
+            "general_merchandise": store_tax_profile.general_rate_bps,
+            "grocery_food": store_tax_profile.grocery_rate_bps,
+            "prepared_food": store_tax_profile.prepared_rate_bps,
+        },
+        "taxability_basis": {
+            "subtotal_by_class_cents": calculated.subtotal_by_class_cents,
+            "tax_by_class_cents": calculated.tax_by_class_cents,
+            "unknown_class_count": calculated.unknown_class_count,
+        },
+        "source": {
+            "key": store_tax_profile.source_key,
+            "type": store_tax_profile.source_type,
+            "version": store_tax_profile.source_version,
+            "hash": store_tax_profile.source_hash,
+        },
+        "degraded_reason": calculated.degraded_reason,
+        "informational_only": actual_total_cents is None and actual_tax_cents is None,
+        "financial_mutations": False,
+    }
 
 
 def cents_to_float(value: int) -> float:

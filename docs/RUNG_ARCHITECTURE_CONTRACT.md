@@ -26,6 +26,8 @@
 - Manual/Plaid reconciliation must never create duplicate economic effects.
 - Financial race conditions or household data leakage are launch blockers.
 - Financial state must remain correct under concurrent writes.
+- A logical consequential operation that changes multiple authoritative rows uses one explicit atomic transaction boundary unless a documented idempotent/outbox pattern makes separate commits safe.
+- New authoritative financial mutations that may retry carry a unique operation/idempotency identifier and auditable source/destination.
 
 ## 3. Human Authority
 
@@ -218,16 +220,26 @@
 - Browser/acceptance tests must use isolated disposable data.
 - Production integrity must be verified before/after risky acceptance work.
 
-## 16. Production Database Direction
+## 16. Production Database Contract
 
-- The pre-beta plan is to evaluate PostgreSQL as the likely production database because Rung is intended for:
+- PostgreSQL is the canonical beta/production database because Rung is intended for:
   - multiple households
   - concurrent financial writes
   - shared retail-cache writes
   - multiple application workers/instances
   - national growth
-- SQLite remains valid development/history state until a controlled migration is explicitly approved.
+- SQLite remains supported for local development and explicitly disposable automated/browser acceptance tests only. It is not a hosted beta/production authority.
+- The protected historical SQLite database remains historical data until a controlled migration is explicitly approved.
 - Do not perform an uncontrolled production migration.
+
+## 16A. New Authoritative Money and Savings Storage
+
+- New Goals, named Reserves, Flexible Savings, allocations, and transfers are first-class household-owned relational state.
+- `UserSetting` stores preferences and policy inputs, not authoritative balances.
+- `Account` must not become a collection of Emergency, Vehicle, Medical, Home, or Goal balances.
+- New authoritative money uses integer cents or fixed-precision `NUMERIC`, never Float or JSON.
+- Allocation/transfer history records household ownership, unique retry-safe operation identity, source, destination, and an auditable timestamp inside one atomic write.
+- Raw ledger/allocation state is canonical. Projections, timelines, completion estimates, and waterfall outputs are derived and may be cached/versioned, but cannot become competing balance authority.
 
 ## 17. Failure / Graceful Degradation
 

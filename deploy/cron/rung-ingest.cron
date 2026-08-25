@@ -29,9 +29,10 @@
 # /etc/rung/ingest.env is a shell-form file (KEY=VALUE per line). It is
 # read by `set -a; . /etc/rung/ingest.env; set +a` before the script.
 # Required:
+#   RUNG_ENV            -- production for hosted operation
 #   KROGER_CLIENT_ID     -- developer.kroger.com
 #   KROGER_CLIENT_SECRET -- developer.kroger.com
-#   DATABASE_URL         -- e.g. sqlite:////var/lib/rung/finance.db
+#   DATABASE_URL         -- PostgreSQL beta/production URL
 # Optional:
 #   INGEST_CONFIG        -- JSON config path (default: scripts/ingest_store_prices.config.example.json)
 #   INGEST_LOG_LEVEL     -- DEBUG | INFO | WARNING | ERROR (default INFO)

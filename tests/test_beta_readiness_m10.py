@@ -11,7 +11,16 @@ os.environ.setdefault("PLAID_SECRET", "plaid_test_secret")
 os.environ.setdefault("PLAID_ENV", "sandbox")
 os.environ.setdefault("PLAID_TOKEN_ENCRYPTION_KEY", "x7cUQ1K8v1SCh4skQ53QqE5s8z3v8c2n6cihVQMcWDo=")
 
-from app import PYF_TARGET_SETTING_KEY, SAFE_BUFFER_SETTING_KEY, app, db, init_db, _validate_startup_configuration  # noqa: E402
+from app import (  # noqa: E402
+    PYF_TARGET_SETTING_KEY,
+    REQUIRED_EXPENSE_REVIEWED,
+    REQUIRED_EXPENSE_REVIEW_SETTING_KEY,
+    SAFE_BUFFER_SETTING_KEY,
+    app,
+    db,
+    init_db,
+    _validate_startup_configuration,
+)
 from services.household_context import household_id as current_household_id  # noqa: E402
 from models import (  # noqa: E402
     Account,
@@ -22,7 +31,7 @@ from models import (  # noqa: E402
     PlaidItem,
     PlaidTransaction,
     ShoppingTripCompletion,
-    TransactionReconciliation,
+    TransactionReconciliation, IncomePlanVersion,
     UserPreference,
     UserSetting,
 )
@@ -48,8 +57,10 @@ def client():
         db.session.flush()
         hid = current_household_id()
         db.session.add_all([
+            IncomePlanVersion(household_id=hid, operation_id="beta-plan", expected_income_cents=140000, effective_at=datetime.now(timezone.utc)-timedelta(days=30), source="test_confirmation"),
             UserSetting(household_id=hid, key=PYF_TARGET_SETTING_KEY, value="10"),
             UserSetting(household_id=hid, key=SAFE_BUFFER_SETTING_KEY, value="100.00"),
+            UserSetting(household_id=hid, key=REQUIRED_EXPENSE_REVIEW_SETTING_KEY, value=REQUIRED_EXPENSE_REVIEWED),
             UserPreference(household_id=hid, key="baseline_grocery_cost", value="200.00"),
             Bill(household_id=hid, name="Required fuel", amount=60.0, due_date=datetime.now(timezone.utc) + timedelta(days=3), is_gas_estimate=True, is_paid=False),
             ExpenseTransaction(household_id=hid, description="Established payday", amount=1400.0, category="income", source="manual", local_account_id=account.id, date=datetime.now(timezone.utc) - timedelta(days=5)),
@@ -138,9 +149,10 @@ def test_01_clean_household_first_use_path(client):
 
     upd = client.post(
         "/api/account/update",
-        json={
+            json={
             "checking_balance": 1200.0,
-            "expected_paycheck": 1500.0,
+                "expected_paycheck": 1500.0,
+                "expected_paycheck_operation_id": "beta-update-plan",
             "pay_period_days": 14,
             "food_allocation_pct": 35.0,
         },
@@ -210,8 +222,9 @@ def test_location_autodetect_updates_zip_tax_and_store(client, monkeypatch):
     assert location.get("store_name") == "Kroger"
     assert location.get("location_id") == ""
     assert location.get("city_state") == "San Francisco, CA"
-    assert location.get("sales_tax_rate") == pytest.approx(0.0725)
-    assert location.get("grocery_tax_rate") == pytest.approx(0.0)
+    assert location.get("sales_tax_rate") is None
+    assert location.get("grocery_tax_rate") is None
+    assert location.get("tax_authority") == "canonical_tax_engine_at_purchase"
     store = body.get("store") or {}
     assert store.get("found") is False
     assert store.get("status") == "store_choice_required"
@@ -221,8 +234,9 @@ def test_location_autodetect_updates_zip_tax_and_store(client, monkeypatch):
     assert summary_location.get("zip_code") == "94105"
     assert summary_location.get("store_name") == "Kroger"
     assert summary_location.get("location_id") == ""
-    assert summary_location.get("sales_tax_rate") == pytest.approx(0.0725)
-    assert summary_location.get("grocery_tax_rate") == pytest.approx(0.0)
+    assert summary_location.get("sales_tax_rate") is None
+    assert summary_location.get("grocery_tax_rate") is None
+    assert summary_location.get("tax_authority") == "canonical_tax_engine_at_purchase"
 
 
 def test_location_autodetect_uses_zip_combined_tax_lookup(client, monkeypatch):
@@ -262,10 +276,10 @@ def test_location_autodetect_uses_zip_combined_tax_lookup(client, monkeypatch):
     assert resp.status_code == 200
     location = (resp.get_json() or {}).get("location") or {}
 
-    # Combined sales tax should come directly from ZIP lookup.
-    assert location.get("sales_tax_rate") == pytest.approx(0.091)
-    # Missouri uses reduced grocery state tax + preserved local component.
-    assert location.get("grocery_tax_rate") == pytest.approx(0.061)
+    # Device location is discovery context, never purchase-tax authority.
+    assert location.get("sales_tax_rate") is None
+    assert location.get("grocery_tax_rate") is None
+    assert location.get("tax_authority") == "canonical_tax_engine_at_purchase"
 
 
 def test_manual_zip_save_updates_location_without_selecting_store(client):

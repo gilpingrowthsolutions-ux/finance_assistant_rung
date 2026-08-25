@@ -222,10 +222,13 @@ class SharedRetailFoundationService:
             "availability_freshness": snapshot.get("availability_freshness"),
         }
 
-    def upsert_store(self, *, retailer: str, store: RetailStore) -> RetailStoreIdentity:
+    def upsert_store(self, *, retailer: str, store: RetailStore, commit: bool = True) -> RetailStoreIdentity:
+        identity = {
+            "retailer": _normalize_text(retailer).lower(),
+            "retailer_store_id": _normalize_text(store.store_id),
+        }
         row = RetailStoreIdentity.query.filter_by(
-            retailer=_normalize_text(retailer).lower(),
-            retailer_store_id=_normalize_text(store.store_id),
+            **identity,
         ).first()
         values = {
             "store_name": _normalize_text(store.name) or _normalize_text(retailer).title(),
@@ -235,16 +238,28 @@ class SharedRetailFoundationService:
         }
         if row is None:
             row = RetailStoreIdentity(
-                retailer=_normalize_text(retailer).lower(),
-                retailer_store_id=_normalize_text(store.store_id),
+                **identity,
                 **values,
             )
-            db.session.add(row)
+            if db.engine.dialect.name != "postgresql":
+                db.session.add(row)
+                db.session.flush()
+            else:
+                try:
+                    with db.session.begin_nested():
+                        db.session.add(row)
+                        db.session.flush()
+                except IntegrityError:
+                    row = RetailStoreIdentity.query.filter_by(**identity).first()
+                    if row is None:
+                        raise
+        for key, value in values.items():
+            if value is not None or key == "updated_at":
+                setattr(row, key, value)
+        if commit:
+            db.session.commit()
         else:
-            for key, value in values.items():
-                if value is not None or key == "updated_at":
-                    setattr(row, key, value)
-        db.session.commit()
+            db.session.flush()
         return row
 
     def upsert_product(
@@ -258,11 +273,13 @@ class SharedRetailFoundationService:
         package_size: Optional[str] = None,
         variant: Optional[str] = None,
         category: Optional[str] = None,
+        commit: bool = True,
     ) -> RetailProduct:
-        row = RetailProduct.query.filter_by(
-            retailer=_normalize_text(retailer).lower(),
-            retailer_product_id=_normalize_text(retailer_product_id),
-        ).first()
+        identity = {
+            "retailer": _normalize_text(retailer).lower(),
+            "retailer_product_id": _normalize_text(retailer_product_id),
+        }
+        row = RetailProduct.query.filter_by(**identity).first()
         values = {
             "upc": _normalize_text(upc) or None,
             "title": _normalize_text(title) or _normalize_text(retailer_product_id),
@@ -274,16 +291,28 @@ class SharedRetailFoundationService:
         }
         if row is None:
             row = RetailProduct(
-                retailer=_normalize_text(retailer).lower(),
-                retailer_product_id=_normalize_text(retailer_product_id),
+                **identity,
                 **values,
             )
-            db.session.add(row)
+            if db.engine.dialect.name != "postgresql":
+                db.session.add(row)
+                db.session.flush()
+            else:
+                try:
+                    with db.session.begin_nested():
+                        db.session.add(row)
+                        db.session.flush()
+                except IntegrityError:
+                    row = RetailProduct.query.filter_by(**identity).first()
+                    if row is None:
+                        raise
+        for key, value in values.items():
+            if value is not None or key in {"title", "updated_at"}:
+                setattr(row, key, value)
+        if commit:
+            db.session.commit()
         else:
-            for key, value in values.items():
-                if value is not None or key in {"title", "updated_at"}:
-                    setattr(row, key, value)
-        db.session.commit()
+            db.session.flush()
         return row
 
     def upsert_observation(
@@ -308,7 +337,9 @@ class SharedRetailFoundationService:
         availability_confidence: Optional[str] = None,
         observed_at: Optional[str] = None,
     ) -> StoreProductObservation:
-        store_row = self.upsert_store(retailer=retailer, store=store)
+        # Store, product, and observation are one logical cache write. Do not
+        # expose partially persisted identities if the observation fails.
+        store_row = self.upsert_store(retailer=retailer, store=store, commit=False)
         product_row = self.upsert_product(
             retailer=retailer,
             retailer_product_id=retailer_product_id,
@@ -318,6 +349,7 @@ class SharedRetailFoundationService:
             package_size=package_size,
             variant=variant,
             category=category,
+            commit=False,
         )
         row = StoreProductObservation.query.filter_by(
             retail_store_id=store_row.id,
@@ -329,7 +361,21 @@ class SharedRetailFoundationService:
                 retail_product_id=product_row.id,
                 price_type="unknown",
             )
-            db.session.add(row)
+            if db.engine.dialect.name != "postgresql":
+                db.session.add(row)
+                db.session.flush()
+            else:
+                try:
+                    with db.session.begin_nested():
+                        db.session.add(row)
+                        db.session.flush()
+                except IntegrityError:
+                    row = StoreProductObservation.query.filter_by(
+                        retail_store_id=store_row.id,
+                        retail_product_id=product_row.id,
+                    ).first()
+                    if row is None:
+                        raise
 
         observed_dt = _parse_iso_datetime(observed_at) or _utcnow()
         price_cents = _to_cents(price)
@@ -448,7 +494,8 @@ class SharedRetailFoundationService:
         source: str,
         observed_at: Optional[str] = None,
     ) -> RetailSearchCache:
-        store_row = self.upsert_store(retailer=retailer, store=store)
+        # Store identity and its search result are one logical cache write.
+        store_row = self.upsert_store(retailer=retailer, store=store, commit=False)
         normalized_query = normalize_query(query)
         row = RetailSearchCache.query.filter_by(
             retailer=_normalize_text(retailer).lower(),
@@ -469,10 +516,24 @@ class SharedRetailFoundationService:
                 normalized_query=normalized_query,
                 **values,
             )
-            db.session.add(row)
-        else:
-            for key, value in values.items():
-                setattr(row, key, value)
+            if db.engine.dialect.name != "postgresql":
+                db.session.add(row)
+                db.session.flush()
+            else:
+                try:
+                    with db.session.begin_nested():
+                        db.session.add(row)
+                        db.session.flush()
+                except IntegrityError:
+                    row = RetailSearchCache.query.filter_by(
+                        retailer=_normalize_text(retailer).lower(),
+                        retail_store_id=store_row.id,
+                        normalized_query=normalized_query,
+                    ).first()
+                    if row is None:
+                        raise
+        for key, value in values.items():
+            setattr(row, key, value)
         db.session.commit()
         return row
 

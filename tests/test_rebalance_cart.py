@@ -11,6 +11,7 @@ from models import Account, GroceryItem, HouseholdShoppingDefault, RetailProduct
 from services.retail import ProductSearchResult, RetailProduct
 from services.retail.cart import VERIFIED_WALMART_STORE, build_verified_walmart_cart, propose_rebalance_preview
 from services.household_context import household_id as current_household_id
+from services.selected_store import select_store
 
 
 class FakeProvider:
@@ -53,7 +54,14 @@ def _setup() -> None:
     with app.app_context():
         db.drop_all()
         db.create_all()
-        db.session.add(Account(household_id=current_household_id(), checking_balance=1250.00))
+        account = Account(household_id=current_household_id(), checking_balance=1250.00)
+        db.session.add(account)
+        db.session.flush()
+        select_store(
+            current_household_id(), retailer="walmart", store_id="357",
+            store_name="Walmart — Versailles", address="1003 W Newton St, Versailles, MO 65084",
+            city="Versailles", state="MO", postal_code="65084", account=account,
+        )
         db.session.commit()
 
 

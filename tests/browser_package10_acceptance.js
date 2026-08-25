@@ -41,7 +41,7 @@ const missingMode = process.env.RUNG_P10_MISSING_SETUP === '1';
   const unchanged = await page.evaluate(async () => (await fetch('/api/budget/summary')).json());
   if (unchanged.safe_to_spend.safe_to_spend_cents !== 30000) throw new Error('legacy allocation changed canonical safe-to-spend');
 
-  await page.click('[data-tab="grocery"]');
+  await page.click('[data-tab="shopping"]');
   await page.evaluate(() => buildCart());
   await page.waitForSelector('#storeCartContainer .store-cart-item');
   const defaultBudget = await page.evaluate(() => ({value: activeCartBudgetLimit, text: document.querySelector('#cartBudget').textContent, cart: document.querySelector('#storeCartContainer').innerText}));

@@ -40,6 +40,26 @@ your intent.
 
 ## Env-var contract
 
+Beta/production uses PostgreSQL as the canonical database. SQLite is retained
+for local development and explicitly disposable tests only; it is not a hosted
+deployment option.
+
+The web runtime defaults to a conservative per-process PostgreSQL pool of five
+connections plus five temporary overflow connections, a 10-second checkout
+timeout, connection health checks, 30-minute recycling, and a 30-second
+statement timeout. These are configurable with `RUNG_DB_POOL_SIZE`,
+`RUNG_DB_MAX_OVERFLOW`, `RUNG_DB_POOL_TIMEOUT_SECONDS`,
+`RUNG_DB_POOL_RECYCLE_SECONDS`, and `RUNG_DB_STATEMENT_TIMEOUT_MS`.
+
+For the initial beta, start with no more than two web worker processes. The
+worst-case application connection budget is:
+
+`workers × (RUNG_DB_POOL_SIZE + RUNG_DB_MAX_OVERFLOW)`
+
+Keep that result below the hosting database's connection limit after reserving
+capacity for migrations, ingestion, and administration. Increase workers or
+pool sizes only from measured concurrency.
+
 These variables are read by `scripts/ingest_store_prices.py` and
 must be set by the scheduler. Documented here so an ops engineer can
 deploy without reading code.
@@ -48,9 +68,10 @@ deploy without reading code.
 
 | Variable | Source | Example |
 |---|---|---|
+| `RUNG_ENV` | deployment | `production` |
 | `KROGER_CLIENT_ID` | developer.kroger.com | `rung-prod-abc123` |
 | `KROGER_CLIENT_SECRET` | developer.kroger.com | (32-char secret) |
-| `DATABASE_URL` | SQLAlchemy URL pointing at the production SQLite/Postgres | `sqlite:////var/lib/rung/finance.db` |
+| `DATABASE_URL` | PostgreSQL URL for the beta/production canonical database | `postgresql://rung:…@db.internal:5432/rung` |
 
 ### Optional
 
@@ -82,7 +103,8 @@ sudo chmod 0644 /etc/cron.d/rung-ingest
 sudo tee /etc/rung/ingest.env > /dev/null <<'EOF'
 KROGER_CLIENT_ID="..."
 KROGER_CLIENT_SECRET="..."
-DATABASE_URL="sqlite:////var/lib/rung/finance.db"
+RUNG_ENV="production"
+DATABASE_URL="postgresql://rung:...@db.internal:5432/rung"
 PYTHONUNBUFFERED=1
 EOF
 sudo chmod 0600 /etc/rung/ingest.env
@@ -117,7 +139,8 @@ sudo useradd --system --home /var/lib/rung --shell /usr/sbin/nologin rung || tru
 sudo tee /etc/rung/ingest.env > /dev/null <<'EOF'
 KROGER_CLIENT_ID="..."
 KROGER_CLIENT_SECRET="..."
-DATABASE_URL="sqlite:////var/lib/rung/finance.db"
+RUNG_ENV="production"
+DATABASE_URL="postgresql://rung:...@db.internal:5432/rung"
 EOF
 sudo chown root:rung /etc/rung/ingest.env
 sudo chmod 0640 /etc/rung/ingest.env
@@ -175,11 +198,8 @@ kubectl apply -f deploy/k8s/rung-ingest-secret.yaml
 # 2. Create the ConfigMap holding the JSON config.
 kubectl apply -f deploy/k8s/rung-ingest-configmap.yaml.example
 
-# 3. Create the PVC for SQLite persistence.
-kubectl apply -f deploy/k8s/rung-ingest-pvc.yaml.example
-# (Uncomment the storageClassName line for your cluster first.)
-
-# 4. Create both CronJobs (twice-daily + weekday catch-up).
+# 3. Create both CronJobs (twice-daily + weekday catch-up). They connect to
+# the canonical PostgreSQL database and do not mount database storage.
 kubectl apply -f deploy/k8s/rung-ingest-cronjob.yaml
 kubectl apply -f deploy/k8s/rung-ingest-catchup-cronjob.yaml
 ```
@@ -203,15 +223,12 @@ kubectl logs -l job-name=rung-ingest-manual-$(date +%s) -f
 
 After any manual or scheduled run, confirm rows updated:
 
-```bash
-# Cron / systemd host
-sqlite3 /var/lib/rung/finance.db \
-    "SELECT store_name, COUNT(*), MAX(last_updated) FROM store_price_cache GROUP BY store_name;"
+Run this read-only query through an approved PostgreSQL administration path:
 
-# K8s
-kubectl exec -it deploy/rung -- \
-    sqlite3 /var/lib/rung/finance.db \
-    "SELECT store_name, COUNT(*), MAX(last_updated) FROM store_price_cache GROUP BY store_name;"
+```sql
+SELECT store_name, COUNT(*), MAX(last_updated)
+FROM store_price_cache
+GROUP BY store_name;
 ```
 
 A healthy cache has `MAX(last_updated)` within the last cadence
@@ -229,4 +246,4 @@ config — name-brand and store-brand rows coexist per keyword).
 | `status 401` in the journal | Token revoked or wrong credentials. | Re-fetch a fresh client secret from developer.kroger.com and rotate the env file / K8s Secret. |
 | `status 429` (rate-limited) | Too many requests in a short window. | Lower `limit` in the JSON config or reduce the cadence. |
 | `0 results` for every term | Wrong `location_id` in the JSON config. | Look up the right id via `GET /v1/locations?filter.zipCode=...` from Kroger; update the config. |
-| DB lock errors on SQLite | Two concurrent ingest runs sharing the same `finance.db`. | `concurrencyPolicy: Forbid` on K8s; cron entries spaced ≥1h apart; systemd `Persistent=true` will only run one job at a time. |
+| PostgreSQL pool/connection exhaustion | Application workers and jobs exceed the configured database connection budget. | Keep job concurrency bounded and size `RUNG_DB_POOL_SIZE` / `RUNG_DB_MAX_OVERFLOW` against the hosting database limit. |

@@ -3207,7 +3207,7 @@
       if ($('allocUnpaidBar')) $('allocUnpaidBar').style.width = billsPct + '%';
       if ($('allocPyfAmt')) $('allocPyfAmt').textContent = pyfValue == null ? '\u2014' : fmt(pyfValue);
       if ($('allocPyfBar')) $('allocPyfBar').style.width = allocationPct(pyfValue) + '%';
-      if ($('allocBufferAmt')) $('allocBufferAmt').textContent = fmt(components.protected_buffer || 0);
+      if ($('allocBufferAmt')) $('allocBufferAmt').textContent = components.protected_buffer == null ? '—' : fmt(components.protected_buffer);
       if ($('allocBufferBar')) $('allocBufferBar').style.width = allocationPct(components.protected_buffer) + '%';
       if ($('allocSafeAmt')) $('allocSafeAmt').textContent = safeAvailable ? fmt(safe.safe_to_spend) : '\u2014';
       if ($('allocSafeBar')) $('allocSafeBar').style.width = allocationPct(safe.safe_to_spend) + '%';

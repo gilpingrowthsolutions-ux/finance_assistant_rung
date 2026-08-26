@@ -83,6 +83,11 @@ from services.financial_state import (
     get_household_account,
     set_balance_absolute,
 )
+from services.transaction_deletion import (
+    PROTECTED_MESSAGE,
+    delete_transaction_once,
+    transaction_delete_eligibility,
+)
 from services.selected_store import get_selected_store, select_store
 from services.recipe_ingredients import coerce_recipe_ingredient
 
@@ -3686,25 +3691,18 @@ def transactions_crud():
         "description": t.description,
         "amount": t.amount,
         "category": t.category,
-        "date": t.date.strftime("%Y-%m-%d %H:%M") if t.date else ""
+        "date": t.date.strftime("%Y-%m-%d %H:%M") if t.date else "",
+        **transaction_delete_eligibility(t, current_household_id()).to_api(),
     } for t in txns])
 
 @app.route("/transactions/<int:txn_id>", methods=["DELETE"])
 def delete_transaction(txn_id):
-    t = _household_tx_query().filter_by(id=txn_id).first()
-    if not t:
-        return jsonify({"error": "Transaction not found"}), 404
     hid = current_household_id()
-    amount = float(t.amount or 0)
-    is_income = str(t.category or "").strip().lower() == "income"
-    # Reverse this transaction's original apply_balance_delta effect exactly
-    # once: creation applied +amount for income, -amount for everything else
-    # (see /api/transactions POST and every other ExpenseTransaction creation
-    # site), so deletion applies the negation of that same delta.
-    reversal_delta = -amount if is_income else amount
-    db.session.delete(t)
-    new_balance = apply_balance_delta(hid, reversal_delta)
-    db.session.commit()
+    outcome, new_balance = delete_transaction_once(txn_id, hid)
+    if outcome == "missing":
+        return jsonify({"error": "Transaction not found"}), 404
+    if outcome == "protected":
+        return jsonify({"error": PROTECTED_MESSAGE}), 409
     return jsonify({"message": f"Transaction {txn_id} deleted", "new_balance": round(new_balance, 2)})
 
 

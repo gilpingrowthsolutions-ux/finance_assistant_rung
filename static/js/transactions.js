@@ -92,7 +92,8 @@ async function fetchTx_(method, path, body) {
 
 /**
  * Fetch /api/transactions and render the logged-expense list.
- * Wires per-row Delete buttons (DELETE /transactions/<id>, legacy).
+ * Renders the backend-owned direct-delete eligibility state.  The browser
+ * never infers provenance eligibility from a source/category label.
  */
 async function refreshTransactions() {
   const list = document.getElementById('transactionList');
@@ -122,7 +123,9 @@ async function refreshTransactions() {
       <div class="money-row-icon">${isIncome ? '↙' : '↗'}</div>
       <div class="money-row-main"><div class="li-title">${escapeHtml_(t.description || 'Transaction')}</div><div class="li-meta-line"><span>${escapeHtml_(t.category || 'uncategorized')}</span><span>·</span><span>${escapeHtml_(t.date || 'Date unavailable')}</span></div></div>
       <div class="li-amount ${isIncome ? 'is-income' : ''}">${isIncome ? '+' : '−'}${fmt_(Math.abs(Number(t.amount || 0)))}</div>
-      <div class="row-actions"><button class="btn is-ghost" type="button" data-action="del" data-id="${t.id}" aria-label="Remove ${escapeHtml_(t.description || 'transaction')}">Remove</button></div>
+      <div class="row-actions">${t.can_delete !== false
+        ? `<button class="btn is-ghost" type="button" data-action="del" data-id="${t.id}" aria-label="Remove ${escapeHtml_(t.description || 'transaction')}">Remove</button>`
+        : '<span class="li-meta-line" title="Linked transaction">Managed elsewhere</span>'}</div>
     `;
     list.appendChild(row);
   });
@@ -133,7 +136,18 @@ async function refreshTransactions() {
   }).join('');
   list.querySelectorAll('button[data-action="del"]').forEach(b => {
     b.addEventListener('click', async () => {
-      await fetchTx_('DELETE', '/transactions/' + b.dataset.id, undefined);
+      b.disabled = true;
+      let response;
+      try {
+        response = await fetchTx_('DELETE', '/transactions/' + b.dataset.id, undefined);
+      } finally {
+        b.disabled = false;
+      }
+      if (!response || !response.ok) {
+        if (typeof flash_ === 'function') flash_((response && response.data && response.data.error) || 'We could not delete this transaction right now.', 'error');
+        await refreshTransactions();
+        return;
+      }
       if (typeof flash_ === 'function') flash_('Transaction deleted', 'success');
       await refreshTransactions();
       if (typeof refreshOverview_ === 'function') await refreshOverview_();

@@ -13,6 +13,10 @@
 // money-pass-123).
 const { test, expect } = require('@playwright/test');
 
+if (process.env.RUNG_PLAYWRIGHT_CHROMIUM) {
+  test.use({ launchOptions: { executablePath: process.env.RUNG_PLAYWRIGHT_CHROMIUM } });
+}
+
 const ROOT = process.env.RUNG_UI_BASE_URL || 'http://127.0.0.1:5311';
 
 function money(n) {
@@ -26,6 +30,19 @@ async function login(page, email, password) {
     await page.locator('#authPassword').fill(password);
     await page.locator('#authLoginBtn').click();
     await expect(page.locator('#authDialog')).not.toBeVisible();
+  } else {
+    // Disposable SQLite acceptance runs in development mode because beta mode
+    // correctly requires PostgreSQL. Establish the same session explicitly
+    // before exercising the visible Money controls.
+    const loggedIn = await page.evaluate(async ({ email, password }) => {
+      const response = await fetch('/api/auth/login', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email, password }),
+      });
+      return response.ok;
+    }, { email, password });
+    expect(loggedIn).toBe(true);
+    await page.reload({ waitUntil: 'networkidle' });
   }
   await expect(page.locator('#safeHeroAmount')).not.toHaveText('Loading your plan…');
 }
@@ -124,6 +141,39 @@ test.describe.serial('Money Scenarios B-H (ready household)', () => {
     await page.reload({ waitUntil: 'networkidle' });
     const afterReload = await page.evaluate(async () => (await fetch('/api/transactions')).json());
     expect(afterReload.filter((t) => t.category === 'income')).toHaveLength(1); // no duplicate on reload
+  });
+
+  test('Protected Finished Shopping activity is managed elsewhere and direct deletion is rejected without effect', async ({ page }) => {
+    const mutations = [];
+    page.on('request', (req) => { if (!['GET', 'HEAD', 'OPTIONS'].includes(req.method())) mutations.push({ method: req.method(), path: new URL(req.url()).pathname }); });
+    await page.setViewportSize({ width: 1440, height: 1000 });
+    await login(page, 'money-ready@example.com', 'money-pass-123');
+    mutations.length = 0;
+    const before = await page.evaluate(async () => (await fetch('/api/budget/summary')).json());
+
+    await goToMoney(page);
+    await page.locator('[data-money-view="activity"]').click();
+    const row = page.locator('#transactionList .list-item', { hasText: 'Existing pharmacy pickup' });
+    await expect(row).toHaveCount(1);
+    await expect(row).toContainText('Managed elsewhere');
+    await expect(row.locator('button[data-action="del"]')).toHaveCount(0);
+
+    const protectedId = await page.evaluate(async () => {
+      const rows = await fetch('/api/transactions').then((r) => r.json());
+      return rows.find((r) => r.description === 'Existing pharmacy pickup').id;
+    });
+    const rejected = await page.evaluate(async (id) => {
+      const response = await fetch('/transactions/' + id, { method: 'DELETE' });
+      return { status: response.status, body: await response.json() };
+    }, protectedId);
+    expect(rejected.status).toBe(409);
+    expect(rejected.body.error).toContain("can't be deleted here");
+    expect(mutations.filter((r) => /^\/transactions\/\d+$/.test(r.path) && r.method === 'DELETE')).toHaveLength(1);
+
+    const after = await page.evaluate(async () => (await fetch('/api/budget/summary')).json());
+    expect(after.account_state.checking_balance).toBe(before.account_state.checking_balance);
+    expect(after.safe_to_spend.safe_to_spend).toBe(before.safe_to_spend.safe_to_spend);
+    await expect(row).toContainText('Managed elsewhere');
   });
 
   test('Scenario D: a new required Bill increases Needs and decreases Safe-to-Spend without manufacturing an actual transaction', async ({ page }) => {

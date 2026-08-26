@@ -42,6 +42,13 @@ The first bounded UI-convergence slice is Global Shell + Overview. This priority
 - Ahead/Behind is informational only. It is not a second Safe-to-Spend engine, and favorable variance does not automatically grant spending permission.
 - Current mutable expected-paycheck input must never rewrite historical pay-cycle expectations. Expected-income authority is effective-dated and historical cycles resolve the version effective for that cycle.
 
+## Transaction-deletion authority
+
+- Ordinary unlinked manual or Copilot `ExpenseTransaction` rows may be directly deleted only when deletion reverses their original checking-balance effect exactly once in the same authoritative financial operation.
+- A generic Money delete must reject a transaction linked to Finished Shopping, Plaid identity, or any durable reconciliation record/decision. It must not cascade, detach provenance, erase reconciliation history, or create a second economic effect.
+- Finished Shopping corrections remain in Shopping/reconciliation authority. Plaid-linked or reconciled rows must be corrected or unmatched through their existing reconciliation authority before they can become eligible; no new unlink workflow is implied.
+- Delete eligibility is backend-owned. The served UI may present that authority but must not recreate it from source/category labels.
+
 ## Onboarding required-expense authority
 
 - All onboarding fields classified as required belong together on the first onboarding page and must be visibly marked required.

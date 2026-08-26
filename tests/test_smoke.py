@@ -68,8 +68,8 @@ def check(condition, label, expected=None, actual=None):
 # SETUP — clear state, seed deterministic scenario
 # ===========================================================================
 with app.app_context():
-    hid = current_household_id()
     db.create_all()  # in-memory DB starts empty — build the schema first
+    hid = current_household_id()
     # Wipe all relevant tables
     BrandPreference.query.delete()
     StorePriceCache.query.delete()

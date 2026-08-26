@@ -3694,9 +3694,18 @@ def delete_transaction(txn_id):
     t = _household_tx_query().filter_by(id=txn_id).first()
     if not t:
         return jsonify({"error": "Transaction not found"}), 404
+    hid = current_household_id()
+    amount = float(t.amount or 0)
+    is_income = str(t.category or "").strip().lower() == "income"
+    # Reverse this transaction's original apply_balance_delta effect exactly
+    # once: creation applied +amount for income, -amount for everything else
+    # (see /api/transactions POST and every other ExpenseTransaction creation
+    # site), so deletion applies the negation of that same delta.
+    reversal_delta = -amount if is_income else amount
     db.session.delete(t)
+    new_balance = apply_balance_delta(hid, reversal_delta)
     db.session.commit()
-    return jsonify({"message": f"Transaction {txn_id} deleted"})
+    return jsonify({"message": f"Transaction {txn_id} deleted", "new_balance": round(new_balance, 2)})
 
 
 def _plaid_error_payload(exc: Exception) -> tuple[dict[str, Any], int]:

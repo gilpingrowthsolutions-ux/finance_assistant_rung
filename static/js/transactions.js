@@ -176,7 +176,14 @@ function setupTransactionsInit(deps) {
       category: cat && cat.value ? cat.value : '',
     };
     if (!body.description) { if (flashFn) flashFn('Add a short description.', 'error'); return; }
-    const resp = await fetchTx_('POST', '/api/transactions', body);
+    const submitBtn = form.querySelector('button[type="submit"]');
+    if (submitBtn) { if (submitBtn.disabled) return; submitBtn.disabled = true; }
+    let resp;
+    try {
+      resp = await fetchTx_('POST', '/api/transactions', body);
+    } finally {
+      if (submitBtn) submitBtn.disabled = false;
+    }
     if (!resp.ok) {
       if (flashFn) flashFn('We could not add this expense right now.', 'error');
       return;
@@ -283,7 +290,14 @@ function setupBillsInit(deps) {
       due_date: date && date.value ? date.value : '',
     };
     if (!body.name) { if (flashFn) flashFn('Enter a bill name.', 'error'); return; }
-    const resp = await fetchTx_('POST', '/bills', body);
+    const submitBtn = form.querySelector('button[type="submit"]');
+    if (submitBtn) { if (submitBtn.disabled) return; submitBtn.disabled = true; }
+    let resp;
+    try {
+      resp = await fetchTx_('POST', '/bills', body);
+    } finally {
+      if (submitBtn) submitBtn.disabled = false;
+    }
     if (!resp.ok) {
       if (flashFn) flashFn('We could not add this bill right now.', 'error');
       return;

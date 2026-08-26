@@ -7,7 +7,7 @@ os.environ["RUNG_DB_PATH"] = ":memory:"
 
 import pytest
 
-from app import app
+from app import _current_savings_allocation_plan, app
 from extensions import db
 from models import Account, Household, SavingsAllocationRun, SavingsDestination, SavingsGoal, SavingsReserve, SavingsTransfer, UserSetting
 from services.household_context import household_id
@@ -69,6 +69,25 @@ def test_reserve_completion_redirect_depletion_and_replenishment(household):
         assert list_state(household)["reserves"][0]["allocation_eligible"] is True
         replenishment = allocation_plan(household, 50_00)
         assert replenishment["allocations"][0]["destination_id"] == reserve.destination_id
+
+
+def test_current_cycle_allocation_plan_only_exposes_unallocated_pyf(household):
+    """A completed cycle cannot make the same protected dollars allocable again."""
+    with app.app_context():
+        account = Account.query.filter_by(household_id=household).one()
+        reserve = create_reserve(household, operation_id="r-current-cycle", name="Emergency", category="emergency", target_cents=500_00, priority=1)
+        pyf = {"feasible_savings_cents": 200_00}
+        first = _current_savings_allocation_plan(household, account, pyf, cycle_key="2026-09-01")
+        assert first["remaining_available_cents"] == 200_00
+        run = apply_allocation(household, operation_id="allocation-current-cycle", cycle_key="2026-09-01", plan=first)
+        assert run.allocated_cents == 200_00
+        assert balance_cents(household, reserve.destination_id) == 200_00
+
+        after = _current_savings_allocation_plan(household, account, pyf, cycle_key="2026-09-01")
+        assert after["cycle_feasible_cents"] == 200_00
+        assert after["already_allocated_cents"] == 200_00
+        assert after["remaining_available_cents"] == 0
+        assert after["allocations"] == []
 
 
 def test_ledger_idempotency_wealth_transfer_is_not_expense_and_cents_exact(household):

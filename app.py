@@ -5059,6 +5059,41 @@ def _parse_optional_date(value: Any) -> date | None:
     except ValueError: raise SavingsError("target_date must use YYYY-MM-DD.")
 
 
+def _savings_cycle_key(account: Account, pyf: dict[str, Any]) -> str:
+    """Use the same current-cycle identity for preview and one-time apply."""
+    return str(pyf.get("window_end") or "").split("T", 1)[0] or f"pay-period-{max(1, int(account.pay_period_days or 14))}"
+
+
+def _current_savings_allocation_plan(household_id: int, account: Account, pyf: dict[str, Any], *, cycle_key: str) -> dict[str, Any]:
+    """Plan only savings not already allocated in the authoritative cycle run.
+
+    PYF feasibility is the total protection for the cycle.  A completed
+    allocation run must reduce the *remaining* amount shown to the user; it
+    must not make the same protected dollars appear newly allocable again.
+    """
+    cycle_feasible_cents = max(0, int(pyf.get("feasible_savings_cents") or 0))
+    existing = SavingsAllocationRun.query.filter_by(
+        household_id=household_id, cycle_key=cycle_key,
+    ).first()
+    already_allocated_cents = min(
+        cycle_feasible_cents,
+        max(0, int(existing.allocated_cents)) if existing is not None else 0,
+    )
+    remaining_available_cents = max(0, cycle_feasible_cents - already_allocated_cents)
+    plan = savings_allocation_plan(
+        household_id,
+        remaining_available_cents,
+        pay_period_days=max(1, int(account.pay_period_days or 14)),
+    )
+    plan.update({
+        "cycle_key": cycle_key,
+        "cycle_feasible_cents": cycle_feasible_cents,
+        "already_allocated_cents": already_allocated_cents,
+        "remaining_available_cents": remaining_available_cents,
+    })
+    return plan
+
+
 @app.route("/api/savings/state", methods=["GET"])
 def get_savings_state():
     account = _household_account()
@@ -5131,7 +5166,8 @@ def savings_transfer_api():
 def savings_allocation_preview_api():
     account = _household_account(); pyf = _compute_safe_to_spend_snapshot(account)
     if not pyf.get("complete"): return jsonify({"error": "Complete financial setup before allocating savings.", "pyf": pyf}), 409
-    return jsonify(savings_allocation_plan(current_household_id(), int(pyf.get("feasible_savings_cents") or 0), pay_period_days=max(1, int(account.pay_period_days or 14))))
+    cycle_key = _savings_cycle_key(account, pyf)
+    return jsonify(_current_savings_allocation_plan(current_household_id(), account, pyf, cycle_key=cycle_key))
 
 
 @app.route("/api/savings/allocation/apply", methods=["POST"])
@@ -5142,9 +5178,9 @@ def savings_allocation_apply_api():
     if not operation_id: return jsonify({"error": "operation_id is required."}), 400
     account = _household_account(); pyf = _compute_safe_to_spend_snapshot(account)
     if not pyf.get("complete"): return jsonify({"error": "Complete financial setup before allocating savings."}), 409
-    plan = savings_allocation_plan(current_household_id(), int(pyf.get("feasible_savings_cents") or 0), pay_period_days=max(1, int(account.pay_period_days or 14)))
+    cycle_key = _savings_cycle_key(account, pyf)
+    plan = _current_savings_allocation_plan(current_household_id(), account, pyf, cycle_key=cycle_key)
     try:
-        cycle_key = str(pyf.get("window_end") or "").split("T", 1)[0] or f"pay-period-{max(1, int(account.pay_period_days or 14))}"
         run = apply_savings_allocation(current_household_id(), operation_id=operation_id, cycle_key=cycle_key, plan=plan)
         return jsonify({"allocation_run_id": run.id, "operation_id": run.operation_id, "plan": plan, "state": savings_state(current_household_id(), pay_period_days=max(1, int(account.pay_period_days or 14)))})
     except (SavingsError, IntegrityError) as exc: db.session.rollback(); return jsonify({"error": str(exc)}), 400

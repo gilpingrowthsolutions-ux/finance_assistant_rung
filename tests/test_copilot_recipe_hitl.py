@@ -68,7 +68,7 @@ def _seed_recipes() -> dict[str, int]:
     ids: dict[str, int] = {}
     with app.app_context():
         for title, ingredients in rows:
-            r = Recipe(title=title, servings=4, estimated_cost_per_serving=3.5)
+            r = Recipe(title=title, servings=4, estimated_cost_per_serving=3.5, recipe_scope=Recipe.SCOPE_CANONICAL)
             db.session.add(r)
             db.session.flush()
             ids[title] = r.id

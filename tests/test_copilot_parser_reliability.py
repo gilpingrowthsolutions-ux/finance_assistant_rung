@@ -35,7 +35,7 @@ def _seed_recipes() -> None:
     ]
     with app.app_context():
         for title, ingredients in rows:
-            rec = Recipe(title=title, servings=4, estimated_cost_per_serving=3.5)
+            rec = Recipe(title=title, servings=4, estimated_cost_per_serving=3.5, recipe_scope=Recipe.SCOPE_CANONICAL)
             db.session.add(rec)
             db.session.flush()
             for product_name, kw, qty in ingredients:

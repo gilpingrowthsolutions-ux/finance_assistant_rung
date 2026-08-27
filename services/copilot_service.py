@@ -700,11 +700,12 @@ def _context_recipe_titles(limit: int = 30) -> List[str]:
     if not has_app_context():
         return []
     try:
-        from models import Recipe
+        from services.household_context import household_id
+        from services.recipe_access import visible_recipe_query
 
         rows = [
             str(row.title or "").strip()
-            for row in Recipe.query.order_by(Recipe.id.desc()).limit(max(1, int(limit or 30))).all()
+            for row in visible_recipe_query(household_id()).order_by(Recipe.id.desc()).limit(max(1, int(limit or 30))).all()
         ]
         return [r for r in rows if r]
     except Exception:

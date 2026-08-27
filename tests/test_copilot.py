@@ -14,6 +14,7 @@ from app import app, db, Account, Bill, ExpenseTransaction, GroceryItem, Recipe,
 import services.copilot_intent as ci
 import services.copilot_service as cs
 from services.household_context import household_id as current_household_id
+from tests.meal_plan_support import install_current_cycle
 
 # ---------------------------------------------------------------------------
 # helpers
@@ -31,6 +32,7 @@ def _setup():
     # leak into os.environ and make tests hit the real API.  Remove it
     # so the regex-fallback tests are hermetic.
     os.environ.pop("GROQ_API_KEY", None)
+    install_current_cycle()
     with app.app_context():
         db.drop_all()
         db.create_all()
@@ -69,7 +71,7 @@ def _seed_recipes():
             ("Black Bean Tacos", 2.10, [("bean", "bean"), ("tortilla", "tortilla")]),
         ]
         for title, cost, ingredients in rows:
-            r = Recipe(title=title, servings=4, estimated_cost_per_serving=cost)
+            r = Recipe(title=title, servings=4, estimated_cost_per_serving=cost, recipe_scope=Recipe.SCOPE_CANONICAL)
             db.session.add(r)
             db.session.flush()
             for name, kw in ingredients:

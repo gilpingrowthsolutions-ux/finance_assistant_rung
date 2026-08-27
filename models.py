@@ -281,7 +281,20 @@ class PantryItem(ModelBase):
 
 
 class Recipe(ModelBase):
+    __tablename__ = 'recipe'
+    # Recipe scope is authoritative.  Do not infer authority from a nullable
+    # owner alone: legacy rows must be able to remain deliberately inert.
+    SCOPE_CANONICAL = 'canonical'
+    SCOPE_HOUSEHOLD_PRIVATE = 'household_private'
+    SCOPE_LEGACY_QUARANTINED = 'legacy_quarantined'
+
     id = db.Column(db.Integer, primary_key=True)
+    # Omission must fail closed.  Only trusted provisioning explicitly creates
+    # canonical data; an unclassified row is never visible to households.
+    recipe_scope = db.Column(db.String(32), nullable=False, default=SCOPE_LEGACY_QUARANTINED, index=True)
+    household_id = db.Column(db.Integer, db.ForeignKey('household.id'), nullable=True, index=True)
+    # Private deletion is historical retention, never a physical cascade.
+    tombstoned_at = db.Column(db.DateTime, nullable=True, index=True)
     title = db.Column(db.String(150), nullable=False)
     servings = db.Column(db.Integer, default=4)
     estimated_cost_per_serving = db.Column(db.Float, default=3.50)
@@ -291,6 +304,16 @@ class Recipe(ModelBase):
     instructions = db.Column(db.Text, nullable=True)
     source_url = db.Column(db.String(500), nullable=True, unique=True)
     ingredients = db.relationship('RecipeIngredient', backref='recipe', cascade="all, delete-orphan")
+
+    __table_args__ = (
+        db.CheckConstraint(
+            "(recipe_scope = 'canonical' AND household_id IS NULL) OR "
+            "(recipe_scope = 'household_private' AND household_id IS NOT NULL) OR "
+            "(recipe_scope = 'legacy_quarantined' AND household_id IS NULL)",
+            name='ck_recipe_scope_owner',
+        ),
+        {'extend_existing': True},
+    )
 
 
 class RecipeIngredient(ModelBase):
@@ -665,16 +688,22 @@ class HouseholdShoppingDefault(ModelBase):
 
 
 class MealPlanItem(ModelBase):
-    """A recipe selected for the current pay period (the active meal plan)."""
+    """An immutable recipe activation for one authoritative pay-period."""
     __tablename__ = 'meal_plan'
     id = db.Column(db.Integer, primary_key=True)
     household_id = db.Column(db.Integer, db.ForeignKey('household.id'), nullable=False, index=True)
     recipe_id = db.Column(db.Integer, db.ForeignKey('recipe.id'), nullable=False)
+    # Every persisted activation has immutable authoritative cycle identity.
+    # The migration refuses a nonempty legacy plan before DDL rather than
+    # allowing timeless rows to survive this invariant.
+    cycle_key = db.Column(db.String(80), nullable=False, index=True)
+    cycle_start = db.Column(db.DateTime, nullable=False)
+    cycle_end = db.Column(db.DateTime, nullable=False)
     source = db.Column(db.String(20), default='user')
     created_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
 
     __table_args__ = (
-        db.UniqueConstraint('household_id', 'recipe_id', name='uq_meal_plan_household_recipe'),
+        db.UniqueConstraint('household_id', 'cycle_key', 'recipe_id', name='uq_meal_plan_household_cycle_recipe'),
         {'extend_existing': True},
     )
 

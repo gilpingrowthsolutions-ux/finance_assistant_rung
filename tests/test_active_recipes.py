@@ -12,10 +12,12 @@ from app import app, db
 from models import Account, Household, MealPlanItem, Recipe
 from services.copilot_tools import _execute_select_active_recipe
 from services.household_context import household_id as current_household_id
+from tests.meal_plan_support import current_plan_item, install_current_cycle
 
 
 @pytest.fixture()
-def client():
+def client(monkeypatch):
+    install_current_cycle(monkeypatch)
     app.testing = True
     with app.app_context():
         db.drop_all()
@@ -23,9 +25,9 @@ def client():
         hid = current_household_id()
         db.session.add(Account(household_id=hid, checking_balance=1000.0, pay_period_days=14))
         db.session.add_all([
-            Recipe(title="Recipe One", servings=4),
-            Recipe(title="Recipe Two", servings=4),
-            Recipe(title="Copilot Recipe", servings=4),
+            Recipe(title="Recipe One", servings=4, recipe_scope=Recipe.SCOPE_CANONICAL),
+            Recipe(title="Recipe Two", servings=4, recipe_scope=Recipe.SCOPE_CANONICAL),
+            Recipe(title="Copilot Recipe", servings=4, recipe_scope=Recipe.SCOPE_CANONICAL),
         ])
         db.session.commit()
     return app.test_client()
@@ -84,6 +86,7 @@ def test_copilot_and_recipes_share_the_same_plan_and_pay_period_authority(client
 
 
 def test_active_recipe_state_is_household_scoped_and_ignores_crafted_target(monkeypatch):
+    install_current_cycle(monkeypatch)
     monkeypatch.setenv("RUNG_HOUSEHOLD_CONTEXT_SECRET", "pkg5-household-secret")
     app.testing = True
     with app.app_context():
@@ -91,12 +94,12 @@ def test_active_recipe_state_is_household_scoped_and_ignores_crafted_target(monk
         db.create_all()
         a = Household(public_id="aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", legacy_scope_key="a")
         b = Household(public_id="bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb", legacy_scope_key="b")
-        recipe_a = Recipe(title="A Recipe", servings=4)
-        recipe_b = Recipe(title="B Recipe", servings=4)
+        recipe_a = Recipe(title="A Recipe", servings=4, recipe_scope=Recipe.SCOPE_CANONICAL)
+        recipe_b = Recipe(title="B Recipe", servings=4, recipe_scope=Recipe.SCOPE_CANONICAL)
         db.session.add_all([a, b, recipe_a, recipe_b])
         db.session.flush()
         db.session.add_all([Account(household_id=a.id), Account(household_id=b.id)])
-        db.session.add(MealPlanItem(household_id=b.id, recipe_id=recipe_b.id, source="copilot"))
+        db.session.add(current_plan_item(household_id=b.id, recipe_id=recipe_b.id, source="copilot"))
         db.session.commit()
         a_id, b_id, a_public_id = a.id, b.id, a.public_id
         recipe_a_id, recipe_b_id = recipe_a.id, recipe_b.id

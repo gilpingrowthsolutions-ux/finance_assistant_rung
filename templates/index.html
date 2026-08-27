@@ -2316,7 +2316,7 @@
     </section>
 
     <dialog id="recipeCreateDialog" class="recipe-dialog" aria-labelledby="recipeCreateTitle"><div class="recipe-dialog-inner"><div class="recipe-dialog-head"><div><h2 id="recipeCreateTitle">Add a recipe</h2><div class="panel-sub">Save your own recipe or import one from a webpage.</div></div><button class="btn is-ghost" id="closeRecipeCreateDialog" type="button">Close</button></div><div class="recipe-create-grid"><form id="addRecipeForm"><h3>Type it in</h3><div class="field"><label for="rTitle">Title</label><input type="text" id="rTitle" placeholder="Chicken &amp; rice" required></div><div class="field"><label for="rServings">Servings</label><input type="number" id="rServings" min="1" value="4"></div><div class="field"><label for="rIngredients">Ingredients (one per line)</label><textarea id="rIngredients" rows="6" placeholder="2 cups rice&#10;1 lb chicken breast"></textarea></div><button class="btn is-primary" type="submit">Save Recipe</button></form><form id="importRecipeForm"><h3>Import from a link</h3><div class="field"><label for="importRecipeUrl">Recipe URL</label><input type="url" id="importRecipeUrl" placeholder="https://example.com/recipe"></div><button class="btn is-primary" id="importRecipeBtn" type="submit">Import Recipe</button><div id="importRecipeStatus" class="panel-sub" style="margin-top:10px;" aria-live="polite"></div></form></div></div></dialog>
-    <dialog id="recipeDetailDialog" class="recipe-dialog" aria-labelledby="recipeDetailTitle"><div class="recipe-dialog-inner"><div class="recipe-dialog-head"><div><div class="card-label">Recipe detail</div><h2 id="recipeDetailTitle">Recipe</h2><div id="recipeDetailMeta" class="panel-sub"></div></div><button class="btn is-ghost" id="closeRecipeDetailDialog" type="button">Close</button></div><h3>Ingredients</h3><div id="recipeDetailIngredients" class="recipe-detail-ingredients"></div><div id="recipeDetailInstructionsWrap"><h3>Instructions</h3><div id="recipeDetailInstructions" class="recipe-instructions"></div></div><div class="recipe-card-actions"><button id="recipeDetailPlanAction" class="btn is-primary" type="button">Add to This Pay Period</button><button id="recipeDetailPrepareAction" class="btn is-ghost" type="button">Prepare Mode</button></div></div></dialog>
+    <dialog id="recipeDetailDialog" class="recipe-dialog" aria-labelledby="recipeDetailTitle"><div class="recipe-dialog-inner"><div class="recipe-dialog-head"><div><div class="card-label">Recipe detail</div><h2 id="recipeDetailTitle">Recipe</h2><div id="recipeDetailMeta" class="panel-sub"></div></div><button class="btn is-ghost" id="closeRecipeDetailDialog" type="button">Close</button></div><h3>Ingredients</h3><div id="recipeDetailIngredients" class="recipe-detail-ingredients"></div><div id="recipeDetailInstructionsWrap"><h3>Instructions</h3><div id="recipeDetailInstructions" class="recipe-instructions"></div></div><div class="recipe-card-actions"><button id="recipeDetailPlanAction" class="btn is-primary" type="button">Add to This Pay Period</button><button id="recipeDetailPrepareAction" class="btn is-ghost" type="button">Prepare Mode</button><button id="recipeDetailDeleteAction" class="btn is-ghost" type="button" style="display:none">Delete Recipe</button></div></div></dialog>
 
     <!-- GROCERY ----------------------------------------------------------- -->
     <section id="shopping" class="page tab-content" aria-labelledby="shopping-title">
@@ -4843,6 +4843,8 @@
       var isActive = activeRecipeIds.indexOf(Number(recipe.id)) !== -1;
       planAction.textContent = isActive ? 'Remove from This Pay Period' : 'Add to This Pay Period';
       planAction.dataset.active = isActive ? 'true' : 'false';
+      var deleteAction = document.getElementById('recipeDetailDeleteAction');
+      if (deleteAction) deleteAction.style.display = recipe.can_delete ? '' : 'none';
       document.getElementById('recipeDetailPrepareAction').style.display = instructions ? '' : 'none';
       if (dialog && !dialog.open) dialog.showModal();
     }
@@ -6626,6 +6628,23 @@
         if (!activeRecipeDetail) return;
         detailDialog.close();
         openPrepareMode(activeRecipeDetail);
+      });
+      var deleteAction = document.getElementById('recipeDetailDeleteAction');
+      if (deleteAction) deleteAction.addEventListener('click', async function () {
+        if (!activeRecipeDetail || !activeRecipeDetail.can_delete) return;
+        if (!window.confirm('Delete "' + (activeRecipeDetail.title || 'this recipe') + '"?')) return;
+        deleteAction.disabled = true;
+        var response = await api('DELETE', '/api/recipes/' + Number(activeRecipeDetail.id));
+        deleteAction.disabled = false;
+        if (!response.ok) {
+          flash((response.data && response.data.error) || 'Could not delete this recipe right now.', 'error');
+          return;
+        }
+        detailDialog.close();
+        activeRecipeDetail = null;
+        await refreshRecipes();
+        if (typeof refreshActiveRecipesExpander === 'function') await refreshActiveRecipesExpander();
+        flash('Recipe deleted', 'success');
       });
       var goShopping = document.getElementById('mealsGoShopping');
       if (goShopping) goShopping.addEventListener('click', function () { if (window.rungOpenTab) window.rungOpenTab('shopping'); });

@@ -69,6 +69,14 @@ The intended flow is:
 - Rebalance requires preview, review, and explicit approval before applying changes.
 - Optimization respects requirements and preferences; it is not simply cheapest-item selection.
 
+### Recipe ownership and legacy provenance
+
+- Rung uses mixed recipe ownership. Trusted Rung catalog recipes are explicit `canonical` rows with no household owner: every household may browse, read, and activate them, but ordinary household users may not edit or delete them.
+- User-created and imported recipes are explicit `household_private` rows. The server assigns the current household; only that household may browse, read, edit/delete where served, or activate them. Recipe ingredients inherit the parent recipe's authority.
+- Meal-plan activation is always household-scoped. A household may activate canonical recipes or its own private recipes, never another household's private recipe.
+- Ambiguous legacy recipes are preserved as explicit `legacy_quarantined` rows. They have no ordinary household owner, are hidden and inert to ordinary recipe/detail/search/ingredient/plan/requirement flows, and are never silently promoted or reassigned. Reclassification requires explicit reviewed administrative or migration authority.
+- Historical private-recipe deletion is a tombstone. An owning household must first remove a private recipe from the current authoritative pay-period plan; deletion then preserves the recipe, ingredients, and prior plan identity while excluding the tombstoned row from ordinary current library, search, recommendations, activation, requirements, and shopping. There is no restore workflow in beta. Canonical and quarantined authority is unchanged.
+
 ## Location and selected-store authority
 
 These are distinct states:

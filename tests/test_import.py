@@ -34,6 +34,7 @@ from app import (
     _scrape_with_curl_cffi,
 )
 import app as app_mod
+from services.household_context import household_id
 
 app.testing = True
 client = app.test_client()
@@ -294,7 +295,8 @@ with patch('recipe_scrapers.scrape_me', side_effect=RuntimeError('scraper should
 with app.app_context():
     db.session.add(Recipe(
         title='Cached Recipe', servings=2, source_url=CACHE_URL,
-        instructions='Just reheat.'
+        instructions='Just reheat.', recipe_scope=Recipe.SCOPE_HOUSEHOLD_PRIVATE,
+        household_id=household_id(),
     ))
     db.session.commit()
 

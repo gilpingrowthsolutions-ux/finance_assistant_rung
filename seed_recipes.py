@@ -80,99 +80,101 @@ def seed_recipes(json_path: str, dry_run: bool = False) -> dict:
     # existing titles so we can skip duplicates without querying the DB
     # for every row.
     # ------------------------------------------------------------------
-    with app.app_context():
-        db.create_all()
-        existing_titles: set = {
-            normalize_title(r.title) for r in Recipe.query.with_entities(Recipe.title).all()
-        }
-
     total = len(raw)
     inserted = 0
     skipped = 0
     errors: list[str] = []
 
-    for idx, entry in enumerate(raw, start=1):
-        if not isinstance(entry, dict):
-            errors.append(f"Row {idx}: expected object, got {type(entry).__name__}")
-            continue
+    # Keep every DB action, including rollback, inside the same valid context.
+    with app.app_context():
+        db.create_all()
+        existing_titles: set = {
+            normalize_title(r.title)
+            for r in Recipe.query.filter(
+                Recipe.recipe_scope == Recipe.SCOPE_CANONICAL,
+            ).with_entities(Recipe.title).all()
+        }
 
-        title = (entry.get("title") or "").strip()
-        if not title:
-            errors.append(f"Row {idx}: missing or empty 'title' — skipped")
-            continue
+        for idx, entry in enumerate(raw, start=1):
+            if not isinstance(entry, dict):
+                errors.append(f"Row {idx}: expected object, got {type(entry).__name__}")
+                continue
 
-        # --- Dedup check ---
-        key = normalize_title(title)
-        if key in existing_titles:
-            skipped += 1
-            continue
+            title = (entry.get("title") or "").strip()
+            if not title:
+                errors.append(f"Row {idx}: missing or empty 'title' — skipped")
+                continue
 
-        # --- Parse ingredients ---
-        raw_ingredients = entry.get("ingredients")
-        if not raw_ingredients or not isinstance(raw_ingredients, list):
-            raw_ingredients = []
+            # --- Dedup check ---
+            key = normalize_title(title)
+            if key in existing_titles:
+                skipped += 1
+                continue
 
-        parsed_ingredients = []
-        for ing_str in raw_ingredients:
-            if isinstance(ing_str, str):
-                parsed = parse_ingredient(ing_str)
-                if parsed:
-                    parsed_ingredients.append(parsed)
-            elif isinstance(ing_str, dict):
-                parsed = coerce_recipe_ingredient(ing_str)
-                if parsed:
-                    parsed_ingredients.append(parsed)
+            # --- Parse ingredients ---
+            raw_ingredients = entry.get("ingredients")
+            if not raw_ingredients or not isinstance(raw_ingredients, list):
+                raw_ingredients = []
 
-        # --- Build instructions (optionally prepend category / area) ---
-        instructions = (entry.get("instructions") or "").strip()
-        category = entry.get("category")
-        area = entry.get("area")
+            parsed_ingredients = []
+            for ing_str in raw_ingredients:
+                if isinstance(ing_str, str):
+                    parsed = parse_ingredient(ing_str)
+                    if parsed:
+                        parsed_ingredients.append(parsed)
+                elif isinstance(ing_str, dict):
+                    parsed = coerce_recipe_ingredient(ing_str)
+                    if parsed:
+                        parsed_ingredients.append(parsed)
 
-        meta_parts = []
-        if category:
-            meta_parts.append(f"[Category: {category}]")
-        if area:
-            meta_parts.append(f"[Area: {area}]")
-        if meta_parts:
-            meta_prefix = " ".join(meta_parts)
-            instructions = f"{meta_prefix}\n{instructions}" if instructions else meta_prefix
+            # --- Build instructions (optionally prepend category / area) ---
+            instructions = (entry.get("instructions") or "").strip()
+            category = entry.get("category")
+            area = entry.get("area")
+            meta_parts = []
+            if category:
+                meta_parts.append(f"[Category: {category}]")
+            if area:
+                meta_parts.append(f"[Area: {area}]")
+            if meta_parts:
+                meta_prefix = " ".join(meta_parts)
+                instructions = f"{meta_prefix}\n{instructions}" if instructions else meta_prefix
 
-        if dry_run:
-            # Simulate only — don't touch the database.
-            existing_titles.add(key)
-            inserted += 1
-            continue
+            if dry_run:
+                # Simulate only — don't touch the database.
+                existing_titles.add(key)
+                inserted += 1
+                continue
 
-        # --- Write to database ---
-        try:
-            with app.app_context():
+            # Each row is atomic.  The outer app context intentionally also
+            # covers the rollback path.
+            try:
                 recipe = Recipe(
                     title=title,
                     servings=entry.get("servings", 4),
                     estimated_cost_per_serving=entry.get("estimated_cost_per_serving", 3.50),
                     instructions=instructions,
                     is_favorite=normalize_title(title) in {normalize_title(item) for item in DEFAULT_STARTER_RECIPE_TITLES},
+                    recipe_scope=Recipe.SCOPE_CANONICAL,
+                    household_id=None,
                 )
                 db.session.add(recipe)
-                db.session.flush()  # get recipe.id
-
+                db.session.flush()
                 for ing in parsed_ingredients:
                     ri = RecipeIngredient(
                         recipe_id=recipe.id,
                         product_name=ing["product_name"],
-                        clean_keyword=ing["clean_keyword"] or ing["product_name"].lower().replace(" ", "_"),
+                        clean_keyword=ing.get("clean_keyword") or ing["product_name"].lower().replace(" ", "_"),
                         quantity=ing["quantity"],
                         unit=ing["unit"],
                     )
                     db.session.add(ri)
-
                 db.session.commit()
                 existing_titles.add(key)
                 inserted += 1
-
-        except Exception as exc:
-            db.session.rollback()
-            errors.append(f"Row {idx}: \"{title}\" — {exc}")
+            except Exception as exc:
+                db.session.rollback()
+                errors.append(f"Row {idx}: \"{title}\" — {exc}")
 
     return {
         "inserted": inserted,

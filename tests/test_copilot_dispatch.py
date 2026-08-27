@@ -34,6 +34,7 @@ from app import (
 )
 from services.copilot_service import parse_copilot_prompt
 from services.household_context import household_id as current_household_id
+from tests.meal_plan_support import install_current_cycle
 
 client = app.test_client()
 app.testing = True
@@ -45,6 +46,7 @@ def _setup():
     # Keep tests hermetic: app.py loads .env at import, which can set
     # GROQ_API_KEY in os.environ and trigger real API calls.
     os.environ.pop("GROQ_API_KEY", None)
+    install_current_cycle()
     with app.app_context():
         db.drop_all()
         db.create_all()
@@ -67,7 +69,7 @@ def _seed_recipes():
             ("Black Bean Tacos", 2.10, [("bean", "bean"), ("tortilla", "tortilla")]),
         ]
         for title, cost, ings in rows:
-            r = Recipe(title=title, servings=4, estimated_cost_per_serving=cost)
+            r = Recipe(title=title, servings=4, estimated_cost_per_serving=cost, recipe_scope=Recipe.SCOPE_CANONICAL)
             db.session.add(r)
             db.session.flush()
             for name, kw in ings:
@@ -347,7 +349,7 @@ def test_meal_plan_cap_at_14():
         all_ids = [r.id for r in Recipe.query.all()]
         # Only 7 seeded — seed more to exceed the cap.
         for i in range(10):
-            r = Recipe(title=f"Extra Recipe {i}", servings=2)
+            r = Recipe(title=f"Extra Recipe {i}", servings=2, recipe_scope=Recipe.SCOPE_CANONICAL)
             db.session.add(r)
         db.session.commit()
         all_ids = [r.id for r in Recipe.query.all()]

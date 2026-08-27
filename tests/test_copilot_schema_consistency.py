@@ -22,12 +22,14 @@ from app import (  # noqa: E402
     RecipeIngredient,
 )
 from services.household_context import household_id as current_household_id
+from tests.meal_plan_support import current_plan_item, install_current_cycle
 
 app.testing = True
 client = app.test_client()
 
 
 def _setup() -> None:
+    install_current_cycle()
     with app.app_context():
         db.drop_all()
         db.create_all()
@@ -43,7 +45,7 @@ def _seed_recipes() -> dict[str, int]:
     out: dict[str, int] = {}
     with app.app_context():
         for title, ingredients in rows:
-            rec = Recipe(title=title, servings=4, estimated_cost_per_serving=3.5)
+            rec = Recipe(title=title, servings=4, estimated_cost_per_serving=3.5, recipe_scope=Recipe.SCOPE_CANONICAL)
             db.session.add(rec)
             db.session.flush()
             out[title] = rec.id
@@ -399,7 +401,7 @@ def test_m_legacy_audit_payload_still_undoes() -> None:
         bill = Bill(household_id=current_household_id(), name="Legacy Bill", amount=40.0, due_date=datetime.utcnow())
         expense = ExpenseTransaction(household_id=current_household_id(), description="Legacy Gas", amount=33.0, category="gas")
         grocery = GroceryItem(household_id=current_household_id(), item_name="Legacy Soap", estimated_price=3.0, store_name="Legacy")
-        plan = MealPlanItem(household_id=current_household_id(), recipe_id=ids["Chicken Rice Bowl"], source="copilot")
+        plan = current_plan_item(household_id=current_household_id(), recipe_id=ids["Chicken Rice Bowl"], source="copilot")
         db.session.add_all([bill, expense, grocery, plan])
         db.session.flush()
 

@@ -24,6 +24,7 @@ import re
 from typing import Any
 
 from models import MealPlanItem, Recipe, RecipeIngredient
+from services.recipe_access import visible_recipe_filter
 from services.retail.base import ShoppingRequirement
 
 
@@ -125,9 +126,12 @@ def active_recipe_requirements(household_id: int) -> list[ShoppingRequirement]:
     ingredients in persisted order, so repeated cart generation is stable and
     never mutates or duplicates persisted state.
     """
+    # Keep the resolver in the application boundary where canonical income
+    # schedule inference lives; never rederive historical identity here.
+    from app import _current_meal_plan_cycle
+    from services.meal_plan import current_plan_query
     plan_items = (
-        MealPlanItem.query
-        .filter(MealPlanItem.household_id == household_id)
+        current_plan_query(household_id, _current_meal_plan_cycle())
         .order_by(MealPlanItem.created_at.asc(), MealPlanItem.id.asc())
         .all()
     )
@@ -135,10 +139,17 @@ def active_recipe_requirements(household_id: int) -> list[ShoppingRequirement]:
         return []
 
     recipe_ids = [item.recipe_id for item in plan_items]
-    recipes = {r.id: r for r in Recipe.query.filter(Recipe.id.in_(recipe_ids)).all()}
+    recipes = {
+        r.id: r for r in Recipe.query.filter(
+            Recipe.id.in_(recipe_ids), visible_recipe_filter(household_id),
+        ).all()
+    }
+    visible_ids = list(recipes)
+    if not visible_ids:
+        return []
     ingredients = (
         RecipeIngredient.query
-        .filter(RecipeIngredient.recipe_id.in_(recipe_ids))
+        .filter(RecipeIngredient.recipe_id.in_(visible_ids))
         .order_by(RecipeIngredient.recipe_id.asc(), RecipeIngredient.id.asc())
         .all()
     )

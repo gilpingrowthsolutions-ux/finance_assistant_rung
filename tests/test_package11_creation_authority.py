@@ -16,7 +16,7 @@ from sqlalchemy.engine import make_url
 ROOT = Path(__file__).resolve().parents[1]
 PYTHON = ROOT / ".venv" / "bin" / "python"
 PRIOR_REVISION = "9f7a3d4c1e2b"
-HEAD_REVISION = "a17c4d9e2b60"
+HEAD_REVISION = "c81d4e5f7a92"
 
 
 def _run(args: list[str], *, db_path: Path) -> subprocess.CompletedProcess[str]:

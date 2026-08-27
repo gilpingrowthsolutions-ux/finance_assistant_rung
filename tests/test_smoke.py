@@ -94,7 +94,7 @@ with app.app_context():
     db.session.commit()
 
     # ---- Recipe A: Cheesy Pasta (4 ingredients) --------------------------
-    r1 = Recipe(title='Cheesy Pasta', servings=4, instructions='Boil, mix, bake.')
+    r1 = Recipe(title='Cheesy Pasta', servings=4, instructions='Boil, mix, bake.', recipe_scope=Recipe.SCOPE_CANONICAL)
     db.session.add(r1)
     db.session.flush()
     pasta_ings = [
@@ -111,7 +111,7 @@ with app.app_context():
         ))
 
     # ---- Recipe B: Breakfast Cereal Bowl (3 ingredients) -----------------
-    r2 = Recipe(title='Breakfast Cereal Bowl', servings=1, instructions='Pour and eat.')
+    r2 = Recipe(title='Breakfast Cereal Bowl', servings=1, instructions='Pour and eat.', recipe_scope=Recipe.SCOPE_CANONICAL)
     db.session.add(r2)
     db.session.flush()
     cereal_ings = [

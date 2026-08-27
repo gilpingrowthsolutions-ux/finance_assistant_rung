@@ -29,6 +29,7 @@ from services.household_context import household_id as current_household_id
 from services.financial_state import apply_balance_delta, get_household_account, set_balance_absolute
 from services.selected_store import get_selected_store
 from services.recipe_recommend import recommend_recipes
+from services.recipe_access import visible_recipe_by_id, visible_recipe_query
 from services.transaction_reconciliation import (
     detect_plaid_candidates_for_manual_input,
     ensure_plaid_effect_exists,
@@ -167,7 +168,8 @@ def _tx_query():
 
 
 def _meal_plan_query():
-    return MealPlanItem.query.filter_by(household_id=current_household_id())
+    from app import _household_meal_plan_query
+    return _household_meal_plan_query()
 
 
 def _trip_query():
@@ -971,7 +973,7 @@ def _touch_recipe_usage(recipe_id: int) -> None:
     """Implicit learning hook for recipe selections made by Copilot."""
     from models import Recipe
 
-    recipe = Recipe.query.get(recipe_id)
+    recipe = visible_recipe_by_id(current_household_id(), recipe_id)
     if recipe is None:
         return
     recipe.usage_frequency = int(getattr(recipe, "usage_frequency", 0) or 0) + 1
@@ -984,7 +986,7 @@ def _match_recipe_by_title_or_keyword(term: str):
     if not term:
         return None
 
-    recipes = Recipe.query.all()
+    recipes = visible_recipe_query(current_household_id()).all()
     if not recipes:
         return None
 
@@ -1072,7 +1074,10 @@ def _starter_recipe_ids(limit: int = 7) -> List[int]:
 
     ids: List[int] = []
     for starter_title in DEFAULT_STARTER_RECIPE_TITLES:
-        recipe = Recipe.query.filter(Recipe.title.ilike(starter_title)).first()
+        recipe = visible_recipe_query(current_household_id()).filter(
+            Recipe.recipe_scope == Recipe.SCOPE_CANONICAL,
+            Recipe.title.ilike(starter_title),
+        ).first()
         if recipe is None or recipe.id in ids:
             continue
         ids.append(recipe.id)
@@ -1083,11 +1088,15 @@ def _starter_recipe_ids(limit: int = 7) -> List[int]:
 
 def _add_recipe_to_plan(recipe_id: int, source: str) -> bool:
 
+    if visible_recipe_by_id(current_household_id(), recipe_id) is None:
+        return False
+
     if _meal_plan_query().filter_by(recipe_id=recipe_id).first():
         return False
     if _meal_plan_query().count() >= 14:
         return False
-    db.session.add(MealPlanItem(household_id=current_household_id(), recipe_id=recipe_id, source=source))
+    from app import _new_current_meal_plan_item
+    db.session.add(_new_current_meal_plan_item(recipe_id, source))
     _touch_recipe_usage(recipe_id)
     return True
 
@@ -1398,7 +1407,7 @@ def resolve_meal_request(meal_request: MealRequest) -> Dict[str, Any]:
         for rid in _favorite_and_history_recipe_ids(limit=fill * 2):
             if rid in existing_plan_ids or rid in removed_ids:
                 continue
-            rec = Recipe.query.get(rid)
+            rec = visible_recipe_by_id(current_household_id(), rid)
             if rec is None:
                 continue
             if _add_recipe_to_plan(rec.id, "autofill"):
@@ -1425,7 +1434,7 @@ def resolve_meal_request(meal_request: MealRequest) -> Dict[str, Any]:
         for rid in starter_ids:
             if rid in existing_plan_ids or rid in removed_ids:
                 continue
-            rec = Recipe.query.get(rid)
+            rec = visible_recipe_by_id(current_household_id(), rid)
             if rec is None:
                 continue
             if _add_recipe_to_plan(rec.id, "starter"):
@@ -1930,7 +1939,7 @@ def _preview_meal_request(meal_request: MealRequest) -> Dict[str, Any]:
         for rid in _favorite_and_history_recipe_ids(limit=fill * 2):
             if rid in planned_ids:
                 continue
-            rec = Recipe.query.get(rid)
+            rec = visible_recipe_by_id(current_household_id(), rid)
             if rec is None:
                 continue
             selected.append(rec)
@@ -1955,7 +1964,7 @@ def _preview_meal_request(meal_request: MealRequest) -> Dict[str, Any]:
         for rid in starter_ids:
             if rid in planned_ids:
                 continue
-            rec = Recipe.query.get(rid)
+            rec = visible_recipe_by_id(current_household_id(), rid)
             if rec is None:
                 continue
             selected.append(rec)
@@ -2319,7 +2328,7 @@ def _apply_staged_actions_once(staged_actions: Dict[str, Any], raw_user_text: st
         invalid_recipe_ids: List[Dict[str, Any]] = []
         validated_to_add: List[Tuple[int, str, Optional[str]]] = []
         for rid, source_key in recipes_to_add:
-            rec = Recipe.query.get(rid)
+            rec = visible_recipe_by_id(current_household_id(), rid)
             if rec is None:
                 invalid_recipe_ids.append({"recipe_id": rid, "source": source_key})
                 continue
@@ -2345,7 +2354,7 @@ def _apply_staged_actions_once(staged_actions: Dict[str, Any], raw_user_text: st
         for rid, source_key, requested_title in validated_to_add:
             source = "copilot" if source_key == "recipes_added" else "autofill"
             if _add_recipe_to_plan(rid, source):
-                recipe = Recipe.query.get(rid)
+                recipe = visible_recipe_by_id(current_household_id(), rid)
                 title = recipe.title if recipe else ""
                 row = {"id": rid, "title": title}
                 if requested_title:
@@ -2357,7 +2366,7 @@ def _apply_staged_actions_once(staged_actions: Dict[str, Any], raw_user_text: st
         grocery_candidates = normalized.get("grocery_list", []) or []
         if not grocery_candidates and added_recipe_ids:
             servings = int(normalized.get("meal_servings") or 4)
-            selected_recipes = [Recipe.query.get(rid) for rid in added_recipe_ids]
+            selected_recipes = [visible_recipe_by_id(current_household_id(), rid) for rid in added_recipe_ids]
             selected_recipes = [r for r in selected_recipes if r is not None]
             grocery_candidates = _aggregate_ingredients(selected_recipes, servings)
 

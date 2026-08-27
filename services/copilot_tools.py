@@ -26,6 +26,7 @@ from typing import Any, Dict, List, Optional
 from services.household_context import household_id as current_household_id
 from services.financial_state import apply_balance_delta, get_household_account
 from services.selected_store import get_selected_store
+from services.recipe_access import visible_recipe_query
 
 LOGGER = logging.getLogger("copilot_tools")
 
@@ -282,8 +283,9 @@ def _execute_select_active_recipe(**kwargs) -> Dict[str, Any]:
     """Add or remove a recipe from the ``MealPlanItem`` (meal plan) table."""
     from flask import current_app
     from extensions import db
-    from models import Recipe, MealPlanItem
-    from app import _match_recipe_by_title
+    from models import Recipe
+    from app import _match_recipe_by_title, _household_meal_plan_query, _new_current_meal_plan_item
+    from services.recipe_access import visible_recipe_by_id, visible_recipe_query
 
     raw = (kwargs.get("recipe_id_or_title") or "").strip()
     action = (kwargs.get("action") or "add").lower()
@@ -291,11 +293,17 @@ def _execute_select_active_recipe(**kwargs) -> Dict[str, Any]:
         return {"status": "error", "message": "recipe_id_or_title required."}
 
     with current_app.app_context():
+        from app import _current_meal_plan_cycle
+        if not _current_meal_plan_cycle().get("key"):
+            return {
+                "status": "error",
+                "message": "Complete pay-cycle setup before changing this pay-period plan.",
+            }
         # Try integer ID first, then fuzzy title match
         recipe = None
         try:
             rid = int(raw)
-            recipe = Recipe.query.get(rid)
+            recipe = visible_recipe_by_id(current_household_id(), rid)
         except (ValueError, TypeError):
             pass
         if not recipe:
@@ -305,12 +313,12 @@ def _execute_select_active_recipe(**kwargs) -> Dict[str, Any]:
             return {
                 "status": "error",
                 "message": f"No matching recipe found for '{raw}'. "
-                           f"Available recipes: {', '.join(r.title for r in Recipe.query.all())}",
-                "data": {"suggested_titles": [r.title for r in Recipe.query.all()]},
+                           f"Available recipes: {', '.join(r.title for r in visible_recipe_query(current_household_id()).all())}",
+                "data": {"suggested_titles": [r.title for r in visible_recipe_query(current_household_id()).all()]},
             }
 
         if action == "remove":
-            deleted = MealPlanItem.query.filter_by(household_id=current_household_id(), recipe_id=recipe.id).delete()
+            deleted = _household_meal_plan_query().filter_by(recipe_id=recipe.id).delete()
             db.session.commit()
             LOGGER.info("Tool select_active_recipe (remove): %s", recipe.title)
             return {
@@ -324,12 +332,12 @@ def _execute_select_active_recipe(**kwargs) -> Dict[str, Any]:
             }
 
         # Add
-        existing = MealPlanItem.query.filter_by(household_id=current_household_id(), recipe_id=recipe.id).first()
+        existing = _household_meal_plan_query().filter_by(recipe_id=recipe.id).first()
         if existing:
             return {"status": "ok", "data": {"id": recipe.id, "title": recipe.title, "action": "already_in_plan"}}
-        if MealPlanItem.query.filter_by(household_id=current_household_id()).count() >= 14:
+        if _household_meal_plan_query().count() >= 14:
             return {"status": "error", "message": "Meal plan is full (max 14 recipes). Remove one first."}
-        db.session.add(MealPlanItem(household_id=current_household_id(), recipe_id=recipe.id, source="copilot"))
+        db.session.add(_new_current_meal_plan_item(recipe.id, "copilot"))
         _touch_recipe_usage(recipe)
         db.session.commit()
         LOGGER.info("Tool select_active_recipe (add): %s", recipe.title)
@@ -428,7 +436,8 @@ def _execute_get_financial_overview(**kwargs) -> Dict[str, Any]:
             for t in ExpenseTransaction.query.filter_by(household_id=hid).order_by(ExpenseTransaction.date.desc()).limit(8)
         ]
 
-        plan_ids = [m.recipe_id for m in MealPlanItem.query.filter_by(household_id=hid).all()]
+        from app import _household_meal_plan_query
+        plan_ids = [m.recipe_id for m in _household_meal_plan_query().all()]
         meal_plan = []
         if plan_ids:
             meal_plan = [
@@ -437,7 +446,7 @@ def _execute_get_financial_overview(**kwargs) -> Dict[str, Any]:
                     "title": r.title,
                     "cost_per_serving": r.estimated_cost_per_serving,
                 }
-                for r in Recipe.query.filter(Recipe.id.in_(plan_ids)).all()
+                for r in visible_recipe_query(hid).filter(Recipe.id.in_(plan_ids)).all()
             ]
 
         grocery_cart = [

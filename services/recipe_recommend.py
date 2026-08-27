@@ -32,6 +32,8 @@ from __future__ import annotations
 from typing import List, Optional
 
 from models import Recipe, PantryItem, BrandPreference
+from services.household_context import household_id as current_household_id
+from services.recipe_access import visible_recipe_query
 
 
 def recommend_recipes(
@@ -56,14 +58,14 @@ def recommend_recipes(
     """
     seed_kws = set()
     if seed_ids:
-        for r in Recipe.query.filter(Recipe.id.in_(seed_ids)).all():
+        for r in visible_recipe_query(current_household_id()).filter(Recipe.id.in_(seed_ids)).all():
             for ing in r.ingredients:
                 seed_kws.add(ing.clean_keyword.lower())
 
     pantry_kws = {i.clean_keyword.lower() for i in PantryItem.query.all()}
     brand_prefs = {b.clean_keyword.lower(): b for b in BrandPreference.query.all()}
 
-    q = Recipe.query
+    q = visible_recipe_query(current_household_id())
     if exclude_ids:
         q = q.filter(~Recipe.id.in_(exclude_ids))
     scored = []

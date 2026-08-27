@@ -132,7 +132,7 @@ with app.app_context():
     db.session.commit()
 
     # Create a recipe with 4 ingredients: cheerios, milk, eggs, broccoli.
-    r = Recipe(title='Test Meal Plan', servings=2, instructions='Eat.')
+    r = Recipe(title='Test Meal Plan', servings=2, instructions='Eat.', recipe_scope=Recipe.SCOPE_CANONICAL)
     db.session.add(r)
     db.session.flush()
     staples = [
@@ -507,7 +507,7 @@ with app.app_context():
     acc9c = Account(household_id=current_household_id(), checking_balance=1000.00, zip_code='65084', kroger_store_name="Kroger",
                     kroger_location_id=None)
     db.session.add(acc9c)
-    r9c = Recipe(title="Test", servings=4)
+    r9c = Recipe(title="Test", servings=4, recipe_scope=Recipe.SCOPE_CANONICAL)
     db.session.add(r9c)
     db.session.flush()
     db.session.add(RecipeIngredient(
@@ -538,7 +538,7 @@ with app.app_context():
     db.create_all()
     acc9d = Account(household_id=current_household_id(), checking_balance=1000.00, zip_code='65084', kroger_store_name='Kroger', kroger_location_id=None)
     db.session.add(acc9d)
-    r9d = Recipe(title='Choice Test', servings=4)
+    r9d = Recipe(title='Choice Test', servings=4, recipe_scope=Recipe.SCOPE_CANONICAL)
     db.session.add(r9d)
     db.session.flush()
     db.session.add(RecipeIngredient(recipe_id=r9d.id, product_name='milk', clean_keyword='milk', quantity=1.0, unit='cup'))
@@ -658,7 +658,7 @@ with app.app_context():
     db.drop_all()
     db.create_all()
     db.session.add(Account(household_id=current_household_id(), checking_balance=1000.00, kroger_location_id=None))
-    r9e = Recipe(title="Estimate Test", servings=4)
+    r9e = Recipe(title="Estimate Test", servings=4, recipe_scope=Recipe.SCOPE_CANONICAL)
     db.session.add(r9e)
     db.session.flush()
     db.session.add(RecipeIngredient(

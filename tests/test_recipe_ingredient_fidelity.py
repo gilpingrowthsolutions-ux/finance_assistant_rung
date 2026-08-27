@@ -13,10 +13,12 @@ from models import Account, MealPlanItem, PantryItem, Recipe, RecipeIngredient
 from seed_recipes import parse_ingredient as parse_seed_ingredient
 from services.household_context import household_id
 from services.recipe_ingredients import parse_recipe_ingredient
+from tests.meal_plan_support import install_current_cycle
 
 
 @pytest.fixture()
-def client():
+def client(monkeypatch):
+    install_current_cycle(monkeypatch)
     app.testing = True
     with app.app_context():
         db.drop_all()

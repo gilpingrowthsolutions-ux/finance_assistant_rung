@@ -40,6 +40,7 @@ from services.retail.cart import (
     build_verified_walmart_cart,
 )
 from services.selected_store import select_store
+from tests.meal_plan_support import current_plan_item, install_current_cycle
 
 
 class FakeProvider:
@@ -78,7 +79,8 @@ class FakeProvider:
 
 
 @pytest.fixture()
-def setup():
+def setup(monkeypatch):
+    install_current_cycle(monkeypatch)
     with app.app_context():
         db.drop_all()
         db.create_all()
@@ -86,7 +88,7 @@ def setup():
 
 
 def _seed_recipe(title: str, ingredients: list[tuple]) -> Recipe:
-    recipe = Recipe(title=title, servings=4)
+    recipe = Recipe(title=title, servings=4, recipe_scope=Recipe.SCOPE_CANONICAL)
     db.session.add(recipe)
     db.session.flush()
     for product_name, clean_keyword, quantity, unit in ingredients:
@@ -108,7 +110,7 @@ def test_single_active_recipe_produces_ingredient_requirements_with_fidelity(set
             ("2 cups rice", "rice", 2.0, "cup"),
             ("1.5 lb chicken", "chicken", 1.5, "lb"),
         ])
-        db.session.add(MealPlanItem(household_id=hid, recipe_id=recipe.id, source="user"))
+        db.session.add(current_plan_item(household_id=hid, recipe_id=recipe.id, source="user"))
         db.session.commit()
 
         requirements = active_recipe_requirements(hid)
@@ -149,8 +151,8 @@ def test_multiple_active_recipes_contribute_requirements(setup):
             ("1 head lettuce", "lettuce", 1.0, "head"),
         ])
         db.session.add_all([
-            MealPlanItem(household_id=hid, recipe_id=rice_bowl.id, source="user"),
-            MealPlanItem(household_id=hid, recipe_id=tacos.id, source="user"),
+            current_plan_item(household_id=hid, recipe_id=rice_bowl.id, source="user"),
+            current_plan_item(household_id=hid, recipe_id=tacos.id, source="user"),
         ])
         db.session.commit()
 
@@ -166,7 +168,7 @@ def test_direct_grocery_items_and_recipe_requirements_coexist(setup):
         hid = current_household_id()
         db.session.add(GroceryItem(household_id=hid, item_name="Milk", store_name="Walmart"))
         recipe = _seed_recipe("Rice Bowl", [("2 cups rice", "rice", 2.0, "cup")])
-        db.session.add(MealPlanItem(household_id=hid, recipe_id=recipe.id, source="user"))
+        db.session.add(current_plan_item(household_id=hid, recipe_id=recipe.id, source="user"))
         db.session.commit()
 
         cart = build_verified_walmart_cart(provider=provider)
@@ -182,7 +184,7 @@ def test_inactive_recipes_contribute_nothing(setup):
         active = _seed_recipe("Active", [("2 cups rice", "rice", 2.0, "cup")])
         inactive = _seed_recipe("Inactive", [("1 lb beef", "beef", 1.0, "lb")])
         # Only "Active" is added to the meal plan.
-        db.session.add(MealPlanItem(household_id=hid, recipe_id=active.id, source="user"))
+        db.session.add(current_plan_item(household_id=hid, recipe_id=active.id, source="user"))
         db.session.commit()
 
         requirements = active_recipe_requirements(hid)
@@ -196,7 +198,7 @@ def test_unknown_quantity_and_unit_remain_truthful(setup):
     with app.app_context():
         hid = current_household_id()
         recipe = _seed_recipe("Seasoned", [("salt to taste", "salt", None, None)])
-        db.session.add(MealPlanItem(household_id=hid, recipe_id=recipe.id, source="user"))
+        db.session.add(current_plan_item(household_id=hid, recipe_id=recipe.id, source="user"))
         db.session.commit()
 
         requirements = active_recipe_requirements(hid)
@@ -231,7 +233,7 @@ def test_canonical_selected_store_is_used_for_recipe_cart(setup):
             account=account,
         )
         recipe = _seed_recipe("Rice Bowl", [("2 cups rice", "rice", 2.0, "cup")])
-        db.session.add(MealPlanItem(household_id=hid, recipe_id=recipe.id, source="user"))
+        db.session.add(current_plan_item(household_id=hid, recipe_id=recipe.id, source="user"))
         db.session.commit()
         recipe_id = recipe.id
 
@@ -253,7 +255,7 @@ def test_walmart_verified_path_resolves_recipe_requirements(setup):
     with app.app_context():
         hid = current_household_id()
         recipe = _seed_recipe("Rice Bowl", [("2 cups rice", "rice", 2.0, "cup")])
-        db.session.add(MealPlanItem(household_id=hid, recipe_id=recipe.id, source="user"))
+        db.session.add(current_plan_item(household_id=hid, recipe_id=recipe.id, source="user"))
         db.session.commit()
 
         cart = build_verified_walmart_cart(provider=provider)
@@ -274,7 +276,7 @@ def test_kroger_verified_path_resolves_recipe_requirements(setup):
     with app.app_context():
         hid = current_household_id()
         recipe = _seed_recipe("Rice Bowl", [("2 cups rice", "rice", 2.0, "cup")])
-        db.session.add(MealPlanItem(household_id=hid, recipe_id=recipe.id, source="user"))
+        db.session.add(current_plan_item(household_id=hid, recipe_id=recipe.id, source="user"))
         db.session.commit()
 
         cart = build_verified_retail_cart(
@@ -295,7 +297,7 @@ def test_recipe_provenance_survives_into_cart_item(setup):
     with app.app_context():
         hid = current_household_id()
         recipe = _seed_recipe("Rice Bowl", [("2 cups rice", "rice", 2.0, "cup")])
-        db.session.add(MealPlanItem(household_id=hid, recipe_id=recipe.id, source="user"))
+        db.session.add(current_plan_item(household_id=hid, recipe_id=recipe.id, source="user"))
         db.session.commit()
         recipe_id = recipe.id
 
@@ -321,8 +323,8 @@ def test_household_isolation_holds_for_recipe_requirements(setup):
         rice_recipe = _seed_recipe("A Rice", [("2 cups rice", "rice", 2.0, "cup")])
         bean_recipe = _seed_recipe("B Beans", [("3 cans beans", "beans", 3.0, "can")])
         db.session.add_all([
-            MealPlanItem(household_id=a.id, recipe_id=rice_recipe.id, source="user"),
-            MealPlanItem(household_id=b.id, recipe_id=bean_recipe.id, source="user"),
+            current_plan_item(household_id=a.id, recipe_id=rice_recipe.id, source="user"),
+            current_plan_item(household_id=b.id, recipe_id=bean_recipe.id, source="user"),
         ])
         db.session.commit()
         a_id, b_id = a.id, b.id
@@ -350,8 +352,8 @@ def test_verified_cart_scopes_direct_and_recipe_requirements_to_signed_household
         recipe_a = _seed_recipe("A Rice", [("2 cups rice", "rice", 2.0, "cup")])
         recipe_b = _seed_recipe("B Beans", [("3 cans beans", "beans", 3.0, "can")])
         db.session.add_all([
-            MealPlanItem(household_id=a.id, recipe_id=recipe_a.id, source="user"),
-            MealPlanItem(household_id=b.id, recipe_id=recipe_b.id, source="user"),
+            current_plan_item(household_id=a.id, recipe_id=recipe_a.id, source="user"),
+            current_plan_item(household_id=b.id, recipe_id=recipe_b.id, source="user"),
         ])
         db.session.commit()
         a_public_id = a.public_id
@@ -375,7 +377,7 @@ def test_repeated_cart_generation_does_not_mutate_or_duplicate_recipe_state(setu
     with app.app_context():
         hid = current_household_id()
         recipe = _seed_recipe("Rice Bowl", [("2 cups rice", "rice", 2.0, "cup")])
-        db.session.add(MealPlanItem(household_id=hid, recipe_id=recipe.id, source="user"))
+        db.session.add(current_plan_item(household_id=hid, recipe_id=recipe.id, source="user"))
         db.session.commit()
         plan_before = MealPlanItem.query.count()
         ingredient_before = RecipeIngredient.query.count()

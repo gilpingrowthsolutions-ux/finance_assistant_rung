@@ -54,7 +54,7 @@ def run_case(label, recipe_qty, recipe_unit, keyword, product_title, package_siz
         db.session.add(acc)
         db.session.flush()
 
-        r = Recipe(title='Case ' + label, servings=2, instructions='Cook')
+        r = Recipe(title='Case ' + label, servings=2, instructions='Cook', recipe_scope=Recipe.SCOPE_CANONICAL)
         db.session.add(r)
         db.session.flush()
         db.session.add(RecipeIngredient(

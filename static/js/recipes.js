@@ -183,12 +183,12 @@ async function refreshRecipes() {
         </label>
         <div class="row" style="flex-shrink:0; gap:4px;">
           <span style="color:var(--text-mute); font-size:.82rem;">${r.servings || 1} servings</span>
-          <button type="button" data-delete-id="${r.id}"
+          ${r.can_delete ? `<button type="button" data-delete-id="${r.id}"
                   style="background:none; border:none; cursor:pointer;
                          color:var(--danger, #f43f5e); font-size:.85rem; padding:2px 6px;
                          border-radius:4px; transition:background 160ms ease;
                          line-height:1;"
-                  title="Delete recipe: ${escapeHtml_(r.title)}">✕</button>
+                  title="Delete recipe: ${escapeHtml_(r.title)}">✕</button>` : ''}
         </div>
       </div>
       <div style="margin-top:8px; color:var(--text-dim); font-size:.85rem;">

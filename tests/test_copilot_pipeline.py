@@ -21,6 +21,7 @@ from app import (  # noqa: E402
     RecipeIngredient,
 )
 from services.household_context import household_id as current_household_id
+from tests.meal_plan_support import install_current_cycle
 
 
 client = app.test_client()
@@ -29,6 +30,7 @@ app.testing = True
 
 def _setup() -> None:
     os.environ.pop("GROQ_API_KEY", None)
+    install_current_cycle()
     with app.app_context():
         db.drop_all()
         db.create_all()
@@ -50,7 +52,7 @@ def _seed_recipes() -> dict[str, int]:
     ids: dict[str, int] = {}
     with app.app_context():
         for title, servings, ingredients in rows:
-            recipe = Recipe(title=title, servings=servings, estimated_cost_per_serving=3.50)
+            recipe = Recipe(title=title, servings=servings, estimated_cost_per_serving=3.50, recipe_scope=Recipe.SCOPE_CANONICAL)
             db.session.add(recipe)
             db.session.flush()
             ids[title] = recipe.id

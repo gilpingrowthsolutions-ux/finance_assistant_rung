@@ -266,6 +266,17 @@ from models import (
     TaxabilityRule,
     RetailProductTaxClass,
 )
+from services.recipe_access import (
+    mutable_private_recipe_by_id,
+    visible_recipe_by_id,
+    visible_recipe_query,
+)
+from services.meal_plan import (
+    current_plan_query,
+    historical_plan_query,
+    new_plan_item,
+    resolve_current_cycle,
+)
 from services.savings_allocation import (
     SavingsError,
     allocation_plan as savings_allocation_plan,
@@ -425,8 +436,28 @@ def _household_grocery_query():
     return GroceryItem.query.filter_by(household_id=current_household_id())
 
 
+def _current_meal_plan_cycle():
+    """The sole current-plan authority, based on canonical income schedule."""
+    account = _household_account()
+    return resolve_current_cycle(
+        account=account, next_income=_infer_next_income(account, datetime.now(timezone.utc)),
+    )
+
+
 def _household_meal_plan_query():
-    return MealPlanItem.query.filter_by(household_id=current_household_id())
+    """Current plan only.  Historical rows require the explicit helper below."""
+    return current_plan_query(current_household_id(), _current_meal_plan_cycle())
+
+
+def _household_historical_meal_plan_query():
+    return historical_plan_query(current_household_id())
+
+
+def _new_current_meal_plan_item(recipe_id: int, source: str) -> MealPlanItem:
+    return new_plan_item(
+        household_id=current_household_id(), recipe_id=recipe_id, source=source,
+        cycle=_current_meal_plan_cycle(),
+    )
 
 
 def _household_pantry_query():
@@ -859,8 +890,11 @@ def _undo_actions_from_audit(audit: ActionAudit) -> dict:
         recipe_id = recipe.get("id")
         if recipe_id is None:
             continue
-        if not _household_meal_plan_query().filter_by(recipe_id=recipe_id).first():
-            db.session.add(MealPlanItem(household_id=current_household_id(), recipe_id=recipe_id, source="copilot"))
+        if (
+            visible_recipe_by_id(current_household_id(), recipe_id) is not None
+            and not _household_meal_plan_query().filter_by(recipe_id=recipe_id).first()
+        ):
+            db.session.add(_new_current_meal_plan_item(recipe_id, "copilot"))
             undone["recipes_restored"].append({"recipe_id": recipe_id})
 
     audit.undone_at = datetime.now(timezone.utc)
@@ -1255,9 +1289,8 @@ def _save_household_shopping_defaults(
 def seed_default_user_preferences(user_id: str = "anonymous", *, commit: bool = True) -> dict:
     """Seed a curated starter set of favorites and defaults for a new account.
 
-    The current app stores recipe favorites globally, so this helper marks a
-    small staple set as favorite once and records the seed so onboarding can
-    remain idempotent.
+    Starter favorites apply only to trusted canonical catalog rows; ordinary
+    onboarding never mutates private or quarantined recipes.
     """
     starter_record = get_user_preference("starter_preferences_seeded", "")
     if starter_record:
@@ -1265,7 +1298,10 @@ def seed_default_user_preferences(user_id: str = "anonymous", *, commit: bool = 
 
     seeded_titles: list[str] = []
     for title in DEFAULT_STARTER_RECIPE_TITLES:
-        recipe = Recipe.query.filter(Recipe.title.ilike(title)).first()
+        recipe = Recipe.query.filter(
+            Recipe.recipe_scope == Recipe.SCOPE_CANONICAL,
+            Recipe.title.ilike(title),
+        ).first()
         if recipe is None:
             continue
         if not bool(getattr(recipe, "is_favorite", False)):
@@ -1351,6 +1387,8 @@ def _serialize_recipe(r):
         ),
         "source_url": r.source_url or "",
         "instructions": r.instructions,
+        "can_edit": r.recipe_scope == Recipe.SCOPE_HOUSEHOLD_PRIVATE and r.household_id == current_household_id(),
+        "can_delete": r.recipe_scope == Recipe.SCOPE_HOUSEHOLD_PRIVATE and r.household_id == current_household_id(),
         "ingredients": [_serialize_recipe_ingredient(i) for i in r.ingredients],
     }
 
@@ -1369,7 +1407,7 @@ def _match_recipe_by_title(title):  # pyright: ignore[reportUnusedFunction]
     if not t_tokens:
         return None
     best, best_score = None, 0.0
-    for r in Recipe.query.all():
+    for r in visible_recipe_query(current_household_id()).all():
         rt_tokens = set(re.sub(r'[^a-z0-9 ]', '', (r.title or '').lower()).split())
         if not rt_tokens:
             continue
@@ -3074,7 +3112,15 @@ def recipes_crud():
             return jsonify({"error": "Title required"}), 400
         servings = int(data.get("servings", 4))
         instructions = data.get("instructions", "")
-        r = Recipe(title=title, servings=servings, instructions=instructions)
+        # Scope and owner are server authority; never accept client-provided
+        # scope/household fields for ordinary recipe creation.
+        r = Recipe(
+            title=title,
+            servings=servings,
+            instructions=instructions,
+            recipe_scope=Recipe.SCOPE_HOUSEHOLD_PRIVATE,
+            household_id=current_household_id(),
+        )
         db.session.add(r)
         db.session.flush()
         # Parse ingredients from lines or structured list
@@ -3094,29 +3140,18 @@ def recipes_crud():
             db.session.add(ri)
         db.session.commit()
         return jsonify({"message": "Recipe added", "id": r.id})
-    # GET: list all recipes with ingredients
-    recipes = Recipe.query.all()
-    return jsonify([{
-        "id": r.id,
-        "title": r.title,
-        "servings": r.servings,
-        "estimated_cost_per_serving": r.estimated_cost_per_serving,
-        "is_favorite": bool(getattr(r, "is_favorite", False)),
-        "usage_frequency": int(getattr(r, "usage_frequency", 0) or 0),
-        "last_selected_date": (
-            r.last_selected_date.isoformat() if getattr(r, "last_selected_date", None) else None
-        ),
-        "source_url": r.source_url or "",
-        "instructions": r.instructions,
-        "ingredients": [_serialize_recipe_ingredient(i) for i in r.ingredients]
-    } for r in recipes])
+    return jsonify([_serialize_recipe(r) for r in visible_recipe_query(current_household_id()).all()])
 
 @app.route("/api/recipes/<int:rid>", methods=["DELETE"])
 def delete_recipe(rid):
-    r = Recipe.query.get(rid)
+    r = mutable_private_recipe_by_id(current_household_id(), rid)
     if not r:
         return jsonify({"error": "Recipe not found"}), 404
-    db.session.delete(r)
+    # Deleting an active private recipe would require an explicit product
+    # lifecycle decision.  Do not silently cascade a plan/history mutation.
+    if _household_meal_plan_query().filter_by(recipe_id=r.id).first():
+        return jsonify({"error": "Remove this recipe from the current plan before deleting it."}), 409
+    r.tombstoned_at = datetime.now(timezone.utc)
     db.session.commit()
     return jsonify({"message": f"Recipe {rid} deleted"})
 
@@ -3399,7 +3434,7 @@ def import_recipe():
             cached = dict(entry["data"])  # shallow copy
             cached["cache"] = {"status": "ok", "hit": True, "fresh": True, "age_seconds": int(age)}
             # Fix action: if this URL is already in the DB, it's an update, not a create.
-            if Recipe.query.filter_by(source_url=url).first():
+            if Recipe.query.filter_by(source_url=url, household_id=current_household_id(), recipe_scope=Recipe.SCOPE_HOUSEHOLD_PRIVATE, tombstoned_at=None).first():
                 cached["action"] = "updated"
             return jsonify(cached)
         else:
@@ -3481,7 +3516,10 @@ def import_recipe():
     servings = _parse_recipe_yields(yields_str)
 
     # ---- Persist to database (upsert by source_url) ----
-    existing = Recipe.query.filter_by(source_url=url).first()
+    existing = Recipe.query.filter_by(
+        source_url=url, household_id=current_household_id(), recipe_scope=Recipe.SCOPE_HOUSEHOLD_PRIVATE,
+        tombstoned_at=None,
+    ).first()
     action = "created"
 
     if existing:
@@ -3499,7 +3537,9 @@ def import_recipe():
             servings=servings,
             estimated_cost_per_serving=3.50,
             source_url=url,
-            instructions=instructions
+            instructions=instructions,
+            recipe_scope=Recipe.SCOPE_HOUSEHOLD_PRIVATE,
+            household_id=current_household_id(),
         )
         db.session.add(recipe)
         db.session.flush()  # get recipe.id
@@ -3552,7 +3592,9 @@ def generate_recipes():
     recipe_ids = data.get("recipe_ids", [])
     if not recipe_ids or not isinstance(recipe_ids, list):
         return jsonify({"error": "Provide recipe_ids (list of int)"}), 400
-    recipes = Recipe.query.filter(Recipe.id.in_(recipe_ids)).all()
+    recipes = visible_recipe_query(current_household_id()).filter(Recipe.id.in_(recipe_ids)).all()
+    if len({int(r.id) for r in recipes}) != len({int(rid) for rid in recipe_ids if str(rid).strip().isdigit()}):
+        return jsonify({"error": "Recipe not found"}), 404
     return jsonify({
         "recipes": [{
             "id": r.id,
@@ -3575,7 +3617,7 @@ def _serialize_meal_plan():
     items = _household_meal_plan_query().order_by(MealPlanItem.created_at.asc()).all()
     ids = [m.recipe_id for m in items]
     recipes = []
-    by_id = {r.id: r for r in Recipe.query.filter(Recipe.id.in_(ids)).all()} if ids else {}
+    by_id = {r.id: r for r in visible_recipe_query(current_household_id()).filter(Recipe.id.in_(ids)).all()} if ids else {}
     for rid in ids:
         r = by_id.get(rid)
         if r:
@@ -3606,21 +3648,28 @@ def meal_plan():
     if request.method == "GET":
         return jsonify(_serialize_meal_plan())
 
+    if not _current_meal_plan_cycle().get("key"):
+        return jsonify({"error": "Complete pay-cycle setup before changing this pay-period plan."}), 409
+
     data = request.json or {}
     if data.get("recipe_ids") is not None:
         # Replace semantics: wipe existing plan, insert new IDs in order.
         ids = data["recipe_ids"]
         if not isinstance(ids, list):
             return jsonify({"error": "recipe_ids must be a list"}), 400
-        _household_meal_plan_query().delete()
+        validated = []
         for rid in ids[:MEAL_PLAN_MAX]:
             try:
                 rid = int(rid)
             except (ValueError, TypeError):
                 continue
-            if _household_meal_plan_query().filter_by(recipe_id=rid).first():
-                continue
-            db.session.add(MealPlanItem(household_id=current_household_id(), recipe_id=rid, source="user"))
+            if visible_recipe_by_id(current_household_id(), rid) is None:
+                return jsonify({"error": "Recipe not found"}), 404
+            if rid not in validated:
+                validated.append(rid)
+        _household_meal_plan_query().delete()
+        for rid in validated:
+            db.session.add(_new_current_meal_plan_item(rid, "user"))
         db.session.commit()
         return jsonify(_serialize_meal_plan())
 
@@ -3637,11 +3686,13 @@ def meal_plan():
             rid = int(rid)
         except (ValueError, TypeError):
             continue
+        if visible_recipe_by_id(current_household_id(), rid) is None:
+            return jsonify({"error": "Recipe not found"}), 404
         if _household_meal_plan_query().filter_by(recipe_id=rid).first():
             continue
         if _household_meal_plan_query().count() >= MEAL_PLAN_MAX:
             break
-        db.session.add(MealPlanItem(household_id=current_household_id(), recipe_id=rid, source="user"))
+        db.session.add(_new_current_meal_plan_item(rid, "user"))
     db.session.commit()
     return jsonify(_serialize_meal_plan())
 
@@ -3649,6 +3700,8 @@ def meal_plan():
 @app.route("/api/meal-plan/clear", methods=["POST"])
 def clear_meal_plan():
     """Empty the active meal plan (start a new pay period)."""
+    if not _current_meal_plan_cycle().get("key"):
+        return jsonify({"error": "Complete pay-cycle setup before changing this pay-period plan."}), 409
     _household_meal_plan_query().delete()
     db.session.commit()
     return jsonify(_serialize_meal_plan())
@@ -4540,7 +4593,9 @@ def grocery_list():
         recipe_ids = data.get("recipe_ids", [])
         store_name = data.get("store_name", "")
         # Build cart from recipes
-        recipes = Recipe.query.filter(Recipe.id.in_(recipe_ids)).all() if recipe_ids else []
+        recipes = visible_recipe_query(current_household_id()).filter(Recipe.id.in_(recipe_ids)).all() if recipe_ids else []
+        if recipe_ids and len(recipes) != len({int(rid) for rid in recipe_ids if str(rid).strip().isdigit()}):
+            return jsonify({"error": "Recipe not found"}), 404
         # Clear old grocery items for this session
         _household_grocery_query().delete()
         items = []
@@ -6359,7 +6414,7 @@ def search_recipes():
         # Uses OUTER JOIN so recipes with no ingredients still match on
         # title or instructions. DISTINCT prevents duplicates from the join.
         matches = (
-            db.session.query(Recipe)
+            visible_recipe_query(current_household_id())
             .outerjoin(RecipeIngredient)
             .filter(
                 db.or_(
@@ -6382,7 +6437,7 @@ def search_recipes():
             })
     else:
         # No query — return all local recipes (backward-compatible)
-        for r in Recipe.query.all():
+        for r in visible_recipe_query(current_household_id()).all():
             local_recipes.append({
                 "id": str(r.id),
                 "title": r.title,
@@ -6715,7 +6770,7 @@ def generate_pay_period_plan():
     if not recipe_ids and not manual_rows:
         return jsonify({"error": "Provide recipe_ids (list of int)"}), 400
 
-    recipes = Recipe.query.filter(Recipe.id.in_(recipe_ids)).all() if recipe_ids else []
+    recipes = visible_recipe_query(current_household_id()).filter(Recipe.id.in_(recipe_ids)).all() if recipe_ids else []
     if recipe_ids and not recipes:
         return jsonify({"error": "No matching recipes found"}), 404
 
@@ -7101,7 +7156,7 @@ def cook_recipe():
     """Tab 4: Automatically depletes pantry stock when a meal is cooked."""
     data = request.json or {}
     recipe_id = data.get("recipe_id")
-    recipe = Recipe.query.get(recipe_id)
+    recipe = visible_recipe_by_id(current_household_id(), recipe_id)
     if not recipe:
         return jsonify({"error": "Recipe not found"}), 404
         

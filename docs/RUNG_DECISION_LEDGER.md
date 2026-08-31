@@ -114,6 +114,7 @@ These are distinct states:
 
 - Copilot is deterministic-first: parse -> staged structured action -> user review -> confirmation -> authoritative shared-state write.
 - Consequential actions require human approval and retry-safe/idempotent execution.
+- A reviewed Copilot draft is bound to its originating household. Copying its operation ID/payload into another household must be rejected rather than becoming a new cross-household operation.
 - Plaid is optional. Manual-first Rung must remain useful without it.
 - Normal customer Settings must not expose provider/API credentials.
 

@@ -22,6 +22,7 @@ from app import (  # noqa: E402
     ExpenseTransaction,
     GroceryItem,
     ActionAudit,
+    _copilot_stage_binding,
 )
 from services.household_context import household_id as current_household_id
 
@@ -87,6 +88,9 @@ def _staged_payload(operation_id: str, expense_amount: float = 12.5) -> dict:
 
 
 def _post_apply(staged_actions: dict):
+    staged_actions = dict(staged_actions)
+    with app.app_context():
+        staged_actions.setdefault("operation_binding", _copilot_stage_binding(staged_actions["operation_id"]))
     return client.post(
         "/api/copilot/apply",
         json={"text": "apply staged op", "staged_actions": staged_actions, "user_id": "idem-user"},
@@ -229,6 +233,7 @@ def test_h_concurrent_apply_same_operation() -> None:
     env = os.environ.copy()
     env["RUNG_DB_PATH"] = db_path
     env["RUNG_HOUSEHOLD_CONTEXT_SECRET"] = "copilot-contention-disposable"
+    env["FLASK_SECRET_KEY"] = "copilot-contention-disposable-stage-binding"
     env["PYTHONPATH"] = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
     probe = os.path.join(os.path.dirname(__file__), "copilot_apply_contention_probe.py")
     result = subprocess.run([sys.executable, probe], env=env, text=True, capture_output=True, timeout=45)

@@ -6,6 +6,7 @@ import re
 import secrets
 import uuid
 import hashlib
+import hmac
 import requests
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from datetime import date, datetime, timedelta, timezone
@@ -399,6 +400,31 @@ def _resolve_request_user_id(data: Any) -> str:
         if explicit:
             return explicit
     return household_scope_key()
+
+
+def _copilot_stage_binding(operation_id: str) -> str:
+    """Bind a browser-held Copilot draft to its current household.
+
+    Staged Copilot actions deliberately remain editable review data rather
+    than authoritative domain records.  The review payload still needs a
+    server-verifiable household binding, however: copying a Household A draft
+    into Household B must not turn it into a new B operation.  This signature
+    carries no financial authority and intentionally excludes editable review
+    fields; apply continues to validate those fields canonically.
+    """
+    operation_id = str(operation_id or "").strip()
+    if not operation_id:
+        return ""
+    message = f"copilot-stage-v1:{current_household_id()}:{operation_id}".encode("utf-8")
+    secret = str(app.config["SECRET_KEY"]).encode("utf-8")
+    return hmac.new(secret, message, hashlib.sha256).hexdigest()
+
+
+def _copilot_stage_binding_valid(staged_actions: dict[str, Any]) -> bool:
+    operation_id = str(staged_actions.get("operation_id") or "").strip()
+    supplied = str(staged_actions.get("operation_binding") or "").strip()
+    expected = _copilot_stage_binding(operation_id)
+    return bool(expected and supplied and hmac.compare_digest(supplied, expected))
 
 
 def _current_auth_session_payload() -> dict[str, Any]:
@@ -5492,6 +5518,7 @@ def behavior_intelligence_stage_recurring_bill_api():
         "requires_confirmation": True, "staged": True,
         "summary": "Review this possible recurring charge before adding one recurring Bill.",
     }
+    staged["operation_binding"] = _copilot_stage_binding(staged["operation_id"])
     return jsonify({"staged_actions": staged, "candidate": candidate, "financial_mutations": False})
 
 
@@ -6247,6 +6274,7 @@ def copilot_stage():
         preview_goal = {"name": name, "target_cents": amount_cents, "target_amount": _cents_to_float(amount_cents), "target_date": target_date, "priority": 100}
         plan = savings_allocation_plan(current_household_id(), int((_compute_safe_to_spend_snapshot(account).get("feasible_savings_cents") or 0)), pay_period_days=max(1, int(account.pay_period_days or 14)))
         staged = {"operation_id": operation_id, "goals_added": [preview_goal], "requires_confirmation": True, "staged": True, "summary": f"Add {name} as a Goal after review.", "allocation_effect": plan}
+        staged["operation_binding"] = _copilot_stage_binding(operation_id)
         return jsonify({"parsed": {"goal": preview_goal, "path": "deterministic_goal_v1"}, "actions_taken": staged, "tool_results": [], "_fallback": False, "llm_error": None, "clarification_question": None, "user_id": user_id})
 
     # Read-only financial questions use the same canonical PYF snapshot as
@@ -6287,6 +6315,7 @@ def copilot_stage():
     from services.copilot_intent import parse_intent_payload, stage_intent_payload
     intent_payload = parse_intent_payload(parsed, user_text)
     staged = stage_intent_payload(intent_payload, user_id=user_id)
+    staged["operation_binding"] = _copilot_stage_binding(str(staged.get("operation_id") or ""))
     parse_meta = parsed.get("_parse_meta") if isinstance(parsed, dict) else {}
     if isinstance(parse_meta, dict):
         LOGGER.info(
@@ -6319,6 +6348,8 @@ def copilot_apply_staged():
 
     if not isinstance(staged_actions, dict):
         return jsonify({"error": "Provide 'staged_actions' object from /api/copilot/stage."}), 400
+    if not _copilot_stage_binding_valid(staged_actions):
+        return jsonify({"error": "This Copilot draft belongs to a different household or is no longer valid. Re-stage it before saving."}), 409
 
     if isinstance(staged_actions.get("goals_added"), list) and staged_actions.get("goals_added"):
         rows = staged_actions.get("goals_added") or []

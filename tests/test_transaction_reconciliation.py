@@ -416,6 +416,9 @@ def test_balance_reconciliation_is_excluded_from_matching(monkeypatch: pytest.Mo
         "bills_updated": [],
         "bills_removed": [],
     }
+    from app import _copilot_stage_binding
+    with app.app_context():
+        staged["operation_binding"] = _copilot_stage_binding(staged["operation_id"])
     apply_resp = client.post("/api/copilot/apply", json={"staged_actions": staged, "text": "reconcile", "user_id": "anonymous"})
     assert apply_resp.status_code == 200
 

@@ -24,10 +24,13 @@ PAYLOAD = {
 
 
 def worker(_index: int) -> tuple[int, str | None, bool]:
-    from app import app
-    response = app.test_client().post(
-        "/api/copilot/apply", json={"text": "approved", "staged_actions": PAYLOAD}
-    )
+    from app import app, _copilot_stage_binding
+    with app.app_context():
+        payload = dict(PAYLOAD)
+        payload["operation_binding"] = _copilot_stage_binding(payload["operation_id"])
+        response = app.test_client().post(
+            "/api/copilot/apply", json={"text": "approved", "staged_actions": payload}
+        )
     body = response.get_json() or {}
     actions = body.get("actions_taken") or {}
     return response.status_code, actions.get("operation_id"), bool(actions.get("already_applied"))
@@ -77,7 +80,11 @@ if __name__ == "__main__":
         assert GroceryItem.query.filter_by(household_id=hid).count() == 1
         assert round(Account.query.filter_by(household_id=hid).one().checking_balance, 2) == 987.50
 
-        conflict = dict(PAYLOAD)
+        from app import _copilot_stage_binding
+        bound_payload = dict(PAYLOAD)
+        bound_payload["operation_binding"] = _copilot_stage_binding(OPERATION_ID)
+
+        conflict = dict(bound_payload)
         conflict["expenses_logged"] = [{"description": "gas", "category": "gas", "amount": 99.00}]
         rejected = app.test_client().post(
             "/api/copilot/apply", json={"text": "conflict", "staged_actions": conflict}
@@ -85,8 +92,9 @@ if __name__ == "__main__":
         assert rejected.status_code == 400
         assert ExpenseTransaction.query.filter_by(household_id=hid).one().amount == 12.50
 
-        invalid = dict(PAYLOAD)
+        invalid = dict(bound_payload)
         invalid["operation_id"] = "copilot-invalid-multi-action"
+        invalid["operation_binding"] = _copilot_stage_binding(invalid["operation_id"])
         invalid["recipes_added"] = [{"id": 999999, "title": "Missing recipe"}]
         invalid_response = app.test_client().post(
             "/api/copilot/apply", json={"text": "invalid multi", "staged_actions": invalid}
@@ -108,12 +116,12 @@ if __name__ == "__main__":
         other_response = app.test_client().post(
             "/api/copilot/apply",
             headers=signed_headers(other.public_id),
-            json={"text": "approved", "staged_actions": PAYLOAD},
+            json={"text": "approved", "staged_actions": bound_payload},
         )
-        assert other_response.status_code == 200, other_response.get_json()
-        assert ActionAudit.query.filter_by(household_id=other.id, operation_id=OPERATION_ID).count() == 1
-        assert ExpenseTransaction.query.filter_by(household_id=other.id).count() == 1
-        assert round(Account.query.filter_by(household_id=other.id).one().checking_balance, 2) == 487.50
+        assert other_response.status_code == 409, other_response.get_json()
+        assert ActionAudit.query.filter_by(household_id=other.id, operation_id=OPERATION_ID).count() == 0
+        assert ExpenseTransaction.query.filter_by(household_id=other.id).count() == 0
+        assert round(Account.query.filter_by(household_id=other.id).one().checking_balance, 2) == 500.00
 
         print({"responses": results, "audit_rows": 1, "bills": 1, "expenses": 1,
                "grocery_items": 1, "balance": 987.50, "household_isolation": True,

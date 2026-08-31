@@ -16,7 +16,11 @@ from sqlalchemy.engine import make_url
 ROOT = Path(__file__).resolve().parents[1]
 PYTHON = ROOT / ".venv" / "bin" / "python"
 PRIOR_REVISION = "9f7a3d4c1e2b"
-HEAD_REVISION = "c81d4e5f7a92"
+# This regression verifies that upgrading an older schema preserves the
+# existing account.  Feature 5 legitimately extends the migration graph, so
+# it must assert the actual single Alembic head rather than the former Package
+# 11 checkpoint.
+HEAD_REVISION = "f5b1c7d9e2a4"
 
 
 def _run(args: list[str], *, db_path: Path) -> subprocess.CompletedProcess[str]:
@@ -114,6 +118,29 @@ def test_migration_preserves_existing_single_account_values(tmp_path: Path) -> N
             (household_id,),
         ).fetchone() == (987.65, 14, 2345.67, 7)
         assert connection.execute("SELECT version_num FROM alembic_version").fetchone()[0] == HEAD_REVISION
+
+
+def test_feature5_upgrade_preserves_checkpoint_trip_without_invented_cart_link(tmp_path: Path) -> None:
+    """df791082's real migration head had completion rows but no cart column."""
+    db_path = tmp_path / "legacy_trip.sqlite"
+    first = _upgrade(db_path, "c81d4e5f7a92")
+    assert first.returncode == 0, first.stderr
+    with sqlite3.connect(db_path) as connection:
+        connection.execute("INSERT INTO household (public_id, legacy_scope_key, created_at) VALUES (?, ?, ?)",
+                           ("44444444-4444-4444-4444-444444444444", "legacy-trip", "2026-08-20 00:00:00"))
+        hid = connection.execute("SELECT id FROM household WHERE legacy_scope_key='legacy-trip'").fetchone()[0]
+        connection.execute("INSERT INTO expense_transactions (household_id, description, amount, source) VALUES (?, ?, ?, ?)",
+                           (hid, "Legacy grocery", 17.25, "manual"))
+        txn_id = connection.execute("SELECT id FROM expense_transactions WHERE household_id=?", (hid,)).fetchone()[0]
+        connection.execute(
+            "INSERT INTO shopping_trip_completion (household_id, operation_id, trip_token, transaction_id, retailer, store_name, store_id, planned_total_cents, actual_total_cents, amount_source, cart_signature, manual_provisional, completed_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (hid, "legacy-trip-op", "legacy-trip-token", txn_id, "walmart", "Legacy Walmart", "357", 1725, 1725, "actual", "legacy-sig", 1, "2026-08-20 00:00:00"),
+        )
+        connection.commit()
+    upgraded = _upgrade(db_path)
+    assert upgraded.returncode == 0, upgraded.stderr
+    with sqlite3.connect(db_path) as connection:
+        assert connection.execute("SELECT operation_id, actual_total_cents, shopping_cart_id FROM shopping_trip_completion").fetchone() == ("legacy-trip-op", 1725, None)
 
 
 def test_separate_processes_create_one_truthful_household_account(tmp_path: Path) -> None:

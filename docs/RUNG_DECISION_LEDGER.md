@@ -2,6 +2,17 @@
 
 This file records durable owner decisions. It is not an implementation diary, test report, or substitute for inspecting the current repository.
 
+## Authoritative persisted cart + staged store change
+
+**LOCKED PRODUCT DECISION**
+
+- The cart is backend-owned, household-scoped, and bound to one exact physical store. Requirements describe household needs; cart lines describe resolved store-specific products, packages, availability, provenance, and prices.
+- Browser totals and store values are never financial authority.
+- Selecting Store B while Store A has an authoritative cart creates a review only. Store A and its cart remain canonical until approval; cancel changes neither.
+- Approval atomically promotes the reviewed Store B cart and selected Store B. Rung never silently carries prices across stores, clears a cart, substitutes, or drops unresolved needs.
+- Rebalance is a persisted proposal/review/approval flow, not a browser cart mutation.
+- Finished Shopping derives only from the approved persisted cart and selected store. A completed cart is immutable historical evidence.
+
 ## Authority order
 
 When sources conflict, use this order:
@@ -68,6 +79,14 @@ The intended flow is:
 - A one-time choice or substitution is not automatically learned.
 - Rebalance requires preview, review, and explicit approval before applying changes.
 - Optimization respects requirements and preferences; it is not simply cheapest-item selection.
+
+### APPROVED DIRECTION — Blocked Product / Brand Authority
+
+- Household-scoped persistent blocks are negative saved retail preferences and automatic-selection eligibility filters, not allergies or dietary-safety rules.
+- Exact retailer product/SKU identity and normalized brand blocks are supported.
+- An explicit current request for the blocked exact product or brand overrides the saved block for that request only; the block remains saved and the choice is not learned as favorite/usual.
+- A block overrides saved favorite, usual, and approved substitution for automatic selection without deleting those historical records.
+- Store Change and Rebalance apply blocks identically to normal product resolution.
 
 ### Recipe ownership and legacy provenance
 

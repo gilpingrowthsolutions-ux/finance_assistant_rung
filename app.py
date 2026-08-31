@@ -240,6 +240,10 @@ from models import (
     PlaidItem,
     PlaidTransaction,
     ShoppingTripCompletion,
+    ShoppingCart,
+    ShoppingCartLine,
+    ShoppingStoreChangeReview,
+    ShoppingRebalanceProposal,
     TransactionReconciliation,
     StorePriceCache,
     StoreProductObservation,
@@ -2934,6 +2938,20 @@ def location_select_store():
             "user_message": "Please choose a supported store.",
         }), 400
 
+    # Legacy location controls remain discovery/initial-selection compatible,
+    # but may not bypass Store Change Review after a cart exists.
+    from services.authoritative_cart import current_cart
+    existing_cart = current_cart(current_household_id())
+    selected_now = get_selected_store(current_household_id(), account=account)
+    if existing_cart is not None and (
+        str(selected_now.get("retailer") or "").lower() != retailer
+        or str(selected_now.get("store_id") or "") != location_id
+    ):
+        return jsonify({
+            "error": "store_change_review_required",
+            "user_message": "Review the Store Change in Shopping before changing your active store.",
+        }), 409
+
     zip_code = _normalize_zip_code(data.get("zip_code"))
     city_state = str(data.get("city_state") or "").strip()
     state_code = ""
@@ -4682,31 +4700,32 @@ def _build_trip_token(*, retailer: str, store_id: str, store_name: str, cart_sig
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:40]
 
 
-def _normalize_finished_shopping_payload(data: dict[str, Any]) -> dict[str, Any]:
-    planned_cents = _money_to_cents(data.get("planned_total"), field_name="planned_total")
-    if planned_cents <= 0:
-        raise ValueError("planned_total must be greater than 0.")
-
-    use_planned = bool(data.get("use_planned_total", False))
-    actual_input = data.get("actual_total")
-    actual_cents = planned_cents if use_planned else _money_to_cents(actual_input, field_name="actual_total")
-    if actual_cents <= 0:
-        raise ValueError("actual_total must be greater than 0.")
-
-    retailer = str(data.get("retailer") or "").strip().lower()
-    store_name = str(data.get("store_name") or "").strip()
-    store_id = str(data.get("store_id") or "").strip()
-    cart_signature = str(data.get("cart_signature") or "").strip()
+def _authoritative_finished_payload(data: dict[str, Any], *, household_id: int, for_update: bool = False) -> dict[str, Any]:
+    """Load checkout truth from the durable current cart, never the browser."""
+    from services.authoritative_cart import current_cart
+    cart = current_cart(household_id, for_update=for_update)
+    if cart is None:
+        raise ValueError("Build and approve a store-bound cart before finishing shopping.")
+    selected = get_selected_store(household_id)
+    if not selected.get("canonical") or int(selected.get("retail_store_identity_id") or 0) != cart.retail_store_identity_id:
+        raise ValueError("Your current cart no longer matches the selected physical store.")
+    unresolved = ShoppingCartLine.query.filter_by(cart_id=cart.id).filter(
+        db.or_(ShoppingCartLine.resolution_state != "resolved", ShoppingCartLine.availability != "in_stock")
+    ).first()
+    if unresolved is not None:
+        raise ValueError("Resolve every cart line before finishing shopping.")
+    if cart.total_cents <= 0:
+        raise ValueError("The authoritative cart total must be greater than zero.")
     operation_id = str(data.get("operation_id") or "").strip() or f"trip_{uuid.uuid4().hex}"
-
     return {
-        "planned_total_cents": planned_cents,
-        "actual_total_cents": actual_cents,
-        "actual_amount_source": "planned" if use_planned else "actual",
-        "retailer": retailer,
-        "store_name": store_name,
-        "store_id": store_id,
-        "cart_signature": cart_signature,
+        "cart": cart,
+        "planned_total_cents": cart.total_cents,
+        "actual_total_cents": cart.total_cents,
+        "actual_amount_source": "authoritative_cart",
+        "retailer": str(selected.get("retailer") or ""),
+        "store_name": str(selected.get("name") or ""),
+        "store_id": str(selected.get("store_id") or ""),
+        "cart_signature": f"cart:{cart.id}:v{cart.version}",
         "operation_id": operation_id,
     }
 
@@ -4715,7 +4734,7 @@ def _normalize_finished_shopping_payload(data: dict[str, Any]) -> dict[str, Any]
 def grocery_finished_shopping_stage():
     data = request.json or {}
     try:
-        payload = _normalize_finished_shopping_payload(data)
+        payload = _authoritative_finished_payload(data, household_id=current_household_id())
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 400
 
@@ -4751,8 +4770,28 @@ def grocery_finished_shopping_complete():
     if not confirm:
         return jsonify({"error": "Confirmation required."}), 400
 
+    # Claim/replay checks precede current-cart validation: a finished cart is
+    # immutable, but retries of its already-completed operation are safe.
+    requested_op_id = str(data.get("operation_id") or "").strip()
+    replay = _household_trip_query().filter_by(operation_id=requested_op_id).first() if requested_op_id else None
+    if replay is not None:
+        txn = _household_tx_query().filter_by(id=replay.transaction_id).first()
+        account = _household_account()
+        return jsonify({"completed": True, "already_completed": True, "operation_id": replay.operation_id,
+            "trip_token": replay.trip_token, "transaction_id": replay.transaction_id,
+            "transaction_amount": round(float(txn.amount), 2) if txn else _cents_to_float(replay.actual_total_cents),
+            "planned_total": _cents_to_float(replay.planned_total_cents), "actual_total": _cents_to_float(replay.actual_total_cents),
+            "amount_source": replay.amount_source, "completed_at": replay.completed_at.isoformat() if replay.completed_at else None,
+            "metrics": _canonical_financial_metrics(account) if account else None})
+    requested_trip_token = str(data.get("trip_token") or "").strip()
+    if requested_trip_token and _household_trip_query().filter_by(trip_token=requested_trip_token).first() is not None:
+        return jsonify({"error": "This shopping trip has already been completed.", "trip_token": requested_trip_token}), 409
+
     try:
-        payload = _normalize_finished_shopping_payload(data)
+        # Claim the authoritative cart row for the remainder of this explicit
+        # financial transaction.  A database uniqueness constraint on the
+        # completion is still the retry-safe final backstop.
+        payload = _authoritative_finished_payload(data, household_id=hid, for_update=True)
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 400
 
@@ -4848,10 +4887,13 @@ def grocery_finished_shopping_complete():
             actual_total_cents=payload["actual_total_cents"],
             amount_source=payload["actual_amount_source"],
             cart_signature=payload["cart_signature"],
+            shopping_cart_id=payload["cart"].id,
             manual_provisional=True,
             completed_at=datetime.now(timezone.utc),
         )
         db.session.add(trip)
+        payload["cart"].status = "completed"
+        payload["cart"].completed_at = trip.completed_at
 
         audit_row = _household_audit_query().filter_by(operation_id=op_id).first()
         if audit_row:
@@ -5012,16 +5054,41 @@ def _apply_canonical_tax_to_rebalance_preview(
     }
 
 
+def _authoritative_rebalance_items(cart: ShoppingCart) -> list[dict[str, Any]]:
+    """Rehydrate optimizer input from server-owned cart-line provenance."""
+    items: list[dict[str, Any]] = []
+    for line in ShoppingCartLine.query.filter_by(cart_id=cart.id).order_by(ShoppingCartLine.id).all():
+        try:
+            saved = json.loads(line.provenance_json or '{}').get('item') or {}
+        except (TypeError, ValueError):
+            saved = {}
+        requirement = json.loads(line.requirement_json or '{}')
+        product = dict(saved.get('selected_product') or {})
+        product.update({'product_id': line.provider_product_id, 'us_item_id': line.provider_us_item_id,
+                        'title': line.title, 'brand': line.brand, 'package_size': line.package_size,
+                        'price': (line.unit_price_cents or 0) / 100, 'availability': line.availability,
+                        'retailer': line.retailer})
+        items.append({**saved, 'requirement': requirement, 'selected_product': product,
+                      'packages_to_buy': line.package_count, 'estimated_price': (line.line_total_cents or 0) / 100,
+                      'resolved': line.resolution_state == 'resolved', 'availability': line.availability})
+    return items
+
+
 @app.route("/api/grocery/rebalance/preview", methods=["POST"])
 def grocery_rebalance_preview():
     from services.retail.cart import _load_household_shopping_defaults, propose_rebalance_preview
 
     data = request.json or {}
-    cart_items = data.get("cart_items") or []
+    from services.authoritative_cart import current_cart
+    from services.authoritative_rebalance import _proposal_dict, create_proposal
+    hid = current_household_id(); cart = current_cart(hid)
+    if cart is None: return jsonify({'error': 'Build a current cart before rebalancing.'}), 409
+    cart_items = _authoritative_rebalance_items(cart)
     budget_limit = float(data.get("budget_limit") or 0)
     raw_context = data.get("cart_context")
     context: dict[str, Any] = raw_context if isinstance(raw_context, dict) else {}
-    retailer = str(context.get("retailer") or data.get("retailer") or "walmart").strip().lower()
+    selected = get_selected_store(hid)
+    retailer = str(selected.get("retailer") or "").strip().lower()
     protected = set()
     for key in data.get("protected_choice_keys") or []:
         normalized = " ".join(str(key or "").strip().lower().split())
@@ -5042,61 +5109,40 @@ def grocery_rebalance_preview():
     )
     preview = _apply_canonical_tax_to_rebalance_preview(preview, cart_items, retailer=retailer, owner_scope=_resolve_request_user_id(data))
     preview["protected_choice_keys"] = sorted(protected)
-    return jsonify(preview)
+    op_id = str(data.get('operation_id') or f'rebalance_{uuid.uuid4().hex}')
+    proposal = create_proposal(household_id=hid, cart=cart, operation_id=op_id, changes=preview.get('changes') or [])
+    db.session.commit()
+    return jsonify({**preview, 'proposal': _proposal_dict(proposal), 'authoritative_cart_id': cart.id, 'authoritative_cart_version': cart.version})
 
 
 @app.route("/api/grocery/rebalance/apply", methods=["POST"])
 def grocery_rebalance_apply():
-    from services.retail.cart import _load_household_shopping_defaults, propose_rebalance_preview
-
     data = request.json or {}
-    cart_items = data.get("cart_items") or []
-    budget_limit = float(data.get("budget_limit") or 0)
-    raw_context = data.get("cart_context")
-    context: dict[str, Any] = raw_context if isinstance(raw_context, dict) else {}
-    retailer = str(context.get("retailer") or data.get("retailer") or "walmart").strip().lower()
+    from services.authoritative_cart import cart_dict
+    from services.authoritative_rebalance import _proposal_dict, approve_proposal
+    proposal_id = int(data.get('proposal_id') or 0)
+    if not proposal_id: return jsonify({'error': 'proposal_id is required.'}), 400
+    selected = get_selected_store(current_household_id())
+    try:
+        proposal = approve_proposal(household_id=current_household_id(), proposal_id=proposal_id,
+                                    selected_store_id=int(selected.get('retail_store_identity_id') or 0))
+        db.session.commit()
+    except LookupError: return jsonify({'error': 'Rebalance proposal not found.'}), 404
+    except ValueError as exc:
+        db.session.rollback(); return jsonify({'error': str(exc), 'code': 'stale_rebalance_proposal'}), 409
+    if proposal.status == 'stale':
+        return jsonify({'error': 'Rebalance proposal is stale.', 'code': 'stale_rebalance_proposal', 'proposal': _proposal_dict(proposal)}), 409
+    cart = db.session.get(ShoppingCart, proposal.base_cart_id)
+    return jsonify({'applied': True, 'proposal': _proposal_dict(proposal), 'authoritative_cart': cart_dict(cart)})
 
-    protected = set()
-    for key in data.get("protected_choice_keys") or []:
-        normalized = " ".join(str(key or "").strip().lower().split())
-        if normalized:
-            protected.add(normalized)
-    raw_preview = data.get("preview")
-    preview_meta: dict[str, Any] = raw_preview if isinstance(raw_preview, dict) else {}
-    for key in preview_meta.get("protected_choice_keys") or []:
-        normalized = " ".join(str(key or "").strip().lower().split())
-        if normalized:
-            protected.add(normalized)
 
-    current_preview = propose_rebalance_preview(
-        cart_items=cart_items,
-        budget_limit=budget_limit,
-        tax_rate=0.0,
-        retailer=retailer,
-        defaults=_load_household_shopping_defaults(),
-        protected_choice_keys=protected,
-        context=context,
-    )
-    current_preview = _apply_canonical_tax_to_rebalance_preview(current_preview, cart_items, retailer=retailer, owner_scope=_resolve_request_user_id(data))
-
-    if current_preview.get("status") == "tax_context_required":
-        return jsonify({"error": "Confirm a supported selected-store tax context before applying a rebalance.", "code": "tax_context_required", "current_preview": current_preview}), 409
-
-    if (
-        str(preview_meta.get("context_fingerprint") or "") != str(current_preview.get("context_fingerprint") or "")
-        or str(preview_meta.get("proposal_fingerprint") or "") != str(current_preview.get("proposal_fingerprint") or "")
-    ):
-        return jsonify({
-            "error": "Rebalance preview is stale. Regenerate preview and retry.",
-            "code": "stale_rebalance_preview",
-            "current_preview": current_preview,
-        }), 409
-
-    return jsonify({
-        "applied": True,
-        "applied_choices": current_preview.get("changes") or [],
-        "preview": current_preview,
-    })
+@app.route('/api/grocery/rebalance/<int:proposal_id>/reject', methods=['POST'])
+def grocery_rebalance_reject(proposal_id: int):
+    from services.authoritative_rebalance import _proposal_dict, reject_proposal
+    try:
+        proposal = reject_proposal(household_id=current_household_id(), proposal_id=proposal_id); db.session.commit()
+    except LookupError: return jsonify({'error': 'Rebalance proposal not found.'}), 404
+    return jsonify({'rejected': proposal.status == 'rejected', 'proposal': _proposal_dict(proposal)})
 
 def _savings_request_cents(data: dict[str, Any], key: str = "amount") -> int:
     cents_key = key + "_cents"
@@ -6496,6 +6542,128 @@ def search_recipes():
             return jsonify(local_recipes)
         return jsonify({"error": "Could not reach TheMealDB. Try again later.", "results": []}), 503
 
+def _persist_authoritative_cart_response(verified_cart: dict[str, Any], *, household_id: int, selected_store: dict[str, Any]) -> dict[str, Any]:
+    """Make a provider resolution the one current cart for its canonical store."""
+    from services.authoritative_cart import cart_dict, replace_current_from_resolution
+    identity_id = int(selected_store.get("retail_store_identity_id") or 0)
+    if not identity_id:
+        return verified_cart
+    cart = replace_current_from_resolution(
+        household_id=household_id, store_identity_id=identity_id, resolved_cart=verified_cart,
+    )
+    db.session.commit()
+    verified_cart["authoritative_cart"] = cart_dict(cart)
+    verified_cart["cart_id"] = cart.id
+    return verified_cart
+
+
+def _store_change_review_dict(review: ShoppingStoreChangeReview) -> dict[str, Any]:
+    from services.authoritative_cart import cart_dict
+    staged = db.session.get(ShoppingCart, review.staged_cart_id)
+    current = db.session.get(ShoppingCart, review.current_cart_id)
+    current_store = db.session.get(RetailStoreIdentity, review.from_store_identity_id)
+    proposed_store = db.session.get(RetailStoreIdentity, review.to_store_identity_id)
+    return {"id": review.id, "status": review.status, "operation_id": review.operation_id,
+            "current_cart": cart_dict(current) if current else None, "reviewed_cart": cart_dict(staged) if staged else None,
+            # Store names are review facts, not client guesses.  The dialog
+            # needs both names to communicate that the current store remains
+            # active until an explicit approval.
+            "current_store": {"store_id": current_store.retailer_store_id, "name": current_store.store_name} if current_store else None,
+            "proposed_store": {"store_id": proposed_store.retailer_store_id, "name": proposed_store.store_name} if proposed_store else None}
+
+
+@app.route("/api/shopping/current-cart", methods=["GET"])
+def shopping_current_cart():
+    from services.authoritative_cart import cart_dict, current_cart
+    cart = current_cart(current_household_id())
+    return jsonify({"cart": cart_dict(cart) if cart else None, "selected_store": get_selected_store(current_household_id())})
+
+
+@app.route("/api/shopping/current-cart/choose-product", methods=["POST"])
+def shopping_current_cart_choose_product():
+    """Persist one explicit current-cart choice using only server cache truth."""
+    from services.authoritative_cart import _line_key, cart_dict, choose_current_line_product, current_cart
+    data = request.json or {}; hid = current_household_id()
+    try:
+        cart_id, line_id, version = int(data.get('cart_id')), int(data.get('line_id')), int(data.get('version'))
+    except (TypeError, ValueError):
+        return jsonify({'error': 'cart_id, line_id, and version are required.'}), 400
+    requested = str(data.get('product_id') or '').strip()
+    if not requested: return jsonify({'error': 'product_id is required.'}), 400
+    cart = current_cart(hid)
+    if cart is None or cart.id != cart_id: return jsonify({'error': 'Current cart not found.'}), 404
+    line = ShoppingCartLine.query.filter_by(id=line_id, cart_id=cart.id).first()
+    identity = db.session.get(RetailStoreIdentity, cart.retail_store_identity_id)
+    if line is None or identity is None: return jsonify({'error': 'Cart line not found.'}), 404
+    candidate = None
+    # A store-scoped product is still not interchangeable across requirements.
+    # Match the cache envelope to the durable line key before accepting any
+    # candidate, so an unrelated same-store search cannot be selected.
+    for row in RetailProductCache.query.filter_by(retailer=identity.retailer, store_id=identity.retailer_store_id, verified_location=True).order_by(RetailProductCache.retrieved_at.desc()).all():
+        try: payload = json.loads(row.response_json or '{}')
+        except (TypeError, ValueError): continue
+        cached_requirement = payload.get('requirement') or {}
+        if _line_key({'requirement': cached_requirement}, 0) != line.requirement_key:
+            continue
+        for product in (payload.get('candidates') or []) + (payload.get('alternatives') or []) + ([payload.get('selected_product')] if payload.get('selected_product') else []):
+            if str(product.get('product_id') or '') == requested or str(product.get('us_item_id') or '') == requested:
+                candidate = dict(product); break
+        if candidate: break
+    if candidate is None: return jsonify({'error': 'Requested product is not a verified candidate at this store.'}), 409
+    try:
+        cart = choose_current_line_product(household_id=hid, cart_id=cart_id, line_id=line_id, expected_version=version, product=candidate)
+        db.session.commit()
+    except LookupError as exc: return jsonify({'error': str(exc)}), 404
+    except ValueError as exc: db.session.rollback(); return jsonify({'error': str(exc)}), 409
+    return jsonify({'cart': cart_dict(cart)})
+
+
+@app.route("/api/shopping/store-change/start", methods=["POST"])
+def shopping_store_change_start():
+    """Resolve a target store into a staged cart without changing canonical state."""
+    from services.authoritative_cart import current_cart, stage_store_change
+    from services.retail.base import RetailStore
+    from services.retail.cart import build_verified_retail_cart
+    from services.selected_store import ensure_store_identity
+    data = request.json or {}; hid = current_household_id(); account = _household_account(); current = current_cart(hid)
+    if account is None or current is None: return jsonify({"error": "Build a current cart before changing stores."}), 409
+    retailer, store_id = str(data.get("retailer") or "").strip().lower(), str(data.get("store_id") or "").strip()
+    if retailer not in {"walmart", "kroger"} or not store_id: return jsonify({"error": "Choose an exact supported physical store."}), 400
+    identity = ensure_store_identity(retailer=retailer, store_id=store_id, store_name=str(data.get("store_name") or retailer.title()), address=str(data.get("address") or ""), city=str(data.get("city") or ""), state=str(data.get("state") or ""), postal_code=str(data.get("postal_code") or ""))
+    try:
+        resolved = build_verified_retail_cart(retailer=retailer, store=RetailStore(store_id=store_id, name=identity.store_name, address=identity.address, postal_code=identity.postal_code, verified=True), budget_limit=None, owner_scope=_resolve_request_user_id(data))
+    except Exception:
+        db.session.rollback(); LOGGER.exception("store-change target resolution failed")
+        return jsonify({"error": "We could not resolve that store for review. Your selected store and cart were not changed."}), 502
+    tax = _apply_owned_tax_to_cart(account=account, owner_scope=_resolve_request_user_id(data), cart_items=resolved.get("cart_items") or [], retailer=retailer, store_name=identity.store_name, store_id=store_id, store_address=identity.address or "", postal_code=identity.postal_code or "", city_state=", ".join(filter(None, [identity.city or "", identity.state or ""])))
+    resolved.update({"subtotal": tax["subtotal"], "total_cart_cost": tax["total_cart_cost"]})
+    review = stage_store_change(household_id=hid, current=current, target_store_identity_id=identity.id, resolved_cart=resolved, operation_id=str(data.get("operation_id") or f"store_change_{uuid.uuid4().hex}"))
+    db.session.commit()
+    return jsonify({"staged": True, "review": _store_change_review_dict(review), "selected_store": get_selected_store(hid)})
+
+
+@app.route("/api/shopping/store-change/<int:review_id>/cancel", methods=["POST"])
+def shopping_store_change_cancel(review_id: int):
+    from services.authoritative_cart import cancel_store_change
+    try: review = cancel_store_change(household_id=current_household_id(), review_id=review_id); db.session.commit()
+    except LookupError: return jsonify({"error": "Store-change review not found."}), 404
+    return jsonify({"cancelled": True, "review": _store_change_review_dict(review), "selected_store": get_selected_store(current_household_id())})
+
+
+@app.route("/api/shopping/store-change/<int:review_id>/approve", methods=["POST"])
+def shopping_store_change_approve(review_id: int):
+    from services.authoritative_cart import approve_store_change
+    review = ShoppingStoreChangeReview.query.filter_by(id=review_id, household_id=current_household_id()).first()
+    if review is None: return jsonify({"error": "Store-change review not found."}), 404
+    target = db.session.get(RetailStoreIdentity, review.to_store_identity_id)
+    try:
+        review = approve_store_change(household_id=current_household_id(), review_id=review_id, store={"retailer": target.retailer, "store_id": target.retailer_store_id, "name": target.store_name, "address": target.address, "city": target.city, "state": target.state, "postal_code": target.postal_code}, account=_household_account())
+        db.session.commit()
+    except ValueError as exc:
+        db.session.rollback(); return jsonify({"error": str(exc)}), 409
+    return jsonify({"approved": True, "review": _store_change_review_dict(review), "selected_store": get_selected_store(current_household_id())})
+
+
 @app.route("/api/grocery/generate-pay-period-plan", methods=["POST"])
 def generate_pay_period_plan():
     """
@@ -6534,6 +6702,7 @@ def generate_pay_period_plan():
 
     data = request.json or {}
     user_id = _resolve_request_user_id(data)
+    one_time_choices = data.get("one_time_choices") if isinstance(data.get("one_time_choices"), dict) else {}
     if "recipe_ids" not in data:
         return jsonify({"error": "Provide recipe_ids (list of int)"}), 400
 
@@ -6605,6 +6774,7 @@ def generate_pay_period_plan():
                     budget_limit=food_budget,
                     tax_rate=0.0,
                     owner_scope=user_id,
+                    one_time_choices=one_time_choices,
                 )
             else:
                 verified_cart = build_verified_walmart_cart(
@@ -6612,6 +6782,7 @@ def generate_pay_period_plan():
                     budget_limit=food_budget,
                     tax_rate=0.0,
                     owner_scope=user_id,
+                    one_time_choices=one_time_choices,
                 )
         except Exception:
             LOGGER.exception("walmart verified cart failed")
@@ -6652,7 +6823,7 @@ def generate_pay_period_plan():
             },
             "store_config_warning": None,
         })
-        return jsonify(verified_cart)
+        return jsonify(_persist_authoritative_cart_response(verified_cart, household_id=current_household_id(), selected_store=selected_store))
 
     if (use_verified_cart or explicit_store_name or has_canonical_store) and selected_retailer == "kroger":
         from services.retail.base import RetailStore
@@ -6709,6 +6880,7 @@ def generate_pay_period_plan():
                 budget_limit=food_budget,
                 tax_rate=0.0,
                 owner_scope=user_id,
+                one_time_choices=one_time_choices,
             )
         except Exception:
             LOGGER.exception("kroger verified cart failed")
@@ -6749,7 +6921,7 @@ def generate_pay_period_plan():
             },
             "store_config_warning": None,
         })
-        return jsonify(verified_cart)
+        return jsonify(_persist_authoritative_cart_response(verified_cart, household_id=current_household_id(), selected_store=selected_store))
 
     # Warn when the selected store is Kroger but no location ID is configured.
     # Results will silently fall back to third-party sources without this guard.
@@ -7079,6 +7251,39 @@ def retail_product_preference():
         return jsonify({"error": f"Could not save product preference: {exc}"}), 502
 
 
+@app.route("/api/retail/product-block", methods=["GET", "POST", "DELETE"])
+def retail_product_block():
+    """Household-scoped negative product authority for automatic selection."""
+    from services.retail.preferences import (
+        list_product_blocks, product_block_to_dict, remove_product_block,
+        save_product_block,
+    )
+
+    data = request.args if request.method == "GET" else (request.json or {})
+    try:
+        if request.method == "GET":
+            return jsonify({"blocks": [product_block_to_dict(row) for row in list_product_blocks()]})
+        if request.method == "DELETE":
+            block_id = int(data.get("block_id") or 0)
+            if not block_id:
+                return jsonify({"error": "block_id is required."}), 400
+            if not remove_product_block(block_id):
+                return jsonify({"error": "Product block not found."}), 404
+            return jsonify({"deleted": True, "block_id": block_id})
+        block = save_product_block(
+            block_type=str(data.get("block_type") or ""),
+            retailer=data.get("retailer"), product_id=data.get("product_id"),
+            us_item_id=data.get("us_item_id"), brand=data.get("brand"),
+        )
+        return jsonify({"block": product_block_to_dict(block)})
+    except (TypeError, ValueError) as exc:
+        return jsonify({"error": str(exc)}), 400
+    except Exception:
+        LOGGER.exception("Retail product block request failed")
+        db.session.rollback()
+        return jsonify({"error": "Could not save this product block."}), 502
+
+
 @app.route("/api/retail/product-substitution", methods=["GET", "POST", "DELETE"])
 def retail_product_substitution():
     from services.retail.preferences import (
@@ -7273,9 +7478,21 @@ def update_location():
     explicit_location_id = str(data.get("location_id") or "").strip()
     if explicit_store_name or explicit_location_id:
         if explicit_location_id:
+            from services.authoritative_cart import current_cart
+            current_cart_row = current_cart(current_household_id())
+            target_retailer = str(data.get("retailer") or ("walmart" if "walmart" in explicit_store_name.lower() else "kroger")).lower()
+            if current_cart_row is not None and (
+                str(selected.get("retailer") or "").lower() != target_retailer
+                or str(selected.get("store_id") or "") != explicit_location_id
+            ):
+                db.session.rollback()
+                return jsonify({
+                    "error": "store_change_review_required",
+                    "user_message": "Review the Store Change in Shopping before changing your active store.",
+                }), 409
             selected = select_store(
                 current_household_id(),
-                retailer=str(data.get("retailer") or ("walmart" if "walmart" in explicit_store_name.lower() else "kroger")),
+                retailer=target_retailer,
                 store_id=explicit_location_id,
                 store_name=explicit_store_name or "Selected Store",
                 postal_code=account.zip_code or "",

@@ -10,8 +10,9 @@ from extensions import db
 from models import Account, GroceryItem, HouseholdShoppingDefault, RetailProductPreference
 from services.retail import ProductSearchResult, RetailProduct
 from services.retail.cart import VERIFIED_WALMART_STORE, build_verified_walmart_cart, propose_rebalance_preview
+from services.authoritative_cart import replace_current_from_resolution
 from services.household_context import household_id as current_household_id
-from services.selected_store import select_store
+from services.selected_store import get_selected_store, select_store
 
 
 class FakeProvider:
@@ -121,6 +122,16 @@ def _by_keyword(cart: dict) -> dict[str, dict]:
 
 
 def _preview_payload(cart: dict, *, budget_limit: float) -> dict:
+    # The served Rebalance endpoint intentionally ignores browser cart lines.
+    # Persist this legacy test's provider fixture as the cart it is reviewing.
+    with app.app_context():
+        selected = get_selected_store(current_household_id())
+        replace_current_from_resolution(
+            household_id=current_household_id(),
+            store_identity_id=selected["retail_store_identity_id"],
+            resolved_cart=cart,
+        )
+        db.session.commit()
     return {
         "cart_items": cart["cart_items"],
         "budget_limit": budget_limit,
@@ -412,20 +423,16 @@ def test_apply_rejects_stale_preview_when_budget_changes() -> None:
     preview_resp = client.post("/api/grocery/rebalance/preview", json=_preview_payload(cart, budget_limit=10.00))
     assert preview_resp.status_code == 200
     preview = preview_resp.get_json() or {}
+    _preview_payload(cart, budget_limit=9.00)  # cart replacement makes the review stale
 
     apply_resp = client.post(
         "/api/grocery/rebalance/apply",
         json={
-            **_preview_payload(cart, budget_limit=9.00),
-            "preview": {
-                "context_fingerprint": preview.get("context_fingerprint"),
-                "proposal_fingerprint": preview.get("proposal_fingerprint"),
-                "protected_choice_keys": preview.get("protected_choice_keys") or [],
-            },
+            "proposal_id": preview["proposal"]["id"],
         },
     )
     assert apply_resp.status_code == 409
-    assert (apply_resp.get_json() or {}).get("code") == "stale_rebalance_preview"
+    assert (apply_resp.get_json() or {}).get("code") == "stale_rebalance_proposal"
 
 
 def test_apply_rejects_stale_preview_when_retailer_changes() -> None:
@@ -449,17 +456,13 @@ def test_apply_rejects_stale_preview_when_retailer_changes() -> None:
     preview_resp = client.post("/api/grocery/rebalance/preview", json=payload)
     preview = preview_resp.get_json() or {}
 
-    payload["cart_context"]["retailer"] = "kroger"
+    with app.app_context():
+        account = Account.query.one()
+        select_store(current_household_id(), retailer="kroger", store_id="01100479", store_name="Gerbes", account=account)
+        db.session.commit()
     apply_resp = client.post(
         "/api/grocery/rebalance/apply",
-        json={
-            **payload,
-            "preview": {
-                "context_fingerprint": preview.get("context_fingerprint"),
-                "proposal_fingerprint": preview.get("proposal_fingerprint"),
-                "protected_choice_keys": preview.get("protected_choice_keys") or [],
-            },
-        },
+        json={"proposal_id": preview["proposal"]["id"]},
     )
 
     assert apply_resp.status_code == 409
@@ -517,23 +520,17 @@ def test_apply_returns_only_previewed_lines_and_no_preference_persistence() -> N
 
     apply_resp = client.post(
         "/api/grocery/rebalance/apply",
-        json={
-            **_preview_payload(cart, budget_limit=20.00),
-            "protected_choice_keys": ["coffee"],
-            "preview": {
-                "context_fingerprint": preview.get("context_fingerprint"),
-                "proposal_fingerprint": preview.get("proposal_fingerprint"),
-                "protected_choice_keys": preview.get("protected_choice_keys") or [],
-            },
-        },
+        json={"proposal_id": preview["proposal"]["id"]},
     )
     body = apply_resp.get_json() or {}
-    assert apply_resp.status_code == 200
+    assert apply_resp.status_code == 200, body
     assert body.get("applied") is True
 
-    preview_keys = sorted(change.get("choice_key") for change in (preview.get("changes") or []))
-    applied_keys = sorted(change.get("choice_key") for change in (body.get("applied_choices") or []))
-    assert applied_keys == preview_keys
+    preview_titles = sorted(change.get("proposed_product", {}).get("title") for change in (preview.get("changes") or []))
+    applied_titles = sorted(change.get("proposed_title") for change in ((body.get("proposal") or {}).get("changes") or []))
+    # Persisted lines expose durable requirement IDs, not the old display
+    # choice keys; the approved products must still be exactly the previewed ones.
+    assert applied_titles == preview_titles
 
     with app.app_context():
         assert RetailProductPreference.query.count() == 0

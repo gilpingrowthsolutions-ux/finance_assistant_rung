@@ -14,6 +14,7 @@ from services.recipe_requirements import active_recipe_requirements
 from services.retail import RetailProvider, RetailStore, ShoppingRequirement, get_retail_provider
 from services.retail.preferences import (
     get_product_preference,
+    filter_automatic_candidates,
     get_product_substitutions,
     match_approved_substitution,
     match_preference,
@@ -51,6 +52,7 @@ def build_verified_retail_cart(
     budget_limit: Optional[float] = None,
     tax_rate: float = 0.0,
     owner_scope: str = "anonymous",
+    one_time_choices: Optional[dict[str, str]] = None,
 ) -> dict[str, Any]:
     retailer = str(retailer or "").strip().lower()
     resolver = provider or (WalmartSerpApiProvider() if retailer == "walmart" else get_retail_provider(retailer))
@@ -58,6 +60,7 @@ def build_verified_retail_cart(
     household_id = current_household_id()
     requirements = _active_manual_requirements() + active_recipe_requirements(household_id)
     household_defaults = _load_household_shopping_defaults()
+    one_time_choices = {normalize_query(key): str(value) for key, value in (one_time_choices or {}).items() if str(value or '').strip()}
     cart_items = []
     search_calls = detail_calls = cache_hits = 0
     exact_cache_served = 0
@@ -183,11 +186,27 @@ def build_verified_retail_cart(
             force_refresh=force_refresh,
         )
 
+        # Apply persistent household negative preferences after provider/cache
+        # retrieval and before every positive selection authority.
+        explicit_choice = one_time_choices.get(normalize_query(requirement.base_item))
+        candidates = filter_automatic_candidates(requirement, candidates, retailer=retailer, explicit_product_id=explicit_choice)
+        if selected is not None and not any(_same_product(selected, row) for row in candidates):
+            selected = None
         preferred = substituted = usual_unavailable = False
         suggested = confidence == "suggested"
         applied_substitution = None
         suggestion_reason = None
-        if preference is not None:
+        # A cached auto-selection is evidence of availability, not a durable
+        # choice authority. Re-evaluate it against the household's saved
+        # preference so the preference remains explicit in the cart state.
+        if preference is not None and requirement_allows_saved_preference(requirement) and confidence != "user_selected":
+            selected = None
+        if explicit_choice:
+            selected = next((row for row in candidates if str(row.get('product_id') or '') == explicit_choice or str(row.get('us_item_id') or '') == explicit_choice), None)
+            if selected is not None:
+                alternatives = _diverse_dicts([row for row in candidates if not _same_product(row, selected)], ALTERNATIVE_LIMIT)
+                confidence, needs_choice = 'user_selected', False
+        if selected is None and preference is not None:
             matched = match_preference(preference, candidates, retailer=retailer)
             if matched is not None and matched.get("availability") != "out_of_stock":
                 selected = _preference_identity_overlay(matched, preference)
@@ -303,6 +322,7 @@ def build_verified_walmart_cart(
     budget_limit: Optional[float] = None,
     tax_rate: float = 0.0,
     owner_scope: str = "anonymous",
+    one_time_choices: Optional[dict[str, str]] = None,
 ) -> dict[str, Any]:
     return build_verified_retail_cart(
         retailer="walmart",
@@ -312,6 +332,7 @@ def build_verified_walmart_cart(
         budget_limit=budget_limit,
         tax_rate=tax_rate,
         owner_scope=owner_scope,
+        one_time_choices=one_time_choices,
     )
 
 
@@ -337,6 +358,15 @@ def _active_manual_requirements(household_id: Optional[int] = None) -> list[Shop
         if not raw:
             name = str(row.item_name or "").strip()
             raw = {"item_name": name, "base_item": name, "quantity": 1.0, "category": "General"}
+        # Keep the persisted manual request identity through resolution. This
+        # makes cart-line identity replay-safe even for same-named requests.
+        raw.setdefault("source_kind", "manual")
+        # A serialized ShoppingRequirement created before its GroceryItem was
+        # flushed contains ``source_requirement_id: null``.  Null is not a
+        # durable identity: bind it to this persisted manual request before
+        # every store resolution, rather than falling back to a cart/SKU.
+        if raw.get("source_requirement_id") in (None, ""):
+            raw["source_requirement_id"] = int(row.id)
         requirement = ShoppingRequirement.from_mapping(raw)
         key = " ".join(requirement.base_item.lower().split())
         score = sum(bool(value) for value in (requirement.brand, requirement.variant, requirement.unit, requirement.requested_package_size)) + int(requirement.quantity != 1.0)
@@ -441,18 +471,32 @@ def _cart_item(requirement: ShoppingRequirement, selected: Optional[dict[str, An
     raw_quantity = requirement.quantity
     quantity_uncertain = raw_quantity is None
     package_resolution_uncertain = requirement.source_kind == "recipe"
-    if raw_quantity is None or package_resolution_uncertain:
+    # A recipe/manual volume or mass is a requirement, not a count of retail
+    # packages.  Without a deterministic compatible package conversion, keep
+    # the line unresolved for package arithmetic (e.g. 2 cups rice is never
+    # silently represented as 2 packages).
+    package_count_units = {"item", "items", "each", "ea", "package", "packages", "pack", "packs", "bottle", "bottles", "can", "cans", "jar", "jars", "bag", "bags", "box", "boxes"}
+    unit_text = str(requirement.unit or "").strip().lower()
+    # Legacy/manual rows without a unit retain their established item-count
+    # behavior; an explicit dimensional unit must be proven package-countable.
+    safe_package_count = not unit_text or unit_text in package_count_units
+    if raw_quantity is None or package_resolution_uncertain or not safe_package_count:
         packages_to_buy: Optional[int] = None
         quantity = 1
     else:
         quantity = max(1, int(raw_quantity))
         packages_to_buy = quantity
     if selected is None:
-        return {"keyword": requirement.base_item.replace(" ", "_"), "requirement": requirement.__dict__, "selected_product": None, "alternatives": alternatives, "resolved": False, "product_label": f"Choose your {requirement.base_item}" if needs_choice else f"{requirement.item_name} — unavailable at selected store", "estimated_price": None, "unit_price": None, "packages_to_buy": packages_to_buy, "quantity_uncertain": quantity_uncertain, "package_resolution_uncertain": package_resolution_uncertain, "price_source": "unresolved", "confirmed_local_store": False, "store_name": store.name, "store_id": store.store_id, "package_size": None, "availability": "unknown", "retrieved_at": retrieved_at, "selection_confidence": confidence, "needs_user_choice": needs_choice, "preference": preference, "preferred_product": preferred, "usual_unavailable": usual_unavailable, "substituted": substituted, "substitution": substitution, "suggested": False, "suggestion_reason": None, "data_quality": "UNKNOWN", "price_freshness": "UNKNOWN", "availability_freshness": "UNKNOWN"}
+        # Preserve a deterministic all-out-of-stock result as unavailable;
+        # treating it as generic unknown would let Finish lose the exact
+        # blocker distinction required by the authoritative cart.
+        availability = "out_of_stock" if alternatives and all(str(row.get("availability") or "unknown") == "out_of_stock" for row in alternatives) else "unknown"
+        return {"keyword": requirement.base_item.replace(" ", "_"), "requirement": requirement.__dict__, "selected_product": None, "alternatives": alternatives, "resolved": False, "product_label": f"Choose your {requirement.base_item}" if needs_choice else f"{requirement.item_name} — unavailable at selected store", "estimated_price": None, "unit_price": None, "packages_to_buy": packages_to_buy, "quantity_uncertain": quantity_uncertain, "package_resolution_uncertain": package_resolution_uncertain, "price_source": "unresolved", "confirmed_local_store": False, "store_name": store.name, "store_id": store.store_id, "package_size": None, "availability": availability, "retrieved_at": retrieved_at, "selection_confidence": confidence, "needs_user_choice": needs_choice, "preference": preference, "preferred_product": preferred, "usual_unavailable": usual_unavailable, "substituted": substituted, "substitution": substitution, "suggested": False, "suggestion_reason": None, "data_quality": "UNKNOWN", "price_freshness": "UNKNOWN", "availability_freshness": "UNKNOWN"}
     unit_price = selected.get("price")
     data_quality = str(selected.get("data_quality") or "UNKNOWN")
-    estimated_price = round(float(unit_price) * quantity, 2) if (unit_price is not None and not quantity_uncertain and not package_resolution_uncertain) else None
-    return {"keyword": requirement.base_item.replace(" ", "_"), "requirement": requirement.__dict__, "selected_product": selected, "alternatives": alternatives, "resolved": bool(selected.get("product_id") or selected.get("us_item_id")), "product_label": selected.get("title"), "estimated_price": estimated_price, "unit_price": unit_price, "packages_to_buy": packages_to_buy, "quantity_uncertain": quantity_uncertain, "package_resolution_uncertain": package_resolution_uncertain, "price_source": selected.get("source") or provider_source, "confirmed_local_store": bool(selected.get("verified_location")) and data_quality in {"LIVE_PROVIDER", "RECENT_CONFIRMED"}, "store_name": store.name, "store_id": store.store_id, "package_size": selected.get("package_size"), "availability": selected.get("availability") or "unknown", "fulfillment": selected.get("fulfillment"), "regular_price": selected.get("regular_price"), "promo_price": selected.get("promo_price"), "retrieved_at": retrieved_at or selected.get("retrieved_at"), "selection_confidence": confidence, "needs_user_choice": needs_choice, "preference": preference, "preferred_product": preferred, "usual_unavailable": usual_unavailable, "substituted": substituted, "substitution": substitution, "suggested": suggested, "suggestion_reason": suggestion_reason, "data_quality": data_quality, "price_freshness": selected.get("price_freshness") or "UNKNOWN", "availability_freshness": selected.get("availability_freshness") or "UNKNOWN"}
+    estimated_price = round(float(unit_price) * quantity, 2) if (unit_price is not None and packages_to_buy is not None and not quantity_uncertain and not package_resolution_uncertain) else None
+    resolved = bool(selected.get("product_id") or selected.get("us_item_id")) and packages_to_buy is not None
+    return {"keyword": requirement.base_item.replace(" ", "_"), "requirement": requirement.__dict__, "selected_product": selected, "alternatives": alternatives, "resolved": resolved, "product_label": selected.get("title"), "estimated_price": estimated_price, "unit_price": unit_price if resolved else None, "packages_to_buy": packages_to_buy, "quantity_uncertain": quantity_uncertain, "package_resolution_uncertain": package_resolution_uncertain, "price_source": selected.get("source") or provider_source, "confirmed_local_store": bool(selected.get("verified_location")) and data_quality in {"LIVE_PROVIDER", "RECENT_CONFIRMED"}, "store_name": store.name, "store_id": store.store_id, "package_size": selected.get("package_size"), "availability": selected.get("availability") or "unknown", "fulfillment": selected.get("fulfillment"), "regular_price": selected.get("regular_price"), "promo_price": selected.get("promo_price"), "retrieved_at": retrieved_at or selected.get("retrieved_at"), "selection_confidence": confidence, "needs_user_choice": needs_choice, "preference": preference, "preferred_product": preferred, "usual_unavailable": usual_unavailable, "substituted": substituted, "substitution": substitution, "suggested": suggested, "suggestion_reason": suggestion_reason, "data_quality": data_quality, "price_freshness": selected.get("price_freshness") or "UNKNOWN", "availability_freshness": selected.get("availability_freshness") or "UNKNOWN"}
 
 
 def _load_household_shopping_defaults(owner_scope: str = HOUSEHOLD_DEFAULT_OWNER_SCOPE) -> dict[str, Any]:
@@ -892,7 +936,7 @@ def _build_mutable_option_groups(
             continue
 
         ranked = sorted(
-            [row for row in all_candidates if isinstance(row, dict) and str(row.get("availability") or "unknown") != "out_of_stock"],
+            [row for row in filter_automatic_candidates(requirement, all_candidates, retailer=retailer) if isinstance(row, dict) and str(row.get("availability") or "unknown") != "out_of_stock"],
             key=lambda row: _suggestion_sort_key(
                 requirement,
                 row,
@@ -1138,6 +1182,12 @@ def propose_rebalance_preview(
                 "product_id": after_selected.get("product_id"),
                 "us_item_id": after_selected.get("us_item_id"),
                 "package_size": after_selected.get("package_size"),
+                # `line_price_cents` below is the full requirement line total.
+                # Keep the unit/package price separately so persisted proposal
+                # rows never reinterpret an N-package line total as one price.
+                "unit_price_cents": _to_cents(after_selected.get("price")),
+                "packages_to_buy": int(after.get("packages_to_buy") or 1),
+                "availability": after_selected.get("availability") or after.get("availability") or "unknown",
                 "line_price_cents": after_cents,
             },
             "savings_cents": max(0, before_cents - after_cents),

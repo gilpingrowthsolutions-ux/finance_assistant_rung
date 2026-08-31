@@ -6,7 +6,9 @@ from datetime import datetime, timezone
 from typing import Any, Iterable, Optional
 
 from extensions import db
-from models import RetailProductCache, RetailProductPreference, RetailProductSubstitution
+from sqlalchemy import or_
+from sqlalchemy.exc import IntegrityError
+from models import RetailProductBlock, RetailProductCache, RetailProductPreference, RetailProductSubstitution
 from services.household_context import household_id as current_household_id
 from services.retail import RetailStore, ShoppingRequirement, WalmartSerpApiProvider
 
@@ -20,6 +22,124 @@ RETAILER_CANONICAL = {
 
 def normalize_base_item(value: str) -> str:
     return " ".join(re.findall(r"[a-z0-9]+", str(value or "").lower()))
+
+
+def normalize_brand(value: str) -> str:
+    return normalize_base_item(value)
+
+
+def save_product_block(*, block_type: str, retailer: str | None = None, product_id: str | None = None,
+                       us_item_id: str | None = None, brand: str | None = None) -> RetailProductBlock:
+    block_type = str(block_type or '').strip().lower()
+    retailer = normalize_retailer(retailer)
+    if block_type == 'exact_product':
+        if retailer not in {'walmart', 'kroger', 'gerbes'}: raise ValueError('An exact product block requires a supported retailer.')
+        product_id, us_item_id = _text(product_id), _text(us_item_id)
+        identity = us_item_id or product_id
+        if not identity: raise ValueError('An exact retailer product identity is required.')
+        values = {'retailer_product_id': product_id, 'retailer_us_item_id': us_item_id, 'normalized_brand': None, 'block_key': f'exact:{retailer}:{identity}'}
+    elif block_type == 'brand':
+        normalized = normalize_brand(str(brand or ''))
+        if not normalized: raise ValueError('A brand is required.')
+        if retailer is not None: raise ValueError('A brand block is household-wide and cannot be retailer-specific.')
+        values = {'retailer_product_id': None, 'retailer_us_item_id': None, 'normalized_brand': normalized, 'block_key': f'brand:{normalized}'}
+    else: raise ValueError('block_type must be exact_product or brand.')
+    hid = current_household_id()
+    if block_type == 'brand':
+        row = RetailProductBlock.query.filter_by(household_id=hid, block_key=values['block_key']).first()
+        if row is None:
+            row = RetailProductBlock(household_id=hid, block_type=block_type, retailer=retailer, **values)
+            db.session.add(row)
+        db.session.commit()
+        return row
+
+    def matching_rows() -> list[RetailProductBlock]:
+        predicates = []
+        if product_id:
+            predicates.append(RetailProductBlock.retailer_product_id == product_id)
+        if us_item_id:
+            predicates.append(RetailProductBlock.retailer_us_item_id == us_item_id)
+        return RetailProductBlock.query.filter_by(household_id=hid, block_type='exact_product', retailer=retailer).filter(or_(*predicates)).order_by(RetailProductBlock.id).all()
+
+    try:
+        # Keep a losing concurrent insert confined to its savepoint.  The
+        # endpoint still intentionally commits this standalone preference
+        # mutation, consistent with existing preference-service writes.
+        with db.session.begin_nested():
+            rows = matching_rows()
+            row = rows[0] if rows else None
+            # A later provider observation that contains both forms proves
+            # only those two IDs equivalent.  Never infer a relationship from
+            # titles, brands, UPCs, or raw provider strings.
+            if row is not None:
+                for duplicate in rows[1:]:
+                    db.session.delete(duplicate)
+                row.retailer_product_id = row.retailer_product_id or product_id
+                row.retailer_us_item_id = row.retailer_us_item_id or us_item_id
+            else:
+                row = RetailProductBlock(household_id=hid, block_type='exact_product', retailer=retailer, **values)
+                db.session.add(row)
+            db.session.flush()
+    except IntegrityError:
+        # The partial unique indexes are the concurrency backstop.  Roll only
+        # this savepoint, then attach the now-visible canonical block.
+        rows = matching_rows()
+        if not rows:
+            raise
+        row = rows[0]
+        for duplicate in rows[1:]:
+            db.session.delete(duplicate)
+        row.retailer_product_id = row.retailer_product_id or product_id
+        row.retailer_us_item_id = row.retailer_us_item_id or us_item_id
+    db.session.commit()
+    return row
+
+
+def candidate_is_blocked(candidate: dict[str, Any], *, retailer: str | None = None, household_id: int | None = None) -> bool:
+    rows = RetailProductBlock.query.filter_by(household_id=household_id or current_household_id()).all()
+    actual_retailer = normalize_retailer(retailer or candidate.get('retailer'))
+    identities = {str(candidate.get('product_id') or ''), str(candidate.get('us_item_id') or '')}
+    brand = normalize_brand(str(candidate.get('brand') or ''))
+    for row in rows:
+        if row.retailer and normalize_retailer(row.retailer) != actual_retailer: continue
+        if row.block_type == 'exact_product' and ({str(row.retailer_product_id or ''), str(row.retailer_us_item_id or '')} & identities - {''}): return True
+        if row.block_type == 'brand' and brand and brand == row.normalized_brand: return True
+    return False
+
+
+def product_block_to_dict(row: RetailProductBlock) -> dict[str, Any]:
+    return {
+        'id': row.id, 'block_type': row.block_type, 'retailer': row.retailer,
+        'product_id': row.retailer_product_id, 'us_item_id': row.retailer_us_item_id,
+        'brand': row.normalized_brand, 'created_at': row.created_at.isoformat() if row.created_at else None,
+    }
+
+
+def remove_product_block(block_id: int) -> bool:
+    row = RetailProductBlock.query.filter_by(id=block_id, household_id=current_household_id()).first()
+    if row is None:
+        return False
+    db.session.delete(row)
+    db.session.commit()
+    return True
+
+
+def list_product_blocks() -> list[RetailProductBlock]:
+    return RetailProductBlock.query.filter_by(household_id=current_household_id()).order_by(RetailProductBlock.id).all()
+
+
+def filter_automatic_candidates(requirement: ShoppingRequirement, candidates: Iterable[dict[str, Any]], *, retailer: str,
+                                explicit_product_id: str | None = None) -> list[dict[str, Any]]:
+    """Blocks are eligibility filters; an explicit current SKU/brand overrides only itself."""
+    requested_ids = {str(getattr(requirement, 'requested_product_id', '') or ''), str(explicit_product_id or '')}
+    explicit_brand = normalize_brand(requirement.brand or '')
+    result = []
+    for candidate in candidates:
+        if not candidate_is_blocked(candidate, retailer=retailer): result.append(candidate); continue
+        identity = {str(candidate.get('product_id') or ''), str(candidate.get('us_item_id') or '')}
+        if (requested_ids - {''}) & identity or (explicit_brand and explicit_brand == normalize_brand(candidate.get('brand') or '')):
+            result.append(candidate)
+    return result
 
 
 def normalize_retailer(value: Optional[str]) -> Optional[str]:

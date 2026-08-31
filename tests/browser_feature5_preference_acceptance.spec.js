@@ -1,0 +1,14 @@
+const { test, expect } = require('playwright/test');
+test.setTimeout(30000); if (process.env.RUNG_PLAYWRIGHT_CHROMIUM) test.use({ launchOptions: { executablePath: process.env.RUNG_PLAYWRIGHT_CHROMIUM } });
+const ROOT=process.env.RUNG_BROWSER_ROOT||'http://127.0.0.1:5051', USER={email:'feature5-preference@example.com',password:'browser-preference'};
+async function api(page,method,path,body){return page.evaluate(async x=>{const r=await fetch(x.path,{method:x.method,headers:x.body?{'Content-Type':'application/json'}:{},body:x.body?JSON.stringify(x.body):undefined});return {status:r.status,data:await r.json().catch(()=>({}))}}, {method,path,body})}
+async function login(page){await page.goto(ROOT);expect((await api(page,'POST','/api/auth/login',USER)).status).toBe(200);await page.reload();const later=page.getByRole('button',{name:'Set up later'});await later.waitFor({state:'visible',timeout:3000}).catch(()=>{});if(await later.isVisible())await later.click()}
+test('Feature 5 served Build Cart consumes stored preference hierarchy without reload reranking',async({page})=>{
+ const errors=[],failed=[],requests=[];page.on('console',m=>{if(m.type()==='error')errors.push(m.text())});page.on('pageerror',e=>errors.push(e.message));page.on('requestfailed',r=>failed.push(r.url()));page.on('request',r=>requests.push(r.method()+' '+new URL(r.url()).pathname));
+ await login(page);await page.locator('[data-target="shopping"]').click();const build=page.waitForResponse(r=>new URL(r.url()).pathname==='/api/grocery/generate-pay-period-plan'&&r.request().method()==='POST');await page.locator('#buildCartBtn').click();expect((await build).status()).toBe(200);
+ const first=(await api(page,'GET','/api/shopping/current-cart')).data.cart;expect(first.status).toBe('current');
+ const ids=Object.fromEntries(first.lines.map(x=>[x.requirement.base_item,x.product_id]));expect(ids).toMatchObject({'favorite milk':'FAV-FAVORITE','usual coffee':'COFFEE-USUAL','substitute yogurt':'YOGURT-APPROVED',milk:'MILK-LF',shampoo:'SHAMPOO-CHEAP','blocked bread':null});
+ await expect(page.locator('#storeCartContainer')).toContainText('Favorite milk favorite');await expect(page.locator('#storeCartContainer')).toContainText('Approved yogurt');await expect(page.locator('#storeCartContainer')).toContainText('Lactose free milk');
+ const reloadStart=requests.length;await page.reload();await page.locator('[data-target="shopping"]').click();const after=(await api(page,'GET','/api/shopping/current-cart')).data.cart;expect(after).toMatchObject({id:first.id,version:first.version,total:first.total});expect(after.lines.map(x=>x.provider_product_id)).toEqual(first.lines.map(x=>x.provider_product_id));expect(requests.slice(reloadStart).filter(x=>/^(POST|PUT|PATCH|DELETE) /.test(x))).toEqual([]);
+ expect(errors).toEqual([]);expect(failed).toEqual([]);
+});

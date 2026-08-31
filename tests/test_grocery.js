@@ -344,7 +344,8 @@ assertEq(productionTemplate.includes("generateRecipesBtn').addEventListener"), f
 assertEq(productionTemplate.includes("buildCartBtn').addEventListener"), false, 'production has no duplicate inline Rebalance Cart listener');
 assertEq(productionTemplate.includes("rapidSearchBtn').addEventListener"), false, 'production has no duplicate inline quick-search listener');
 assertEq(productionTemplate.includes("if (typeof buildCart === 'function') buildCart();"), false, 'tab navigation does not run a competing cart build');
-assertEq(productionTemplate.includes('chosen.price == null || item.quantity_uncertain || item.packages_to_buy == null'), true, 'unknown quantity stays price-unavailable after product choice');
+assertEq(productionTemplate.includes("'/api/shopping/current-cart/choose-product'"), true, 'product choice is persisted through the authoritative current-cart endpoint');
+assertEq(productionTemplate.includes('item.selected_product = chosen'), false, 'product choice does not locally substitute rendered cart authority');
 assertEq(productionTemplate.includes('if (item.estimated_price != null && item.promo_price != null'), true, 'promo display cannot fabricate an unknown-quantity total');
 assertEq(productionTemplate.includes("'/api/grocery/rebalance/preview'"), true, 'served browser calls authoritative rebalance preview endpoint');
 assertEq(productionTemplate.includes("'/api/grocery/rebalance/apply'"), true, 'served browser calls authoritative rebalance apply endpoint');

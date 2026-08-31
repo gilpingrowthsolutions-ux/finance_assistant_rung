@@ -35,6 +35,8 @@ from models import (  # noqa: E402
     UserPreference,
     UserSetting,
 )
+from services.authoritative_cart import replace_current_from_resolution  # noqa: E402
+from services.selected_store import select_store  # noqa: E402
 
 
 @pytest.fixture()
@@ -807,6 +809,15 @@ def test_17_feedback_record_stores_no_automatic_financial_payload(client):
 
 
 def test_18_shopping_to_finished_shopping_updates_safe_to_spend_once(client):
+    with app.app_context():
+        hid = current_household_id()
+        account = Account.query.filter_by(household_id=hid).one()
+        store = select_store(hid, retailer='walmart', store_id='357', store_name='Walmart', account=account)
+        replace_current_from_resolution(household_id=hid, store_identity_id=store['retail_store_identity_id'], resolved_cart={
+            'subtotal': 45.0, 'total_cart_cost': 45.0, 'cart_items': [{'requirement': {'base_item': 'groceries', 'quantity': 1, 'unit': 'item'},
+            'selected_product': {'product_id': 'm10-sku', 'title': 'Groceries', 'price': 45.0, 'availability': 'in_stock', 'retailer': 'walmart'},
+            'packages_to_buy': 1, 'needs_user_choice': False, 'availability': 'in_stock'}]})
+        db.session.commit()
     before = float(((_summary(client).get("safe_to_spend") or {}).get("safe_to_spend") or 0.0))
 
     stage = client.post(

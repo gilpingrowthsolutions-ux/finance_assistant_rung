@@ -262,7 +262,9 @@ def test_walmart_verified_path_resolves_recipe_requirements(setup):
 
     item = cart["cart_items"][0]
     assert item["keyword"] == "rice"
-    assert item["resolved"] is True
+    # A dimensional recipe requirement identifies a candidate but cannot
+    # truthfully claim package arithmetic without a proven conversion.
+    assert item["resolved"] is False
     assert item["store_id"] == VERIFIED_WALMART_STORE.store_id
     assert item["requirement"]["quantity"] == 2.0
     assert item["requirement"]["unit"] == "cup"
@@ -287,7 +289,7 @@ def test_kroger_verified_path_resolves_recipe_requirements(setup):
 
     item = cart["cart_items"][0]
     assert item["keyword"] == "rice"
-    assert item["resolved"] is True
+    assert item["resolved"] is False
     assert item["store_id"] == VERIFIED_KROGER_STORE.store_id
 
 

@@ -430,6 +430,57 @@ async function setupGroceryInit(deps) {
     var nearbyRoot = document.getElementById('shoppingNearbyStores');
     var permissionState = document.getElementById('shoppingStorePermission');
     var zipInput = document.getElementById('shoppingStoreZip');
+    var reviewDialog = document.getElementById('storeChangeReviewDialog');
+    var reviewBody = document.getElementById('storeChangeReviewBody');
+    var reviewApprove = document.getElementById('storeChangeApproveBtn');
+    var reviewCancel = document.getElementById('storeChangeCancelBtn');
+
+    function showStoreChangeReview(review) {
+      if (!reviewDialog || !reviewBody || !review) return;
+      var current = review.current_cart || {}, proposed = review.reviewed_cart || {};
+      var currentLines = current.lines || [], proposedLines = proposed.lines || [];
+      var currentByRequirement = {};
+      currentLines.forEach(function (line) { currentByRequirement[line.requirement_key || line.id] = line; });
+      var proposedByRequirement = {};
+      proposedLines.forEach(function (line) { proposedByRequirement[line.requirement_key || line.id] = line; });
+      var keys = Object.keys(currentByRequirement);
+      Object.keys(proposedByRequirement).forEach(function (key) { if (keys.indexOf(key) < 0) keys.push(key); });
+      function money(value) { return value == null ? 'Price unresolved' : '$' + Number(value).toFixed(2); }
+      function lineState(line) {
+        if (!line) return 'Not in this cart';
+        if (line.resolution_state === 'unavailable' || line.availability === 'out_of_stock') return 'Unavailable';
+        if (line.resolution_state !== 'resolved' || line.line_total == null) return 'Needs resolution';
+        return money(line.line_total);
+      }
+      var changes = keys.map(function (key) {
+        var before = currentByRequirement[key], after = proposedByRequirement[key];
+        var changed = !before || !after || before.product_id !== after.product_id || before.package_count !== after.package_count || before.line_total !== after.line_total || before.resolution_state !== after.resolution_state || before.availability !== after.availability;
+        if (!changed) return '';
+        return '<div class="list-item"><div><strong>Current: ' + escapeHtml_(before ? (before.title || 'Cart item') : 'Not in this cart') + '</strong><div class="li-meta">' + escapeHtml_(before ? ((before.package_size ? before.package_size + ' · ' : '') + lineState(before)) : '') + '</div><strong>Proposed: ' + escapeHtml_(after ? (after.title || 'Cart item') : 'Not in this cart') + '</strong><div class="li-meta">' + escapeHtml_(after ? ((after.package_size ? after.package_size + ' · ' : '') + lineState(after)) : '') + '</div></div></div>';
+      }).filter(Boolean);
+      var unresolved = proposedLines.filter(function (line) { return line.resolution_state !== 'resolved' || line.availability === 'out_of_stock'; });
+      var currentStore = (review.current_store || {}).name || 'Current store';
+      var proposedStore = (review.proposed_store || {}).name || 'Proposed store';
+      reviewBody.innerHTML = '<div class="list-item"><div><strong>Current store: ' + escapeHtml_(currentStore) + '</strong><div class="li-meta">Current cart total: ' + money(current.total) + '</div></div></div>' +
+        '<div class="list-item"><div><strong>Proposed store: ' + escapeHtml_(proposedStore) + '</strong><div class="li-meta">Proposed cart total: ' + money(proposed.total) + '</div></div></div>' +
+        '<div class="section-label" style="margin:14px 0 6px;">Changed products and prices</div>' +
+        (changes.length ? changes.join('') : '<div class="li-meta">No product or price changes were found.</div>') +
+        (unresolved.length ? '<div class="empty-state error-banner" style="margin-top:12px;"><div class="empty-title">' + unresolved.length + ' proposed item' + (unresolved.length === 1 ? ' needs' : 's need') + ' attention</div><div class="empty-desc">Unavailable or unresolved items remain: ' + escapeHtml_(unresolved.map(function (line) { return line.title || 'Unnamed item'; }).join(', ')) + '.</div></div>' : '');
+      reviewCancel.onclick = async function () {
+        var response = await api_('POST', '/api/shopping/store-change/' + review.id + '/cancel', {});
+        if (!response.ok) { if (flash_) flash_('Could not keep the current store.', 'error'); return; }
+        reviewDialog.close(); if (flash_) flash_('Kept current store', 'success');
+      };
+      reviewApprove.onclick = async function () {
+        var response = await api_('POST', '/api/shopping/store-change/' + review.id + '/approve', {});
+        if (!response.ok) { if (flash_) flash_('Could not switch stores.', 'error'); return; }
+        reviewDialog.close(); await refreshShoppingStoreContext();
+        if (typeof globalThis.renderPersistedCurrentCart === 'function') await globalThis.renderPersistedCurrentCart();
+        if (typeof globalThis.rungRefreshCopilotDashboard === 'function') await globalThis.rungRefreshCopilotDashboard();
+        if (flash_) flash_('Shopping store updated', 'success');
+      };
+      reviewDialog.showModal();
+    }
 
     function storeStatus(title, description, isError) {
       if (!nearbyRoot) return;
@@ -470,6 +521,17 @@ async function setupGroceryInit(deps) {
           });
           choose.disabled = false;
           if (!response.ok) {
+            if (response.data && response.data.error === 'store_change_review_required') {
+              var staged = await api_('POST', '/api/shopping/store-change/start', {
+                retailer: store.retailer, store_id: store.store_id, store_name: store.name,
+                address: store.address || '', postal_code: store.postal_code || location.zip_code || ''
+              });
+              if (staged.ok && staged.data && staged.data.review) {
+                if (storeDialog && typeof storeDialog.close === 'function') storeDialog.close();
+                showStoreChangeReview(staged.data.review);
+                return;
+              }
+            }
             storeStatus('Store was not changed', (response.data && response.data.user_message) || 'Try selecting the store again.', true);
             return;
           }

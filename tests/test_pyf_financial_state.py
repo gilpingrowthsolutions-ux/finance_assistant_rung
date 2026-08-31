@@ -15,10 +15,20 @@ from app import (  # noqa: E402
     app,
 )
 from extensions import db
-from models import Account, Bill, ExpenseTransaction, IncomePlanVersion, UserPreference, UserSetting
+from models import (
+    Account,
+    Bill,
+    ExpenseTransaction,
+    IncomePlanVersion,
+    ShoppingCart,
+    ShoppingCartLine,
+    UserPreference,
+    UserSetting,
+)
 from services.financial_state import apply_balance_delta, set_balance_absolute
 from services.household_context import household_id
 from services.pyf_financial_state import calculate_pyf_snapshot
+from services.selected_store import select_store
 
 
 @pytest.fixture()
@@ -41,6 +51,32 @@ def client():
             Bill(household_id=hid, name="Required fuel", amount=100.0, due_date=datetime.now(timezone.utc) + timedelta(days=3), is_paid=False, is_gas_estimate=True),
             ExpenseTransaction(household_id=hid, description="Established payday", amount=1000.0, category="income", source="manual", local_account_id=account.id, date=datetime.now(timezone.utc) - timedelta(days=5)),
         ])
+        # Finished Shopping now derives money and store truth from a resolved,
+        # persisted cart.  The old browser-supplied trip fixture is obsolete.
+        selected = select_store(hid, retailer="walmart", store_id="357", store_name="Walmart", account=account)
+        cart = ShoppingCart(
+            household_id=hid,
+            retail_store_identity_id=selected["retail_store_identity_id"],
+            status="current",
+            subtotal_cents=10000,
+            total_cents=10000,
+        )
+        db.session.add(cart)
+        db.session.flush()
+        db.session.add(ShoppingCartLine(
+            cart_id=cart.id,
+            requirement_key="manual:pyf-shopping:0",
+            requirement_json='{"item_name":"Household supplies","source_kind":"manual"}',
+            retailer="walmart",
+            provider_product_id="pyf-shopping-sku",
+            title="Household supplies",
+            package_count=1,
+            unit_price_cents=10000,
+            line_total_cents=10000,
+            availability="in_stock",
+            resolution_state="resolved",
+            provenance_json="{}",
+        ))
         db.session.commit()
     yield app.test_client()
 

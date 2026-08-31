@@ -204,17 +204,22 @@ def test_structured_requirement_overrides_legacy_generic_row() -> None:
             brand="Jif",
             variant="creamy",
         )
-        db.session.add(GroceryItem(
+        row = GroceryItem(
             household_id=current_household_id(),
             item_name="Jif Creamy Peanut Butter",
             store_name="Walmart",
             shopping_requirement_json=json.dumps(structured.__dict__),
-        ))
+        )
+        db.session.add(row)
         db.session.commit()
 
         requirements = _active_manual_requirements()
 
-        assert requirements == [structured]
+        assert len(requirements) == 1
+        assert requirements[0].base_item == structured.base_item
+        assert requirements[0].brand == structured.brand
+        assert requirements[0].variant == structured.variant
+        assert requirements[0].source_requirement_id == row.id
 
 
 def test_more_informative_recent_structure_preserves_quantity_and_specificity() -> None:
@@ -230,17 +235,20 @@ def test_more_informative_recent_structure_preserves_quantity_and_specificity() 
             quantity=2,
             unit="bottle",
         )
-        db.session.add(GroceryItem(
+        row = GroceryItem(
             household_id=current_household_id(),
             item_name=structured.item_name,
             store_name="Walmart",
             shopping_requirement_json=json.dumps(structured.__dict__),
-        ))
+        )
+        db.session.add(row)
         db.session.commit()
 
         requirements = _active_manual_requirements()
 
-        assert requirements == [structured]
+        assert len(requirements) == 1
+        assert (requirements[0].quantity, requirements[0].unit) == (2.0, "bottle")
+        assert requirements[0].source_requirement_id == row.id
 
 
 def test_exact_generic_duplicates_collapse_to_one_package() -> None:

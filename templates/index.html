@@ -2362,6 +2362,12 @@
       </div>
     </dialog>
 
+    <dialog id="storeChangeReviewDialog" class="stage-dialog" aria-labelledby="storeChangeReviewTitle">
+      <div class="stage-dialog-head"><div><h2 id="storeChangeReviewTitle" style="font-size:1.05rem;margin:0;">Review Store Change</h2><div style="font-size:.8rem;color:var(--text-mute);margin-top:3px;">Your current store and cart stay active until you approve.</div></div><span class="stage-badge">[Review]</span></div>
+      <div id="storeChangeReviewBody" class="stage-dialog-body"></div>
+      <div class="stage-dialog-foot"><div style="font-size:.8rem;color:var(--text-mute);">Prices and products are resolved for the proposed physical store.</div><div class="stage-action-group"><button id="storeChangeCancelBtn" class="btn is-primary" type="button">Keep Current Store</button><button id="storeChangeApproveBtn" class="btn is-ghost" type="button">Switch Store</button></div></div>
+    </dialog>
+
     <dialog id="finishedShoppingConfirmDialog" class="stage-dialog" aria-labelledby="finishedShoppingConfirmTitle">
       <div class="stage-dialog-head">
         <div>
@@ -2875,6 +2881,9 @@
         if (contentPane) contentPane.scrollTop = 0;
         if (target === 'shopping') {
           if (typeof refreshActiveRecipesExpander === 'function') refreshActiveRecipesExpander();
+          // A persisted cart is the normal Shopping view authority.  Opening
+          // this tab must not require (or trigger) a new product resolution.
+          if (typeof renderPersistedCurrentCart === 'function') renderPersistedCurrentCart();
         }
       }
       btns.forEach(function (btn) {
@@ -3439,6 +3448,9 @@
         if (recommendations) recommendations.innerHTML = '<div class="copilot-empty">Recommendations could not be loaded. No state was changed.</div>';
       }
     }
+    // Shopping invokes this after an approved canonical-store transition so
+    // an already-open Copilot panel cannot present stale shared context.
+    window.rungRefreshCopilotDashboard = refreshCopilotDashboard;
 
     function initCopilot() {
       var input = document.getElementById('copilotInput');
@@ -5120,6 +5132,7 @@
         var diffPrefix = diff > 0 ? '+' : '';
         dialogBody.innerHTML = '' +
           '<div style="display:grid;gap:8px;">' +
+          '<div><strong>Store:</strong> ' + escapeHtml(preview.store_name || body.store_name || 'Selected store') + '</div>' +
           '<div><strong>Grocery spending:</strong> ' + fmt(preview.grocery_spending || actual) + '</div>' +
           '<div><strong>Planned:</strong> ' + fmt(preview.planned_total || planned) + '</div>' +
           '<div><strong>Difference:</strong> ' + diffPrefix + fmt(Math.abs(diff)) + '</div>' +
@@ -5260,10 +5273,8 @@
         if (key.indexOf(contextKey + '|') === 0) protectedKeys.push(key.slice(contextKey.length + 1));
       });
       return {
-        cart_items: activeCartItems,
         budget_limit: previewBudget,
-        cart_context: activeCartContext,
-        protected_choice_keys: protectedKeys
+        operation_id: 'rebalance-' + Date.now()
       };
     }
 
@@ -5296,20 +5307,18 @@
         return;
       }
       activeRebalancePreview = response.data || {};
-      var changes = activeRebalancePreview.changes || [];
+      var changes = (activeRebalancePreview.proposal && activeRebalancePreview.proposal.changes) || [];
       status.textContent = rebalanceStatusMessage(activeRebalancePreview);
       if (!changes.length) {
         body.innerHTML = '<div class="empty">' + escapeHtml(status.textContent) + '</div>';
         return;
       }
       body.innerHTML = changes.map(function (change) {
-        var current = change.current_product || {};
-        var proposed = change.proposed_product || {};
-        return '<div class="list-item" data-rebalance-choice="' + escapeHtml(change.choice_key || '') + '">' +
-          '<div><div class="li-title"><strong>' + escapeHtml(change.item_name || change.choice_key || 'Item') + '</strong></div>' +
-          '<div class="li-meta">' + escapeHtml(current.title || 'Current product') + ' (' + fmt(Number(current.line_price_cents || 0) / 100) + ')' +
-          ' → ' + escapeHtml(proposed.title || 'Proposed product') + ' (' + fmt(Number(proposed.line_price_cents || 0) / 100) + ')</div></div>' +
-          '<div class="li-amount" style="color:var(--accent);">Save ' + fmt(Number(change.savings_cents || 0) / 100) + '</div></div>';
+        return '<div class="list-item">' +
+          '<div><div class="li-title"><strong>' + escapeHtml(change.requirement_key || 'Item') + '</strong></div>' +
+          '<div class="li-meta">' + escapeHtml(change.old_product_id || 'Current product') + ' → ' + escapeHtml(change.proposed_title || 'Proposed product') +
+          ' · ' + escapeHtml(change.proposed_package_size || 'package') + '</div></div>' +
+          '<div class="li-amount" style="color:var(--accent);">Save ' + fmt(Number(change.old_line_total || 0) - Number(change.proposed_line_total || 0)) + '</div></div>';
       }).join('') + '<div style="margin-top:12px;color:var(--text-mute);">Proposed total: <strong>' + fmt(Number(activeRebalancePreview.optimized_total_cents || 0) / 100) + '</strong></div>';
       applyBtn.disabled = false;
     }
@@ -5320,6 +5329,7 @@
       var applyBtn = document.getElementById('rebalanceApplyBtn');
       if (!dialog || !cancelBtn || !applyBtn) return;
       cancelBtn.addEventListener('click', function () {
+        if (activeRebalancePreview && activeRebalancePreview.proposal) api('POST', '/api/grocery/rebalance/' + activeRebalancePreview.proposal.id + '/reject', {});
         activeRebalancePreview = null;
         if (typeof dialog.close === 'function') dialog.close();
       });
@@ -5327,33 +5337,119 @@
         if (rebalanceApplyPending || !activeRebalancePreview) return;
         rebalanceApplyPending = true;
         applyBtn.disabled = true;
-        var payload = rebalanceRequestPayload();
-        payload.preview = {
-          context_fingerprint: activeRebalancePreview.context_fingerprint,
-          proposal_fingerprint: activeRebalancePreview.proposal_fingerprint,
-          protected_choice_keys: activeRebalancePreview.protected_choice_keys || []
-        };
+        var payload = { proposal_id: activeRebalancePreview.proposal && activeRebalancePreview.proposal.id };
         var response = await api('POST', '/api/grocery/rebalance/apply', payload);
         if (!response.ok) {
           rebalanceApplyPending = false;
           applyBtn.disabled = false;
-          flash(response.data && response.data.code === 'stale_rebalance_preview' ? 'The cart changed. Review a fresh rebalance preview.' : 'Rebalance could not be applied. Your cart was not changed.', 'error');
+          flash(response.data && response.data.code === 'stale_rebalance_proposal' ? 'The cart changed. Review a fresh rebalance preview.' : 'Rebalance could not be applied. Your cart was not changed.', 'error');
           return;
         }
-        var changes = response.data.applied_choices || [];
-        var contextKey = getCartContextKey(activeCartContext);
-        changes.forEach(function (change) {
-          var product = change.proposed_product || {};
-          var identity = product.us_item_id || product.product_id;
-          if (change.choice_key && identity) oneTimeCartChoices[contextKey + '|' + change.choice_key] = String(identity);
-        });
-        persistApprovedRebalanceChoices(activeCartContext, changes);
         activeRebalancePreview = null;
         rebalanceApplyPending = false;
         if (typeof dialog.close === 'function') dialog.close();
         flash('Approved rebalance applied', 'success');
-        await buildCart();
+        // The server-approved proposal already mutated the authoritative
+        // current cart. Refresh that persisted record; do not start a new
+        // unrelated cart resolution after approval.
+        await renderPersistedCurrentCart();
       });
+    }
+
+    async function renderPersistedCurrentCart() {
+      var renderSeq = cartBuildSeq;
+      var response = await api('GET', '/api/shopping/current-cart');
+      // An explicit Build Cart begun while this read was in flight owns the
+      // visible state. Do not let a late persisted-cart read paint over it.
+      if (renderSeq !== cartBuildSeq) return;
+      if (!response.ok || !response.data) return;
+      var cart = response.data.cart;
+      if (!cart) return;
+      var selectedStore = response.data.selected_store || {};
+      var container = document.getElementById('storeCartContainer');
+      if (!container) return;
+      activeCartContext = normalizeCartContext(selectedStore, selectedStore.retailer || '', selectedStore.name || '');
+      activeCartItems = (cart.lines || []).map(function (line) {
+        return { requirement: { base_item: line.requirement_key }, selected_product: {
+          product_id: line.product_id, us_item_id: line.us_item_id, title: line.title,
+          package_size: line.package_size, price: line.unit_price, availability: line.availability
+        }, packages_to_buy: line.package_count, estimated_price: line.line_total, resolved: line.resolution_state === 'resolved' };
+      });
+      activeCartSnapshot = {
+        planned_total: Number(cart.total || 0), tax_included: true,
+        cart_signature: 'cart:' + cart.id + ':v' + cart.version,
+        retailer: activeCartContext.retailer, store_id: activeCartContext.store_id, store_name: activeCartContext.store_name
+      };
+      container.innerHTML = '';
+      (cart.lines || []).forEach(function (line) {
+        var row = document.createElement('div');
+        row.className = 'list-item store-cart-item';
+        row.setAttribute('data-cart-current-line', String(line.id));
+        var count = Number(line.package_count || 1);
+        var price = line.line_total == null ? 'Price unavailable' : fmt(line.line_total);
+        var availability = line.resolution_state === 'unresolved'
+          ? 'Needs package resolution'
+          : line.resolution_state === 'unavailable' || line.availability === 'out_of_stock'
+            ? 'Unavailable'
+            : line.availability === 'in_stock' ? 'In stock' : 'Availability unknown';
+        var requirement = line.requirement || {};
+        var requirementContext = requirement.source_kind === 'recipe'
+          ? 'From ' + (requirement.source_recipe_title || 'active recipe') + ' · ' + (requirement.source_text || requirement.item_name || requirement.base_item || '')
+          : (requirement.item_name || requirement.base_item || line.requirement_key);
+        var alternatives = (line.alternatives || []).map(function (alternative) {
+          var identity = String(alternative.us_item_id || alternative.product_id || '');
+          if (!identity) return '';
+          return '<div class="row" style="gap:6px;align-items:stretch;margin-top:6px;"><button type="button" class="btn cart-persisted-product-choice" data-cart-id="' + escapeHtml(String(cart.id)) + '" data-line-id="' + escapeHtml(String(line.id)) + '" data-version="' + escapeHtml(String(cart.version)) + '" data-product-id="' + encodeURIComponent(identity) + '" style="display:block;flex:1;text-align:left;">' +
+            '<span class="li-meta">Alternative</span><br><strong>' + escapeHtml(alternative.title || 'Product') + '</strong>' +
+            '<br><span class="li-meta">Saved when this cart was built · ' + escapeHtml(alternative.package_size || 'Package size unavailable') + ' · ' + (alternative.price == null ? 'Price unavailable' : fmt(alternative.price)) + '</span></button>' +
+            '<button type="button" class="btn cart-persisted-block-product" data-product-id="' + encodeURIComponent(String(alternative.product_id || '')) + '" data-us-item-id="' + encodeURIComponent(String(alternative.us_item_id || '')) + '" data-retailer="' + encodeURIComponent(String(alternative.retailer || activeCartContext.retailer || '')) + '" aria-label="Do not automatically select ' + escapeHtml(alternative.title || 'this product') + '">⋯</button></div>';
+        }).join('');
+        row.innerHTML = '<div class="cart-item-main"><div class="li-title"><strong class="cart-current-title">' + escapeHtml(line.title || 'Unresolved item') + '</strong></div>' +
+          '<div class="li-meta cart-current-count">' + (count > 1 ? count + ' packages' : '') + '</div>' +
+          '<div class="li-meta cart-current-package">' + escapeHtml(line.package_size || '') + '</div>' +
+          '<div class="li-meta cart-current-requirement">' + escapeHtml(requirementContext) + '</div>' +
+          '<div class="li-meta">' + escapeHtml(availability) + '</div></div>' +
+          '<div class="li-amount cart-current-price">' + price + '</div>' +
+          (alternatives ? '<details style="margin-top:8px;"><summary class="btn">More options</summary>' + alternatives + '</details>' : '') +
+          '<div class="row" style="grid-column:1/-1;gap:8px;flex-wrap:wrap;margin-top:8px;"><span class="li-meta">Saved current product</span><button type="button" class="btn cart-persisted-save-preference" data-product-id="' + encodeURIComponent(String(line.us_item_id || line.product_id || '')) + '" data-base-item="' + encodeURIComponent(String(requirement.base_item || line.requirement_key || '')) + '">Make this my usual</button></div>';
+        container.appendChild(row);
+      });
+      container.querySelectorAll('.cart-persisted-product-choice').forEach(function (button) {
+        button.addEventListener('click', async function () {
+          var choice = await api('POST', '/api/shopping/current-cart/choose-product', {
+            cart_id: Number(button.getAttribute('data-cart-id')), line_id: Number(button.getAttribute('data-line-id')),
+            version: Number(button.getAttribute('data-version')), product_id: decodeURIComponent(button.getAttribute('data-product-id') || '')
+          });
+          if (!choice.ok) { flash((choice.data || {}).error || 'That product could not be selected.', 'error'); return; }
+          await renderPersistedCurrentCart();
+        });
+      });
+      container.querySelectorAll('.cart-persisted-block-product').forEach(function (button) {
+        button.addEventListener('click', async function () {
+          var response = await api('POST', '/api/retail/product-block', { block_type: 'exact_product', retailer: decodeURIComponent(button.getAttribute('data-retailer') || ''), product_id: decodeURIComponent(button.getAttribute('data-product-id') || '') || null, us_item_id: decodeURIComponent(button.getAttribute('data-us-item-id') || '') || null });
+          if (!response.ok) { flash('Could not save that product block right now.', 'error'); return; }
+          button.disabled = true; flash('Rung will not auto-select this product again.', 'success');
+        });
+      });
+      container.querySelectorAll('.cart-persisted-save-preference').forEach(function (button) {
+        button.addEventListener('click', async function () {
+          var response = await api('POST', '/api/retail/product-preference', { base_item: decodeURIComponent(button.getAttribute('data-base-item') || ''), preference_type: 'usual', retailer: activeCartContext.retailer, store_id: activeCartContext.store_id, product_identity: decodeURIComponent(button.getAttribute('data-product-id') || '') });
+          if (!response.ok) { flash('Could not save that usual item right now.', 'error'); return; }
+          button.disabled = true; button.textContent = 'Usual saved';
+        });
+      });
+      if (!cart.lines || !cart.lines.length) container.innerHTML = '<div class="empty">No items to display. Build your cart from active recipes and household needs.</div>';
+      var total = Number(cart.total || 0);
+      if (document.getElementById('groceryTotal')) document.getElementById('groceryTotal').textContent = fmt(total);
+      if (document.getElementById('cartSubtotal')) document.getElementById('cartSubtotal').textContent = fmt(cart.subtotal || 0);
+      if (document.getElementById('cartItemCount')) document.getElementById('cartItemCount').textContent = String((cart.lines || []).length) + ' items';
+      if (document.getElementById('groceryMeta')) document.getElementById('groceryMeta').textContent = 'Current saved cart · ' + (activeCartContext.store_name || 'selected store');
+      // The checkout panel is initialized before this persisted-cart read.
+      // Keep its disclosed planned total aligned with the durable cart rather
+      // than leaving the initial empty-cart value visible.
+      var finishedSummary = document.getElementById('finishedShoppingSummary');
+      if (finishedSummary) finishedSummary.textContent = 'Planned total: ' + fmt(total);
+      if (typeof syncFinishedShoppingStatusFromServer === 'function') syncFinishedShoppingStatusFromServer();
     }
 
     async function buildCart() {
@@ -5391,12 +5487,25 @@
       // --- Gather store + budget preferences from the Grocery tab form ---
       var storeName = canonicalStore.name || canonicalStore.retailer || '';
       var budgetLimit = parseFloat((document.getElementById('budgetInput') || {}).value) || null;
+      // Context keys prevent a Store A choice from leaking into Store B in the
+      // browser. The server resolver owns the persisted choice and expects
+      // requirement keys only, so send just choices for this exact store.
+      var serverOneTimeChoices = {};
+      var cartContextPrefix = [canonicalStore.retailer || '', canonicalStore.store_id || ''].join('|') + '|';
+      Object.keys(oneTimeCartChoices).forEach(function (storedKey) {
+        // Store name is display data and can be normalized differently by a
+        // provider response. Retailer + physical store ID are the authority.
+        if (storedKey.indexOf(cartContextPrefix) !== 0) return;
+        var requirementKey = storedKey.slice(storedKey.lastIndexOf('|') + 1);
+        if (requirementKey && oneTimeCartChoices[storedKey]) serverOneTimeChoices[requirementKey] = oneTimeCartChoices[storedKey];
+      });
 
       // --- Single call to the full pay-period pipeline ---
       var planResp = await api('POST', '/api/grocery/generate-pay-period-plan', {
         recipe_ids: ids,
         store_name: storeName,
         budget_limit: budgetLimit,
+        one_time_choices: serverOneTimeChoices,
       });
 
       if (buildSeq !== cartBuildSeq) return;
@@ -5416,37 +5525,6 @@
       activeCartContext = normalizeCartContext(d, canonicalStore.retailer || '', storeName);
       restoreApprovedRebalanceChoices(activeCartContext);
       var items = d.cart_items || [];
-      items.forEach(function (item) {
-        var requirement = item.requirement || {};
-        var choiceKey = String(requirement.base_item || item.keyword || '').toLowerCase();
-        var chosenId = oneTimeCartChoices[getCartContextKey(activeCartContext) + '|' + choiceKey];
-        if (!chosenId || !Array.isArray(item.alternatives)) return;
-        var chosenIndex = item.alternatives.findIndex(function (candidate) {
-          return String(candidate.us_item_id || candidate.product_id || '') === String(chosenId);
-        });
-        if (chosenIndex < 0) return;
-        var chosen = item.alternatives.splice(chosenIndex, 1)[0];
-        if (item.selected_product) item.alternatives.unshift(item.selected_product);
-        item.selected_product = chosen;
-        item.needs_user_choice = false;
-        item.selection_confidence = 'user_selected';
-        item.resolved = true;
-        item.product_label = chosen.title;
-        item.package_size = chosen.package_size;
-        item.availability = chosen.availability || 'unknown';
-        item.fulfillment = chosen.fulfillment || null;
-        item.regular_price = chosen.regular_price;
-        item.promo_price = chosen.promo_price;
-        item.unit_price = chosen.price;
-        item.estimated_price = chosen.price == null || item.quantity_uncertain || item.packages_to_buy == null
-          ? null
-          : Number(chosen.price) * Math.max(1, Number(item.packages_to_buy));
-        item.confirmed_local_store = chosen.verified_location === true;
-        item.retrieved_at = chosen.retrieved_at || item.retrieved_at;
-        item.preferred_product = false;
-        item.suggested = false;
-        item.suggestion_reason = null;
-      });
       var subtotal = items.reduce(function (sum, item) {
         return sum + (item.resolved && item.estimated_price != null ? Number(item.estimated_price) : 0);
       }, 0);
@@ -5514,7 +5592,9 @@
               }
               var quantityHtml = item.packages_to_buy > 1 ? item.packages_to_buy + ' packages' : '';
               var fulfillment = item.fulfillment || {};
-              var availabilityText = item.availability === 'in_stock'
+              var availabilityText = item.packages_to_buy == null && item.resolved === false && item.selected_product
+                ? 'Needs package resolution'
+                : item.availability === 'in_stock'
                 ? 'In stock'
                 : item.availability === 'out_of_stock' ? 'Unavailable'
                 : fulfillment.curbside === true ? 'Pickup available'
@@ -5529,12 +5609,14 @@
                 }
               }
               var requirement = item.requirement || {};
+              var currentLineKey = String(requirement.source_kind || 'manual') + ':requirement:' + String(requirement.source_requirement_id || '');
+              row.setAttribute('data-cart-current-line-key', currentLineKey);
               var recipeRequirementHtml = requirement.source_kind === 'recipe'
                 ? '<span class="recipe-source-badge">\u{1F373} ' + escapeHtml(requirement.source_recipe_title || 'recipe') + '</span>' +
                   '<div class="li-meta">From ' + escapeHtml(requirement.source_recipe_title || 'active recipe') +
                   ' · ' + escapeHtml(requirement.source_text || requirement.item_name || requirement.base_item || '') + '</div>'
                 : '';
-              if (item.package_resolution_uncertain) {
+              if (item.package_resolution_uncertain || item.packages_to_buy == null) {
                 recipeRequirementHtml += '<div class="li-meta" style="color:var(--warn);">Package quantity needs review</div>';
               }
               var choiceKey = String(requirement.base_item || item.keyword || '').toLowerCase();
@@ -5594,36 +5676,61 @@
                     var altId = String(alt.us_item_id || alt.product_id || '');
                     var altFulfillment = alt.fulfillment || {};
                     var altAvailability = alt.availability === 'in_stock' ? 'In stock' : alt.availability === 'out_of_stock' ? 'Unavailable' : altFulfillment.curbside === true ? 'Pickup available' : altFulfillment.inStore === true ? 'Available for in-store fulfillment' : 'Availability unknown';
-                    return '<button type="button" class="btn cart-product-choice" data-context-key="' + encodeURIComponent(contextKey) + '" data-choice-key="' + encodeURIComponent(choiceKey) + '" data-product-id="' + encodeURIComponent(altId) + '" style="display:block;width:100%;text-align:left;margin-bottom:6px;">' +
+                    var requirementKey = String((item.requirement || {}).source_kind || 'manual') + ':requirement:' + String((item.requirement || {}).source_requirement_id || '');
+                    return '<div class="row" style="gap:6px;align-items:stretch;margin-bottom:6px;"><button type="button" class="btn cart-product-choice" data-context-key="' + encodeURIComponent(contextKey) + '" data-choice-key="' + encodeURIComponent(choiceKey) + '" data-requirement-key="' + encodeURIComponent(requirementKey) + '" data-product-id="' + encodeURIComponent(altId) + '" style="display:block;flex:1;text-align:left;">' +
                       '<strong>' + escapeHtml(alt.title || 'Product') + '</strong>' +
                       (alt.package_size ? '<br><span class="li-meta">' + escapeHtml(alt.package_size) + '</span>' : '<br><span class="li-meta">Package size unavailable</span>') +
-                      '<br><span class="li-meta">' + altPrice + ' · ' + escapeHtml(altAvailability) + ' · ' + escapeHtml(item.store_name || activeCartContext.store_name || storeName || 'selected store') + '</span></button>';
+                      '<br><span class="li-meta">' + altPrice + ' · ' + escapeHtml(altAvailability) + ' · ' + escapeHtml(item.store_name || activeCartContext.store_name || storeName || 'selected store') + '</span></button>' +
+                      '<button type="button" class="btn cart-block-product" data-context-key="' + encodeURIComponent(contextKey) + '" data-choice-key="' + encodeURIComponent(choiceKey) + '" data-product-id="' + encodeURIComponent(String(alt.product_id || '')) + '" data-us-item-id="' + encodeURIComponent(String(alt.us_item_id || '')) + '" data-retailer="' + encodeURIComponent(String(alt.retailer || activeCartContext.retailer || '')) + '" aria-label="Do not automatically select ' + escapeHtml(alt.title || 'this product') + '">⋯</button></div>';
                   }).join('') + '</div></details>';
               }
             var displayTitle = item.needs_user_choice
               ? (requirement.base_item || item.keyword || 'Product')
               : (item.product_label || item.keyword || '');
-            row.innerHTML = '<div class="cart-item-main"><div class="li-title"><strong>' + escapeHtml(displayTitle) + '</strong></div>' +
-                '<div class="li-meta">' + quantityHtml + '</div>' +
-              pkg +
+            row.innerHTML = '<div class="cart-item-main"><div class="li-title"><strong class="cart-current-title">' + escapeHtml(displayTitle) + '</strong></div>' +
+                '<div class="li-meta cart-current-count">' + quantityHtml + '</div>' +
+              pkg.replace('class="li-meta"', 'class="li-meta cart-current-package"') +
                 recipeRequirementHtml +
                 '<div class="li-meta">' + escapeHtml(availabilityText) + '</div>' +
                 checkedText +
               sourceUi.detailHtml +
                 sourceUi.badgeHtml + '</div>' +
-                '<div class="li-amount">' + priceHtml + '</div>' +
+                '<div class="li-amount cart-current-price">' + priceHtml + '</div>' +
                 alternativesHtml +
                 preferenceControls;
             container.appendChild(row);
           });
           container.querySelectorAll('.cart-product-choice').forEach(function (button) {
-            button.addEventListener('click', function () {
+            button.addEventListener('click', async function () {
               var contextKey = decodeURIComponent(button.getAttribute('data-context-key') || '');
               var key = decodeURIComponent(button.getAttribute('data-choice-key') || '');
+              var requirementKey = decodeURIComponent(button.getAttribute('data-requirement-key') || '');
               var productId = decodeURIComponent(button.getAttribute('data-product-id') || '');
               if (!key || !productId) return;
+              var current = await api('GET', '/api/shopping/current-cart');
+              var cart = current.ok && current.data && current.data.cart;
+              var line = cart && (cart.lines || []).find(function (row) { return String(row.requirement_key || '') === requirementKey; });
+              if (!cart || !line) { flash('Reload the cart before choosing a product.', 'error'); return; }
+              var choice = await api('POST', '/api/shopping/current-cart/choose-product', {
+                cart_id: cart.id, line_id: line.id, version: cart.version, product_id: productId
+              });
+              if (!choice.ok) { flash((choice.data || {}).error || 'That product could not be selected.', 'error'); return; }
               oneTimeCartChoices[contextKey + '|' + key] = productId;
-              buildCart();
+              var updatedCart = choice.data && choice.data.cart;
+              var updatedLine = updatedCart && (updatedCart.lines || []).find(function (row) { return String(row.id) === String(line.id); });
+              var currentRow = button.closest('.store-cart-item');
+              if (updatedLine && currentRow) {
+                var itemTitle = currentRow.querySelector('.cart-current-title');
+                var itemPrice = currentRow.querySelector('.cart-current-price');
+                var itemPackage = currentRow.querySelector('.cart-current-package');
+                if (itemTitle) itemTitle.textContent = updatedLine.title || '';
+                if (itemPrice) itemPrice.textContent = updatedLine.line_total == null ? 'Price unavailable' : fmt(updatedLine.line_total);
+                if (itemPackage) itemPackage.textContent = updatedLine.package_size || '';
+                if (document.getElementById('groceryTotal')) document.getElementById('groceryTotal').textContent = fmt(updatedCart.total || 0);
+                if (document.getElementById('cartSubtotal')) document.getElementById('cartSubtotal').textContent = fmt(updatedCart.subtotal || 0);
+                activeCartSnapshot.planned_total = Number(updatedCart.total || 0);
+                activeCartSnapshot.cart_signature = 'cart:' + updatedCart.id + ':v' + updatedCart.version;
+              }
             });
           });
           container.querySelectorAll('.cart-save-preference').forEach(function (button) {
@@ -5674,6 +5781,28 @@
               delete oneTimeCartChoices[contextKey + '|' + key];
               flash('Product preference forgotten', 'success');
               buildCart();
+            });
+          });
+          container.querySelectorAll('.cart-block-product').forEach(function (button) {
+            button.addEventListener('click', async function () {
+              var contextKey = decodeURIComponent(button.getAttribute('data-context-key') || '');
+              var choiceKey = decodeURIComponent(button.getAttribute('data-choice-key') || '');
+              var productId = decodeURIComponent(button.getAttribute('data-product-id') || '');
+              var usItemId = decodeURIComponent(button.getAttribute('data-us-item-id') || '');
+              var retailer = decodeURIComponent(button.getAttribute('data-retailer') || '');
+              if (!retailer || (!productId && !usItemId)) return;
+              button.disabled = true;
+              var response = await api('POST', '/api/retail/product-block', {
+                block_type: 'exact_product', retailer: retailer,
+                product_id: productId || null, us_item_id: usItemId || null
+              });
+              if (!response.ok) {
+                button.disabled = false;
+                flash('Could not save that product block right now.', 'error');
+                return;
+              }
+              delete oneTimeCartChoices[contextKey + '|' + choiceKey];
+              flash('Rung will not auto-select this product again.', 'success');
             });
           });
           container.querySelectorAll('.cart-save-substitution').forEach(function (button) {

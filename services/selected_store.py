@@ -176,3 +176,15 @@ def select_store(
 
     db.session.flush()
     return _payload_from_identity(row, payload)
+
+
+def ensure_store_identity(*, retailer: str, store_id: str, store_name: str, address: str = "", city: str = "", state: str = "", postal_code: str = "") -> RetailStoreIdentity:
+    """Register a discovered physical store without selecting it for anyone."""
+    retailer, store_id = _clean(retailer).lower(), _clean(store_id)
+    if not retailer or not store_id:
+        raise ValueError("retailer and store_id are required")
+    row = RetailStoreIdentity.query.filter_by(retailer=retailer, retailer_store_id=store_id).first()
+    if row is None:
+        row = RetailStoreIdentity(retailer=retailer, retailer_store_id=store_id, store_name=_clean(store_name) or retailer.title(), address=_clean(address) or None, city=_clean(city) or None, state=_clean(state) or None, postal_code=_clean(postal_code) or None)
+        db.session.add(row); db.session.flush()
+    return row

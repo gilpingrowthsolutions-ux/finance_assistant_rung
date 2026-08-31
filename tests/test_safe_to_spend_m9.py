@@ -29,12 +29,15 @@ from models import (  # noqa: E402
     PlaidItem,
     PlaidTransaction,
     ShoppingTripCompletion,
+    ShoppingCart,
+    ShoppingCartLine,
     UserPreference,
     UserSetting,
     UsageEvent,
 )
 from services.transaction_reconciliation import project_plaid_transactions  # noqa: E402
 from services.household_context import household_id as current_household_id  # noqa: E402
+from services.selected_store import select_store  # noqa: E402
 
 
 @pytest.fixture()
@@ -83,6 +86,20 @@ def _safe_amount(client) -> float:
 
 def _components(client) -> dict:
     return (_safe(client).get("components") or {})
+
+
+def _current_resolved_cart(total: float) -> None:
+    """Install the durable cart that Finished Shopping is allowed to complete."""
+    with app.app_context():
+        hid = current_household_id()
+        account = Account.query.filter_by(household_id=hid).one()
+        selected = select_store(hid, retailer="walmart", store_id="357", store_name="Walmart", account=account)
+        ShoppingCart.query.filter_by(household_id=hid, status="current").update({"status": "retired"})
+        cents = round(total * 100)
+        cart = ShoppingCart(household_id=hid, retail_store_identity_id=selected["retail_store_identity_id"], status="current", subtotal_cents=cents, total_cents=cents)
+        db.session.add(cart); db.session.flush()
+        db.session.add(ShoppingCartLine(cart_id=cart.id, requirement_key=f"manual:m9:{cents}", requirement_json="{}", retailer="walmart", provider_product_id=f"m9-{cents}", title="Shopping requirement", package_count=1, unit_price_cents=cents, line_total_cents=cents, availability="in_stock", resolution_state="resolved", provenance_json="{}"))
+        db.session.commit()
 
 
 def _next_income_date(client) -> str | None:
@@ -239,6 +256,7 @@ def test_missing_payday_is_truthful(client):
 
 def test_completed_grocery_spend_not_double_counted(client):
     before = _safe_amount(client)
+    _current_resolved_cart(100.0)
     stage = client.post(
         "/api/grocery/finished-shopping/stage",
         json={"planned_total": 80.0, "actual_total": 100.0, "use_planned_total": False, "retailer": "walmart", "store_name": "Walmart", "store_id": "357", "cart_signature": "sig-a"},
@@ -263,6 +281,7 @@ def test_remaining_grocery_commitment_protected_correctly(client):
 
 
 def test_finished_shopping_actual_amount_drives_financial_truth(client):
+    _current_resolved_cart(83.25)
     stage = client.post(
         "/api/grocery/finished-shopping/stage",
         json={"planned_total": 70.0, "actual_total": 83.25, "use_planned_total": False, "retailer": "walmart", "store_name": "Walmart", "store_id": "357", "cart_signature": "sig-b"},
@@ -276,7 +295,7 @@ def test_finished_shopping_actual_amount_drives_financial_truth(client):
     with app.app_context():
         trip = ShoppingTripCompletion.query.filter_by(operation_id=op_id).first()
         assert trip is not None
-        assert trip.planned_total_cents == 7000
+        assert trip.planned_total_cents == 8325
         assert trip.actual_total_cents == 8325
 
 
@@ -468,6 +487,7 @@ def test_finished_shopping_updates_cash_and_grocery_remaining_without_creating_m
     before_checking = round(float(before_components.get("usable_money") or 0.0), 2)
     before_remaining = round(float(before_components.get("groceries_remaining") or 0.0), 2)
 
+    _current_resolved_cart(130.0)
     stage = client.post(
         "/api/grocery/finished-shopping/stage",
         json={"planned_total": 90.0, "actual_total": 130.0, "use_planned_total": False, "retailer": "walmart", "store_name": "Walmart", "store_id": "357", "cart_signature": "sig-m9-fs"},

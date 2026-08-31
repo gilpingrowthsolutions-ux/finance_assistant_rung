@@ -17,6 +17,8 @@ os.environ["RUNG_HOUSEHOLD_CONTEXT_SECRET"] = "gate2a-test-secret"
 from app import app
 from extensions import db
 from models import Account, Bill, ExpenseTransaction, GroceryItem, Household, ShoppingTripCompletion
+from services.authoritative_cart import replace_current_from_resolution
+from services.selected_store import select_store
 
 
 def _sign(public_id: str) -> str:
@@ -117,6 +119,8 @@ os.environ["RUNG_HOUSEHOLD_CONTEXT_SECRET"] = "gate2a-test-secret"
 from app import app
 from extensions import db
 from models import Account, Bill, ExpenseTransaction, GroceryItem, Household, ShoppingTripCompletion
+from services.authoritative_cart import replace_current_from_resolution
+from services.selected_store import select_store
 
 
 def _sign(public_id: str) -> str:
@@ -151,6 +155,11 @@ with app.app_context():
     item_a = GroceryItem(household_id=house_a.id, item_name="A item", estimated_price=1.0, store_name="Store A")
     item_b = GroceryItem(household_id=house_b.id, item_name="B item", estimated_price=1.0, store_name="Store B")
     db.session.add_all([bill_a, bill_b, tx_a, tx_b, item_a, item_b])
+    store_a = select_store(house_a.id, retailer="walmart", store_id="357", store_name="Walmart", account=acc_a)
+    store_b = select_store(house_b.id, retailer="walmart", store_id="357", store_name="Walmart", account=acc_b)
+    cart = {"subtotal": 20.0, "total_cart_cost": 20.0, "cart_items": [{"requirement": {"base_item": "groceries"}, "selected_product": {"product_id": "fixture", "title": "Groceries", "price": 20.0, "availability": "in_stock", "retailer": "walmart"}, "packages_to_buy": 1, "needs_user_choice": False, "availability": "in_stock"}]}
+    replace_current_from_resolution(household_id=house_a.id, store_identity_id=store_a["retail_store_identity_id"], resolved_cart=cart)
+    replace_current_from_resolution(household_id=house_b.id, store_identity_id=store_b["retail_store_identity_id"], resolved_cart=cart)
     db.session.commit()
 
 house_a_public_id = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"

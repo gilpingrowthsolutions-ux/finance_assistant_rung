@@ -589,6 +589,36 @@ class RetailProductPreference(ModelBase):
     )
 
 
+class RetailProductBlock(ModelBase):
+    """Persistent household negative retail preference, never a safety rule."""
+    __tablename__ = 'retail_product_block'
+    id = db.Column(db.Integer, primary_key=True)
+    household_id = db.Column(db.Integer, db.ForeignKey('household.id'), nullable=False, index=True)
+    block_type = db.Column(db.String(20), nullable=False)  # exact_product | brand
+    retailer = db.Column(db.String(50), nullable=True)
+    retailer_product_id = db.Column(db.String(100), nullable=True)
+    retailer_us_item_id = db.Column(db.String(100), nullable=True)
+    normalized_brand = db.Column(db.String(150), nullable=True)
+    block_key = db.Column(db.String(260), nullable=False)
+    created_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)
+    updated_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc), nullable=False)
+    __table_args__ = (
+        db.CheckConstraint("block_type IN ('exact_product','brand')", name='ck_retail_product_block_type'),
+        db.CheckConstraint("(block_type = 'exact_product' AND retailer IS NOT NULL AND (retailer_product_id IS NOT NULL OR retailer_us_item_id IS NOT NULL) AND normalized_brand IS NULL) OR (block_type = 'brand' AND retailer IS NULL AND normalized_brand IS NOT NULL AND retailer_product_id IS NULL AND retailer_us_item_id IS NULL)", name='ck_retail_product_block_target'),
+        db.UniqueConstraint('household_id', 'block_key', name='uq_retail_product_block_target'),
+        # A provider may first expose either identity and later expose both.
+        # Each observed identifier may therefore name only one exact block for
+        # this household/retailer; service code merges the two forms.
+        db.Index('uq_retail_product_block_exact_product_id', 'household_id', 'retailer', 'retailer_product_id', unique=True,
+                 sqlite_where=db.text("block_type = 'exact_product' AND retailer_product_id IS NOT NULL"),
+                 postgresql_where=db.text("block_type = 'exact_product' AND retailer_product_id IS NOT NULL")),
+        db.Index('uq_retail_product_block_exact_us_item_id', 'household_id', 'retailer', 'retailer_us_item_id', unique=True,
+                 sqlite_where=db.text("block_type = 'exact_product' AND retailer_us_item_id IS NOT NULL"),
+                 postgresql_where=db.text("block_type = 'exact_product' AND retailer_us_item_id IS NOT NULL")),
+        {'extend_existing': True},
+    )
+
+
 class RetailProductSubstitution(ModelBase):
     __tablename__ = 'retail_product_substitution'
     id = db.Column(db.Integer, primary_key=True)
@@ -744,12 +774,143 @@ class ShoppingTripCompletion(ModelBase):
     actual_total_cents = db.Column(db.Integer, nullable=False)
     amount_source = db.Column(db.String(20), nullable=False, default='planned')
     cart_signature = db.Column(db.String(120), nullable=False, default='')
+    shopping_cart_id = db.Column(db.Integer, db.ForeignKey('shopping_cart.id'), nullable=True, unique=True)
     manual_provisional = db.Column(db.Boolean, nullable=False, default=True)
     completed_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)
 
     __table_args__ = (
         db.UniqueConstraint('household_id', 'operation_id', name='uq_shopping_trip_household_operation_id'),
         db.UniqueConstraint('household_id', 'trip_token', name='uq_shopping_trip_household_trip_token'),
+        {'extend_existing': True},
+    )
+
+
+class ShoppingCart(ModelBase):
+    """A household's durable, exact-store shopping plan.
+
+    ``current`` is the one mutable authority.  ``completed`` and ``retired``
+    rows intentionally retain their exact store and line evidence.
+    """
+    __tablename__ = 'shopping_cart'
+    id = db.Column(db.Integer, primary_key=True)
+    household_id = db.Column(db.Integer, db.ForeignKey('household.id'), nullable=False, index=True)
+    retail_store_identity_id = db.Column(db.Integer, db.ForeignKey('retail_store_identity.id'), nullable=False, index=True)
+    status = db.Column(db.String(24), nullable=False, default='current')
+    version = db.Column(db.Integer, nullable=False, default=1)
+    source = db.Column(db.String(60), nullable=False, default='retail_resolution')
+    subtotal_cents = db.Column(db.Integer, nullable=False, default=0)
+    total_cents = db.Column(db.Integer, nullable=False, default=0)
+    created_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)
+    updated_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc), nullable=False)
+    completed_at = db.Column(db.DateTime, nullable=True)
+
+    __table_args__ = (
+        db.CheckConstraint("status IN ('current','staged','completed','retired')", name='ck_shopping_cart_status'),
+        db.CheckConstraint('subtotal_cents >= 0', name='ck_shopping_cart_subtotal_nonnegative'),
+        db.CheckConstraint('total_cents >= 0', name='ck_shopping_cart_total_nonnegative'),
+        db.Index('ix_shopping_cart_household_status', 'household_id', 'status'),
+        db.Index(
+            'uq_shopping_cart_one_current_household', 'household_id', unique=True,
+            sqlite_where=db.text("status = 'current'"),
+            postgresql_where=db.text("status = 'current'"),
+        ),
+        {'extend_existing': True},
+    )
+
+
+class ShoppingCartLine(ModelBase):
+    __tablename__ = 'shopping_cart_line'
+    id = db.Column(db.Integer, primary_key=True)
+    cart_id = db.Column(db.Integer, db.ForeignKey('shopping_cart.id'), nullable=False, index=True)
+    requirement_key = db.Column(db.String(200), nullable=False)
+    requirement_json = db.Column(db.Text, nullable=False, default='{}')
+    retailer = db.Column(db.String(50), nullable=False)
+    provider_product_id = db.Column(db.String(120), nullable=True)
+    provider_us_item_id = db.Column(db.String(120), nullable=True)
+    title = db.Column(db.String(300), nullable=False)
+    brand = db.Column(db.String(150), nullable=True)
+    package_size = db.Column(db.String(160), nullable=True)
+    package_count = db.Column(db.Integer, nullable=False, default=1)
+    unit_price_cents = db.Column(db.Integer, nullable=True)
+    line_total_cents = db.Column(db.Integer, nullable=True)
+    availability = db.Column(db.String(40), nullable=False, default='unknown')
+    resolution_state = db.Column(db.String(40), nullable=False, default='unresolved')
+    provider_source = db.Column(db.String(100), nullable=True)
+    resolved_at = db.Column(db.DateTime, nullable=True)
+    provenance_json = db.Column(db.Text, nullable=False, default='{}')
+    created_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)
+
+    __table_args__ = (
+        db.UniqueConstraint('cart_id', 'requirement_key', name='uq_shopping_cart_line_requirement'),
+        db.CheckConstraint('package_count > 0', name='ck_shopping_cart_line_package_count'),
+        db.CheckConstraint('unit_price_cents IS NULL OR unit_price_cents >= 0', name='ck_shopping_cart_line_unit_price'),
+        db.CheckConstraint('line_total_cents IS NULL OR line_total_cents >= 0', name='ck_shopping_cart_line_total'),
+        {'extend_existing': True},
+    )
+
+
+class ShoppingStoreChangeReview(ModelBase):
+    __tablename__ = 'shopping_store_change_review'
+    id = db.Column(db.Integer, primary_key=True)
+    household_id = db.Column(db.Integer, db.ForeignKey('household.id'), nullable=False, index=True)
+    current_cart_id = db.Column(db.Integer, db.ForeignKey('shopping_cart.id'), nullable=False)
+    staged_cart_id = db.Column(db.Integer, db.ForeignKey('shopping_cart.id'), nullable=False)
+    from_store_identity_id = db.Column(db.Integer, db.ForeignKey('retail_store_identity.id'), nullable=False)
+    to_store_identity_id = db.Column(db.Integer, db.ForeignKey('retail_store_identity.id'), nullable=False)
+    status = db.Column(db.String(24), nullable=False, default='pending')
+    operation_id = db.Column(db.String(100), nullable=False)
+    created_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)
+    decided_at = db.Column(db.DateTime, nullable=True)
+
+    __table_args__ = (
+        db.UniqueConstraint('household_id', 'operation_id', name='uq_store_change_review_household_operation'),
+        db.CheckConstraint("status IN ('pending','approved','cancelled')", name='ck_store_change_review_status'),
+        db.Index('ix_store_change_review_household_status', 'household_id', 'status'),
+        {'extend_existing': True},
+    )
+
+
+class ShoppingRebalanceProposal(ModelBase):
+    """A reviewable, store-bound change set for one authoritative cart."""
+    __tablename__ = 'shopping_rebalance_proposal'
+    id = db.Column(db.Integer, primary_key=True)
+    household_id = db.Column(db.Integer, db.ForeignKey('household.id'), nullable=False, index=True)
+    base_cart_id = db.Column(db.Integer, db.ForeignKey('shopping_cart.id'), nullable=False, index=True)
+    base_cart_version = db.Column(db.Integer, nullable=False)
+    operation_id = db.Column(db.String(100), nullable=False)
+    status = db.Column(db.String(24), nullable=False, default='pending')
+    created_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)
+    decided_at = db.Column(db.DateTime, nullable=True)
+
+    __table_args__ = (
+        db.UniqueConstraint('household_id', 'operation_id', name='uq_rebalance_proposal_household_operation'),
+        db.CheckConstraint("status IN ('pending','approved','rejected','stale')", name='ck_rebalance_proposal_status'),
+        {'extend_existing': True},
+    )
+
+
+class ShoppingRebalanceProposalLine(ModelBase):
+    __tablename__ = 'shopping_rebalance_proposal_line'
+    id = db.Column(db.Integer, primary_key=True)
+    proposal_id = db.Column(db.Integer, db.ForeignKey('shopping_rebalance_proposal.id'), nullable=False, index=True)
+    source_cart_line_id = db.Column(db.Integer, db.ForeignKey('shopping_cart_line.id'), nullable=False)
+    requirement_key = db.Column(db.String(200), nullable=False)
+    old_product_id = db.Column(db.String(120), nullable=True)
+    proposed_product_id = db.Column(db.String(120), nullable=True)
+    proposed_title = db.Column(db.String(300), nullable=False)
+    proposed_brand = db.Column(db.String(150), nullable=True)
+    proposed_package_size = db.Column(db.String(160), nullable=True)
+    package_count = db.Column(db.Integer, nullable=False, default=1)
+    old_line_total_cents = db.Column(db.Integer, nullable=True)
+    proposed_unit_price_cents = db.Column(db.Integer, nullable=True)
+    proposed_line_total_cents = db.Column(db.Integer, nullable=True)
+    proposed_availability = db.Column(db.String(40), nullable=False, default='unknown')
+    proposed_resolution_state = db.Column(db.String(40), nullable=False, default='unresolved')
+    provenance_json = db.Column(db.Text, nullable=False, default='{}')
+
+    __table_args__ = (
+        db.UniqueConstraint('proposal_id', 'source_cart_line_id', name='uq_rebalance_proposal_source_line'),
+        db.CheckConstraint('package_count > 0', name='ck_rebalance_proposal_package_count'),
         {'extend_existing': True},
     )
 

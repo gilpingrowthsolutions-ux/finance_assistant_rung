@@ -42,8 +42,12 @@ class ShoppingRequirement:
     quantity: Optional[float] = 1.0
     unit: Optional[str] = None
     requested_package_size: Optional[str] = None
+    requested_product_id: Optional[str] = None
     category: str = "General"
     source_kind: str = "manual"
+    # Durable source identity (such as GroceryItem or RecipeIngredient), never
+    # a retailer product identity.
+    source_requirement_id: Optional[int] = None
     source_recipe_id: Optional[int] = None
     source_recipe_title: Optional[str] = None
     source_text: Optional[str] = None
@@ -60,8 +64,10 @@ class ShoppingRequirement:
             quantity=_optional_quantity(value.get("quantity")),
             unit=_optional_text(value.get("unit")),
             requested_package_size=_optional_text(value.get("requested_package_size")),
+            requested_product_id=_optional_text(value.get("requested_product_id")),
             category=str(value.get("category") or "General").strip() or "General",
             source_kind=str(value.get("source_kind") or "manual").strip() or "manual",
+            source_requirement_id=_optional_int(value.get("source_requirement_id")),
             source_recipe_id=_optional_int(value.get("source_recipe_id")),
             source_recipe_title=_optional_text(value.get("source_recipe_title")),
             source_text=_optional_text(value.get("source_text")),

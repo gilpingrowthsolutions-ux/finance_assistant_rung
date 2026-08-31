@@ -12,15 +12,19 @@ from models import (
     HouseholdShoppingDefault,
     RetailProductPreference,
     RetailProductSubstitution,
+    RetailStoreIdentity,
+    ShoppingCart,
+    ShoppingCartLine,
     ShoppingTripCompletion,
 )
 from services.household_context import household_id as current_household_id
+from services.selected_store import select_store
 
 
 client = app.test_client()
 
 
-def _setup(balance: float = 1000.00) -> None:
+def _setup(balance: float = 1000.00, cart_total: float = 100.00) -> None:
     with app.app_context():
         db.drop_all()
         db.create_all()
@@ -34,6 +38,11 @@ def _setup(balance: float = 1000.00) -> None:
                 kroger_store_name="Walmart",
             )
         )
+        account = Account.query.first()
+        selected = select_store(current_household_id(), retailer="walmart", store_id="357", store_name="Walmart", account=account)
+        cart = ShoppingCart(household_id=current_household_id(), retail_store_identity_id=selected["retail_store_identity_id"], status="current", subtotal_cents=round(cart_total * 100), total_cents=round(cart_total * 100))
+        db.session.add(cart); db.session.flush()
+        db.session.add(ShoppingCartLine(cart_id=cart.id, requirement_key="manual:milk:0", requirement_json="{}", retailer="walmart", provider_product_id="sku-milk", title="Milk", package_count=1, unit_price_cents=round(cart_total * 100), line_total_cents=round(cart_total * 100), availability="in_stock", resolution_state="resolved", provenance_json="{}"))
         db.session.commit()
 
 
@@ -71,7 +80,7 @@ def _complete(*, planned: float, actual: float | None = None, use_planned: bool 
 
 
 def test_stage_does_not_write_before_confirmation() -> None:
-    _setup()
+    _setup(cart_total=163.48)
     resp = _stage(planned=163.48, use_planned=True)
     assert resp.status_code == 200
     body = resp.get_json() or {}
@@ -83,7 +92,7 @@ def test_stage_does_not_write_before_confirmation() -> None:
 
 
 def test_use_planned_total_records_grocery_spend_and_updates_financials() -> None:
-    _setup(balance=1000.00)
+    _setup(balance=1000.00, cart_total=163.48)
     stage = _stage(planned=163.48, use_planned=True)
     op_id = (stage.get_json() or {}).get("operation_id")
     resp = _complete(planned=163.48, use_planned=True, operation_id=op_id)
@@ -93,7 +102,7 @@ def test_use_planned_total_records_grocery_spend_and_updates_financials() -> Non
     assert body.get("already_completed") is False
     assert body.get("actual_total") == 163.48
     assert body.get("planned_total") == 163.48
-    assert body.get("amount_source") == "planned"
+    assert body.get("amount_source") == "authoritative_cart"
 
     with app.app_context():
         tx = ExpenseTransaction.query.one()
@@ -106,27 +115,27 @@ def test_use_planned_total_records_grocery_spend_and_updates_financials() -> Non
         assert trip.actual_total_cents == 16348
 
 
-def test_actual_total_overrides_planned_and_preserves_distinction() -> None:
-    _setup(balance=1000.00)
+def test_client_actual_total_is_ignored_in_favor_of_authoritative_cart() -> None:
+    _setup(balance=1000.00, cart_total=163.48)
     stage = _stage(planned=163.48, actual=171.00, use_planned=False)
     op_id = (stage.get_json() or {}).get("operation_id")
     resp = _complete(planned=163.48, actual=171.00, use_planned=False, operation_id=op_id)
     assert resp.status_code == 200
     body = resp.get_json() or {}
     assert body.get("planned_total") == 163.48
-    assert body.get("actual_total") == 171.00
-    assert body.get("amount_source") == "actual"
+    assert body.get("actual_total") == 163.48
+    assert body.get("amount_source") == "authoritative_cart"
 
     with app.app_context():
         trip = ShoppingTripCompletion.query.one()
         tx = ExpenseTransaction.query.one()
         assert trip.planned_total_cents == 16348
-        assert trip.actual_total_cents == 17100
-        assert round(float(tx.amount), 2) == 171.00
+        assert trip.actual_total_cents == 16348
+        assert round(float(tx.amount), 2) == 163.48
 
 
 def test_financial_metrics_refresh_after_completion() -> None:
-    _setup(balance=1000.00)
+    _setup(balance=1000.00, cart_total=100.00)
     stage = _stage(planned=100.00, use_planned=True)
     op_id = (stage.get_json() or {}).get("operation_id")
     resp = _complete(planned=100.00, use_planned=True, operation_id=op_id)
@@ -141,7 +150,7 @@ def test_financial_metrics_refresh_after_completion() -> None:
 
 
 def test_idempotent_duplicate_completion_same_operation_id() -> None:
-    _setup(balance=1000.00)
+    _setup(balance=1000.00, cart_total=50.00)
     stage = _stage(planned=50.00, use_planned=True)
     op_id = (stage.get_json() or {}).get("operation_id")
     first = _complete(planned=50.00, use_planned=True, operation_id=op_id)
@@ -157,7 +166,7 @@ def test_idempotent_duplicate_completion_same_operation_id() -> None:
 
 
 def test_duplicate_trip_token_conflict_prevents_double_count() -> None:
-    _setup(balance=1000.00)
+    _setup(balance=1000.00, cart_total=20.00)
     token = "trip-token-1"
     first = _complete(planned=20.00, use_planned=True, operation_id="op-a", trip_token=token)
     second = _complete(planned=20.00, use_planned=True, operation_id="op-b", trip_token=token)
@@ -170,7 +179,7 @@ def test_duplicate_trip_token_conflict_prevents_double_count() -> None:
 
 
 def test_failed_request_does_not_partially_write_state() -> None:
-    _setup(balance=1000.00)
+    _setup(balance=1000.00, cart_total=22.00)
     bad = client.post(
         "/api/grocery/finished-shopping/complete",
         json={
@@ -181,7 +190,7 @@ def test_failed_request_does_not_partially_write_state() -> None:
             "store_name": "Walmart",
             "store_id": "357",
             "cart_signature": "sig-b",
-            "confirm": True,
+                "confirm": False,
         },
     )
     assert bad.status_code == 400
@@ -191,7 +200,7 @@ def test_failed_request_does_not_partially_write_state() -> None:
 
 
 def test_reload_status_endpoint_preserves_completed_state() -> None:
-    _setup(balance=1000.00)
+    _setup(balance=1000.00, cart_total=22.00)
     done = _complete(planned=22.00, use_planned=True, operation_id="op-reload")
     body = done.get_json() or {}
     status = client.get(
@@ -204,23 +213,21 @@ def test_reload_status_endpoint_preserves_completed_state() -> None:
     assert s.get("planned_total") == 22.0
 
 
-def test_walmart_and_kroger_contexts_are_recorded() -> None:
-    _setup(balance=1000.00)
-    a = _complete(planned=30.00, use_planned=True, retailer="walmart", store_name="Walmart", store_id="357", operation_id="op-w")
-    b = _complete(planned=31.00, use_planned=True, retailer="kroger", store_name="Gerbes", store_id="01100479", operation_id="op-k")
+def test_client_store_context_is_ignored_in_favor_of_cart_store() -> None:
+    _setup(balance=1000.00, cart_total=30.00)
+    a = _complete(planned=30.00, use_planned=True, retailer="kroger", store_name="Gerbes", store_id="01100479", operation_id="op-w")
+    b = _complete(planned=30.00, use_planned=True, retailer="walmart", store_name="Walmart", store_id="357", operation_id="op-w")
     assert a.status_code == 200
     assert b.status_code == 200
 
     with app.app_context():
         rows = ShoppingTripCompletion.query.order_by(ShoppingTripCompletion.id.asc()).all()
-        assert len(rows) == 2
+        assert len(rows) == 1
         assert rows[0].retailer == "walmart"
-        assert rows[1].retailer == "kroger"
-        assert rows[1].store_name == "Gerbes"
 
 
 def test_completion_does_not_modify_preferences_substitutions_or_household_defaults() -> None:
-    _setup(balance=1000.00)
+    _setup(balance=1000.00, cart_total=40.00)
     with app.app_context():
         pref = RetailProductPreference(
             household_id=current_household_id(),
@@ -265,8 +272,8 @@ def test_completion_does_not_modify_preferences_substitutions_or_household_defau
         assert HouseholdShoppingDefault.query.count() == 1
 
 
-def test_cent_accurate_rounding_for_actual_amount() -> None:
-    _setup(balance=1000.00)
+def test_authoritative_cart_total_is_cent_accurate() -> None:
+    _setup(balance=1000.00, cart_total=10.02)
     stage = _stage(planned=10.01, actual=10.015, use_planned=False)
     op_id = (stage.get_json() or {}).get("operation_id")
     resp = _complete(planned=10.01, actual=10.015, use_planned=False, operation_id=op_id)

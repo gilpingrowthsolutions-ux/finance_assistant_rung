@@ -113,6 +113,7 @@ def requirement_from_ingredient(
         quantity=_as_quantity(ingredient.quantity),
         unit=_as_unit(ingredient.unit),
         source_kind="recipe",
+        source_requirement_id=int(ingredient.id),
         source_recipe_id=int(recipe.id),
         source_recipe_title=str(recipe.title or "").strip() or None,
         source_text=source_text or None,

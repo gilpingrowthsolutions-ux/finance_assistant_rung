@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 
 from flask import g, has_request_context, request, session
+from sqlalchemy.exc import IntegrityError
 
 from extensions import db
 from models import HouseholdMembership, LoginThrottle, User
@@ -180,22 +181,48 @@ def login_is_blocked(identity: str) -> tuple[bool, int]:
 
 def record_login_failure(identity: str) -> None:
     subject_key = _subject_key(identity, _client_ip())
-    row = _get_or_create_throttle_row(subject_key)
-    now = _now_like(row.window_started_at)
+    # PostgreSQL is the beta authority.  Lock an existing key while updating
+    # it so simultaneous failures cannot lose increments.  The unique key
+    # remains the creation-race authority; retry once after its winner commits.
+    for _ in range(2):
+        try:
+            row = (
+                LoginThrottle.query.filter_by(subject_key=subject_key)
+                .with_for_update()
+                .first()
+            )
+            if row is None:
+                now = _now_like()
+                row = LoginThrottle(
+                    subject_key=subject_key,
+                    failed_count=0,
+                    window_started_at=now,
+                    blocked_until=None,
+                    updated_at=now,
+                )
+                db.session.add(row)
+            else:
+                now = _now_like(row.window_started_at)
 
-    started = row.window_started_at or now
+            started = row.window_started_at or now
+            if now - started > _LOGIN_WINDOW:
+                row.window_started_at = now
+                row.failed_count = 0
 
-    if now - started > _LOGIN_WINDOW:
-        row.window_started_at = now
-        row.failed_count = 0
+            row.failed_count = int(row.failed_count or 0) + 1
+            row.updated_at = now
+            if row.failed_count >= _LOGIN_FAIL_LIMIT:
+                row.blocked_until = now + _LOGIN_BLOCK
 
-    row.failed_count = int(row.failed_count or 0) + 1
-    row.updated_at = now
-    if row.failed_count >= _LOGIN_FAIL_LIMIT:
-        row.blocked_until = now + _LOGIN_BLOCK
+            db.session.add(row)
+            db.session.commit()
+            return
+        except IntegrityError:
+            db.session.rollback()
 
-    db.session.add(row)
-    db.session.commit()
+    # A second uniqueness collision is not a credential error and must not be
+    # hidden as one; it indicates a database-level contention failure.
+    raise RuntimeError("Unable to record login failure due to throttle contention.")
 
 
 def clear_login_failures(identity: str) -> None:

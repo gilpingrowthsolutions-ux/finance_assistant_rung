@@ -9,7 +9,7 @@ import pytest
 os.environ.setdefault("RUNG_DB_PATH", f"/tmp/rung_gate7_auth_{uuid.uuid4().hex}.db")
 
 from app import app, db  # noqa: E402
-from models import Account, Bill, Household, HouseholdMembership, User  # noqa: E402
+from models import Account, Bill, Household, HouseholdMembership, LoginThrottle, User  # noqa: E402
 from werkzeug.security import generate_password_hash  # noqa: E402
 
 
@@ -145,3 +145,94 @@ def test_login_throttle_blocks_repeated_failures():
     payload = blocked.get_json() or {}
     assert payload.get("error") == "Invalid credentials."
     assert int(payload.get("retry_after_seconds") or 0) > 0
+
+
+def test_invalid_login_shapes_are_controlled_and_do_not_authorize_or_mutate_business_state():
+    _seed_households_and_users()
+    client = app.test_client()
+
+    responses = [
+        client.post("/api/auth/login", json={}),
+        client.post("/api/auth/login", json={"email": "alpha@example.com"}),
+        client.post("/api/auth/login", json={"password": "pass-alpha-123"}),
+        client.post("/api/auth/login", data="not-json", content_type="text/plain"),
+    ]
+    assert [response.status_code for response in responses] == [401, 401, 401, 401]
+    assert all((response.get_json() or {}).get("error") == "Invalid credentials." for response in responses)
+    assert (client.get("/api/auth/session").get_json() or {}).get("authenticated") is False
+    assert client.get("/api/budget/summary").status_code == 401
+    with app.app_context():
+        assert Bill.query.count() == 0
+        assert Account.query.count() == 2
+
+
+def test_auth_version_inactive_user_and_membership_changes_invalidate_live_session():
+    ids = _seed_households_and_users()
+    client = app.test_client()
+    assert _login(client, "alpha@example.com", "pass-alpha-123").status_code == 200
+
+    with app.app_context():
+        user = User.query.filter_by(email="alpha@example.com").one()
+        user.auth_version += 1
+        db.session.commit()
+    assert (client.get("/api/auth/session").get_json() or {}).get("authenticated") is False
+    assert client.get("/api/budget/summary").status_code == 401
+
+    assert _login(client, "alpha@example.com", "pass-alpha-123").status_code == 200
+    with app.app_context():
+        user = User.query.filter_by(email="alpha@example.com").one()
+        user.active = False
+        db.session.commit()
+    assert (client.get("/api/auth/session").get_json() or {}).get("authenticated") is False
+    assert client.get("/api/budget/summary").status_code == 401
+
+    with app.app_context():
+        user = User.query.filter_by(email="alpha@example.com").one()
+        user.active = True
+        user.auth_version += 1
+        db.session.commit()
+    assert _login(client, "alpha@example.com", "pass-alpha-123").status_code == 200
+    with app.app_context():
+        membership = HouseholdMembership.query.filter_by(
+            user_id=User.query.filter_by(email="alpha@example.com").one().id,
+            household_id=ids["house_a_id"],
+        ).one()
+        membership.active = False
+        db.session.commit()
+    assert (client.get("/api/auth/session").get_json() or {}).get("authenticated") is False
+    assert client.get("/api/budget/summary").status_code == 401
+
+
+def test_household_query_body_and_header_values_never_override_membership():
+    ids = _seed_households_and_users()
+    client = app.test_client()
+    assert _login(client, "alpha@example.com", "pass-alpha-123").status_code == 200
+
+    baseline = client.get("/api/budget/summary").get_json() or {}
+    forged = client.get(
+        f"/api/budget/summary?household_id={ids['house_b_id']}",
+        headers={"X-Household-Id": "00000000-0000-0000-0000-000000000002"},
+    )
+    assert forged.status_code == 200
+    assert (forged.get_json() or {}).get("safe_to_spend", {}).get("checking_balance") == (
+        baseline.get("safe_to_spend", {}).get("checking_balance")
+    ) == 1000.0
+
+    own_update = client.post(
+        "/api/account/update",
+        json={"checking_balance": 111.0, "household_id": ids["house_b_id"]},
+    )
+    assert own_update.status_code == 200
+    with app.app_context():
+        assert Account.query.filter_by(household_id=ids["house_a_id"]).one().checking_balance == 111.0
+        assert Account.query.filter_by(household_id=ids["house_b_id"]).one().checking_balance == 800.0
+
+
+def test_authorization_failures_do_not_increment_login_throttle():
+    _seed_households_and_users()
+    client = app.test_client()
+    assert client.get("/api/budget/summary").status_code == 401
+    assert _login(client, "alpha@example.com", "pass-alpha-123").status_code == 200
+    assert client.delete("/bills/999999").status_code == 404
+    with app.app_context():
+        assert LoginThrottle.query.count() == 0

@@ -3098,7 +3098,10 @@ def auth_session_current():
 
 @app.route("/api/auth/login", methods=["POST"])
 def auth_login():
-    data = request.json or {}
+    # A malformed or non-JSON login payload must remain the same controlled
+    # anti-enumeration failure as empty credentials, rather than allowing
+    # Flask's JSON parser to turn it into an unrelated 415 response.
+    data = request.get_json(silent=True) or {}
     email = str(data.get("email") or "").strip().lower()
     password = str(data.get("password") or "")
     invalid = {"error": "Invalid credentials."}

@@ -8,8 +8,9 @@
 // asserted instead so this test would fail if that truthful state regressed.
 //
 // Requires a dev server already running against an explicit disposable
-// RUNG_DB_PATH with RUNG_ENV=beta, seeded via seed_auth_acceptance.py
-// (user auth-browser@example.com / auth-pass-123).
+// RUNG_DB_PATH with RUNG_ENV=beta, seeded via tests/seed_auth_acceptance.py
+// (users auth-browser@example.com / auth-pass-123 and
+// auth-browser-b@example.com / auth-pass-b-123).
 const { test, expect } = require('@playwright/test');
 
 const ROOT = process.env.RUNG_UI_BASE_URL || 'http://127.0.0.1:5099';
@@ -69,6 +70,22 @@ test('Auth: invalid login shows truthful recoverable error with exactly one requ
   expect(mutations.filter((p) => p === '/api/auth/login')).toHaveLength(1);
   await expect(page.locator('#authLoginBtn')).toHaveText('Log In');
   await expect(page.locator('#authLoginBtn')).toBeEnabled();
+});
+
+test('Auth: rapid double Sign In submits once and resolves one session', async ({ page }) => {
+  const logins = [];
+  page.on('request', (request) => {
+    if (new URL(request.url()).pathname === '/api/auth/login') logins.push(request);
+  });
+  await page.goto(ROOT + '/', { waitUntil: 'networkidle' });
+  await page.locator('#authEmail').fill('auth-browser@example.com');
+  await page.locator('#authPassword').fill('auth-pass-123');
+  await page.locator('#authLoginBtn').dblclick();
+  await expect(page.locator('#authDialog')).not.toBeVisible();
+  expect(logins).toHaveLength(1);
+  const current = await page.evaluate(async () => (await fetch('/api/auth/session')).json());
+  expect(current.authenticated).toBe(true);
+  expect(current.user.email).toBe('auth-browser@example.com');
 });
 
 test('Auth: sign in, logout, and sign back in resolve correct user/household with expected request counts', async ({ page }) => {
@@ -135,6 +152,35 @@ test('Auth: sign in, logout, and sign back in resolve correct user/household wit
   // fetch as a console error. Filter that single expected line out.
   const unexpectedConsoleErrors = consoleErrors.filter((msg) => !msg.includes('401'));
   expect(unexpectedConsoleErrors, 'no unexpected console errors across sign-in/logout/sign-in cycle').toEqual([]);
+});
+
+test('Auth: logout then another household login does not retain prior household authority or UI state', async ({ page }) => {
+  await page.goto(ROOT + '/', { waitUntil: 'networkidle' });
+  await page.locator('#authEmail').fill('auth-browser@example.com');
+  await page.locator('#authPassword').fill('auth-pass-123');
+  await page.locator('#authLoginBtn').click();
+  await expect(page.locator('#authDialog')).not.toBeVisible();
+  const a = await page.evaluate(async () => (await fetch('/api/auth/session')).json());
+
+  await page.locator('[data-target="settings"]').click();
+  await page.locator('[data-settings-section="account"]').click();
+  await page.locator('#logoutBtn').click();
+  await expect(page.locator('#authDialog')).toBeVisible();
+
+  await page.locator('#authEmail').fill('auth-browser-b@example.com');
+  await page.locator('#authPassword').fill('auth-pass-b-123');
+  await page.locator('#authLoginBtn').click();
+  await expect(page.locator('#authDialog')).not.toBeVisible();
+  const b = await page.evaluate(async () => (await fetch('/api/auth/session')).json());
+  expect(b.user.email).toBe('auth-browser-b@example.com');
+  expect(b.household.id).not.toBe(a.household.id);
+  const budget = await page.evaluate(async () => (await fetch('/api/budget/summary')).json());
+  expect(budget.safe_to_spend.checking_balance).toBe(222);
+  await page.reload({ waitUntil: 'networkidle' });
+  await expect(page.locator('#authDialog')).not.toBeVisible();
+  await page.locator('[data-target="settings"]').click();
+  await page.locator('[data-settings-section="account"]').click();
+  await expect(page.locator('#settingsAccountEmail')).toHaveText('auth-browser-b@example.com');
 });
 
 test('Auth: responsive Sign In at desktop and mobile viewports', async ({ page }) => {

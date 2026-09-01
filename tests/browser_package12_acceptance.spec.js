@@ -51,8 +51,11 @@ test('Package 12 real-browser functional acceptance', async ({ page }) => {
   await page.locator('[data-settings-section="financial"]').click();
   await page.locator('#settingsPyfTarget').fill('23.5');
   await page.locator('#settingsSafeBuffer').fill('275.25');
+  await page.locator('#settingsPayPeriod').fill('21');
   await page.locator('#updateRatiosBtn').click();
   await expect(page.locator('#settingsFinancialStatus')).toContainText('Saved.');
+  const cycleAfterEdit = await page.evaluate(async () => (await fetch('/api/budget/summary')).json());
+  expect(Number(cycleAfterEdit.account_state.pay_period_days)).toBe(21);
   mutationRequests.length = 0;
   await page.locator('#settingsExpectedPaycheck').fill('2200.00');
   await page.locator('#updateRatiosBtn').click();

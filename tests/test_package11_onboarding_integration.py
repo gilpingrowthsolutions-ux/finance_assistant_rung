@@ -38,6 +38,7 @@ from app import (  # noqa: E402
 )
 from services.financial_state import get_household_account  # noqa: E402
 from services.household_context import household_id as current_household_id  # noqa: E402
+from services.income_plan import resolve_income_plan  # noqa: E402
 from services.plaid_foundation import get_plaid_connection_status  # noqa: E402
 from services.selected_store import get_selected_store, select_store  # noqa: E402
 
@@ -419,6 +420,58 @@ def test_invalid_late_field_rolls_back_all_onboarding_writes() -> None:
         assert UserPreference.query.filter_by(household_id=hid).count() == 0
         assert Bill.query.filter_by(household_id=hid).count() == 0
         assert HouseholdShoppingDefault.query.filter_by(household_id=hid).count() == 0
+
+
+def test_out_of_range_pay_cycle_rejects_without_partial_onboarding_write() -> None:
+    """Onboarding cannot bypass the canonical one-to-31-day pay-cycle boundary."""
+    _reset_db()
+    payload = dict(FULL_FINANCIAL_PAYLOAD)
+    payload["pay_period_days"] = 32
+
+    response = client.post("/api/onboarding/complete", json=payload)
+    assert response.status_code == 400
+
+    with app.app_context():
+        hid = current_household_id()
+        account = get_household_account(hid)
+        assert account.checking_balance is None
+        assert int(account.pay_period_days or 0) == 0
+        assert account.is_onboarded is False
+        assert IncomePlanVersion.query.filter_by(household_id=hid).count() == 0
+        assert UserSetting.query.filter_by(household_id=hid).count() == 0
+        assert Bill.query.filter_by(household_id=hid).count() == 0
+
+
+def test_revisit_with_established_income_history_preserves_current_cycle() -> None:
+    """A later onboarding resume may only schedule income at the next boundary."""
+    _reset_db()
+    now = datetime.now(timezone.utc)
+    next_payday = (now + timedelta(days=7)).date().isoformat()
+    initial = dict(FULL_FINANCIAL_PAYLOAD)
+    initial.update({
+        "expected_paycheck": 1000.0,
+        "expected_paycheck_operation_id": "onboarding-initial-income",
+        "next_payday": next_payday,
+    })
+    assert client.post("/api/onboarding/complete", json=initial).status_code == 200
+
+    resumed = {
+        "expected_paycheck": 1450.0,
+        "expected_paycheck_operation_id": "onboarding-resume-next-cycle",
+        "next_payday": next_payday,
+    }
+    assert client.post("/api/onboarding/complete", json=resumed).status_code == 200
+    assert client.post("/api/onboarding/complete", json=resumed).status_code == 200
+
+    with app.app_context():
+        hid = current_household_id()
+        rows = IncomePlanVersion.query.filter_by(household_id=hid).order_by(IncomePlanVersion.id).all()
+        assert len(rows) == 2
+        assert [row.expected_income_cents for row in rows] == [100000, 145000]
+        # The first version is established at request time, which is just after
+        # the fixture's ``now`` capture; inspect the started current cycle.
+        assert resolve_income_plan(hid, at=now + timedelta(minutes=1)).expected_income_cents == 100000
+        assert resolve_income_plan(hid, at=now + timedelta(days=8)).expected_income_cents == 145000
 
 
 def test_location_sharing_persists_without_changing_selected_store() -> None:

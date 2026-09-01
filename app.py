@@ -1125,8 +1125,8 @@ def _persist_onboarding_financial_basics(account: Account, data: dict[str, Any])
         except (TypeError, ValueError):
             errors.append("pay_period_days must be a whole number of days.")
         else:
-            if pay_period_days < 1:
-                errors.append("pay_period_days must be at least 1 day.")
+            if not 1 <= pay_period_days <= 31:
+                errors.append("pay_period_days must be a whole number from 1 to 31.")
 
     expected_paycheck_cents = None
     if "expected_paycheck" in data and data["expected_paycheck"] not in (None, ""):

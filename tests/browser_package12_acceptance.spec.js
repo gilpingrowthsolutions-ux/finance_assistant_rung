@@ -1,14 +1,16 @@
-const { test, expect } = require('playwright/test');
+const { test, expect } = require('@playwright/test');
 
 if (process.env.RUNG_PLAYWRIGHT_CHROMIUM) {
   test.use({ launchOptions: { executablePath: process.env.RUNG_PLAYWRIGHT_CHROMIUM } });
 }
 
 async function openSettings(page) {
-  await page.goto('http://127.0.0.1:5051/#settings', { waitUntil: 'networkidle' });
+  await page.goto(ROOT + '/#settings', { waitUntil: 'networkidle' });
   await page.locator('[data-target="settings"]').click();
   await expect(page.locator('#settings')).toBeVisible();
 }
+
+const ROOT = process.env.RUNG_UI_BASE_URL || 'http://127.0.0.1:5051';
 
 test('Package 12 real-browser functional acceptance', async ({ page }) => {
   const mutationRequests = [];
@@ -19,7 +21,7 @@ test('Package 12 real-browser functional acceptance', async ({ page }) => {
   });
   page.on('console', message => { if (message.type() === 'error') consoleErrors.push(message.text()); });
   page.on('response', response => {
-    if (response.url().startsWith('http://127.0.0.1:5051/') && response.status() >= 400) failedLocalRequests.push(response.url());
+    if (response.url().startsWith(ROOT + '/') && response.status() >= 400) failedLocalRequests.push(response.url());
   });
   await openSettings(page);
 
@@ -59,6 +61,15 @@ test('Package 12 real-browser functional acceptance', async ({ page }) => {
   expect(Number(incomeAfterEdit.account_state.expected_paycheck)).toBe(2100);
   expect(Number(incomeAfterEdit.account_state.next_expected_paycheck)).toBe(2200);
   await expect(page.locator('#settingsExpectedPaycheckStatus')).toContainText('Next payday: $2,200.00');
+  mutationRequests.length = 0;
+  await page.locator('#settingsExpectedPaycheck').fill('2300.00');
+  await Promise.all([
+    page.locator('#updateRatiosBtn').click(),
+    page.locator('#updateRatiosBtn').click(),
+  ]);
+  await expect.poll(() => mutationRequests.filter(p => p === '/api/account/update').length).toBe(1);
+  const incomeAfterDoubleSubmit = await page.evaluate(async () => (await fetch('/api/budget/summary')).json());
+  expect(Number(incomeAfterDoubleSubmit.account_state.next_expected_paycheck)).toBe(2300);
   await page.locator('[data-settings-section="shopping"]').click();
   await page.locator('#householdShoppingStyle').selectOption('prefer_brands_when_possible');
   await page.locator('#householdPref_milk_type').selectOption('two_percent');

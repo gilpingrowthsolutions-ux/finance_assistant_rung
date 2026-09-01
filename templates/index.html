@@ -6536,16 +6536,39 @@
       if (ratioBtn) {
         ratioBtn.addEventListener('click', async function () {
           var statusEl = $('settingsFinancialStatus');
-          var safeBuffer = parseFloat(($('settingsSafeBuffer') || {}).value || 0) || 0;
+          var safeBufferRaw = String(($('settingsSafeBuffer') || {}).value || '').trim();
+          var safeBuffer = Number(safeBufferRaw);
           var pyfTargetRaw = String(($('settingsPyfTarget') || {}).value || '').trim();
           if (!pyfTargetRaw || !Number.isFinite(Number(pyfTargetRaw)) || Number(pyfTargetRaw) < 0) {
             flash('Enter a valid long-term savings target percentage.', 'error');
+            if (statusEl) statusEl.textContent = 'Enter a valid long-term savings target percentage.';
+            return;
+          }
+          if (!safeBufferRaw || !Number.isFinite(safeBuffer) || safeBuffer < 0) {
+            flash('Enter a valid protected buffer amount.', 'error');
+            if (statusEl) statusEl.textContent = 'Enter a valid protected buffer amount.';
             return;
           }
           ratioBtn.disabled = true;
           ratioBtn.textContent = 'Saving...';
-          var requestedPayPeriod = parseInt(($('settingsPayPeriod') || {}).value || 14);
-          var requestedExpected = parseFloat(($('settingsExpectedPaycheck') || {}).value || 0);
+          var requestedPayPeriodRaw = String(($('settingsPayPeriod') || {}).value || '').trim();
+          var requestedPayPeriod = Number(requestedPayPeriodRaw);
+          if (!Number.isInteger(requestedPayPeriod) || requestedPayPeriod < 1 || requestedPayPeriod > 31) {
+            ratioBtn.disabled = false;
+            ratioBtn.textContent = 'Save Financial Defaults';
+            flash('Enter a whole pay cycle from 1 to 31 days.', 'error');
+            if (statusEl) statusEl.textContent = 'Enter a whole pay cycle from 1 to 31 days.';
+            return;
+          }
+          var requestedExpectedRaw = String(($('settingsExpectedPaycheck') || {}).value || '').trim();
+          var requestedExpected = Number(requestedExpectedRaw);
+          if (!requestedExpectedRaw || !Number.isFinite(requestedExpected) || requestedExpected <= 0) {
+            ratioBtn.disabled = false;
+            ratioBtn.textContent = 'Save Financial Defaults';
+            flash('Enter an expected paycheck greater than $0.00.', 'error');
+            if (statusEl) statusEl.textContent = 'Enter an expected paycheck greater than $0.00.';
+            return;
+          }
           var accountPayload = {};
           if (requestedPayPeriod !== loadedFinancialDefaults.payPeriod) accountPayload.pay_period_days = requestedPayPeriod;
           if (requestedExpected !== loadedFinancialDefaults.expectedPaycheck && requestedExpected !== loadedFinancialDefaults.pendingExpectedPaycheck) {

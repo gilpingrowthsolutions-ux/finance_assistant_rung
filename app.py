@@ -4562,13 +4562,20 @@ def update_account():
     data = request.json or {}
     if "expected_paycheck" in data and not str(data.get("expected_paycheck_operation_id") or "").strip():
         return jsonify({"error": "expected_paycheck_operation_id is required when confirming an expected paycheck."}), 400
+    if "pay_period_days" in data:
+        try:
+            pay_period_days = int(data["pay_period_days"])
+        except (TypeError, ValueError):
+            return jsonify({"error": "pay_period_days must be a whole number from 1 to 31."}), 400
+        if isinstance(data["pay_period_days"], bool) or str(data["pay_period_days"]).strip() != str(pay_period_days) or not 1 <= pay_period_days <= 31:
+            return jsonify({"error": "pay_period_days must be a whole number from 1 to 31."}), 400
     checking_balance = float(account.checking_balance or 0.0)
     if "checking_balance" in data:
         checking_balance = set_balance_absolute(current_household_id(), float(data["checking_balance"]))
     if "food_allocation_pct" in data:
         account.food_allocation_pct = float(data["food_allocation_pct"])
     if "pay_period_days" in data:
-        account.pay_period_days = int(data["pay_period_days"])
+        account.pay_period_days = pay_period_days
     if "meals_per_day" in data:
         account.meals_per_day = int(data["meals_per_day"])
     plan_created = False

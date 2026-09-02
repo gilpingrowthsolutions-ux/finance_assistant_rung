@@ -2,6 +2,12 @@
 
 Current repository and environment state as re-grounded on 2026-08-24. Durable owner decisions live in `docs/RUNG_DECISION_LEDGER.md`; this file records implementation and qualification state.
 
+## Closed-beta release candidate
+
+**CLOSED-BETA RELEASE CANDIDATE — VERIFIED READY (2026-09-01).** Provisioned users can complete the supported manual-first lifecycle without Plaid: sign in, onboarding, canonical Overview/Safe-to-Spend, Money, Goals, recipe-to-current-plan, exact-store Shopping, authoritative recipe-derived cart, Finished Shopping reconciliation, Copilot review/confirm, future-effective Settings changes, logout/resume, household isolation, and responsive navigation. Recipe provenance no longer makes an otherwise safely comparable package unresolved; only explicit compatible quantity/package facts resolve, while unsafe or missing package facts remain unresolved.
+
+Closed beta remains limited to provisioned accounts. Self-service registration, OAuth, password recovery, notification delivery, and bank-management controls are unavailable; Plaid is optional. Physical geolocation may discover stores but never selects one; the user explicitly selects the exact Shopping store.
+
 ## Repository baseline
 
 - Repository: `/home/ky/finance_assistant`

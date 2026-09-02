@@ -43,6 +43,11 @@ test('Slice 8 required-first no-expense path is real, responsive, and ready', as
   await page.locator('#onboardingNextBtn').click();
   await expect(page.locator('#onboardingDialog')).not.toBeVisible();
 
+  // Completion returns to the real Overview and re-reads the canonical
+  // financial snapshot; a user must never need a hard reload for STS.
+  await expect(page.locator('#overview')).toBeVisible();
+  await expect(page.locator('#safeHeroAmount')).not.toHaveText('—');
+
   const state = await page.evaluate(async () => (await fetch('/api/onboarding/state')).json());
   expect(state.required_expense_review).toBe('no_expenses_reviewed');
   expect(state.readiness.complete).toBe(true);

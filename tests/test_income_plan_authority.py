@@ -69,7 +69,13 @@ def test_legacy_account_float_never_becomes_canonical_or_historical():
 
 def test_onboarding_establishes_once_and_settings_edit_is_future_effective():
     client=app.test_client()
-    next_date=NEXT.date().isoformat()
+    # This is a live API integration test, so its current cycle must be
+    # relative to the runtime clock rather than the retired 2026 fixture date.
+    # The initial onboarding write establishes the plan immediately; a later
+    # Settings write must remain pending until this real future boundary.
+    now = datetime.now(timezone.utc)
+    next_boundary = (now + timedelta(days=7)).replace(hour=0, minute=0, second=0, microsecond=0)
+    next_date=next_boundary.date().isoformat()
     initial=client.post("/api/onboarding/complete",json={
         "checking_balance":2000,"pay_period_days":14,"expected_paycheck":1000,
         "expected_paycheck_operation_id":"onboard-once","next_payday":next_date,
@@ -84,11 +90,13 @@ def test_onboarding_establishes_once_and_settings_edit_is_future_effective():
     before=client.get("/api/budget/summary").get_json()
     changed=client.post("/api/account/update",json={"expected_paycheck":1450,"expected_paycheck_operation_id":"settings-once"})
     assert changed.status_code==200
+    replay=client.post("/api/account/update",json={"expected_paycheck":1450,"expected_paycheck_operation_id":"settings-once"})
+    assert replay.status_code==200 and replay.get_json()["income_plan_created"] is False
     with app.app_context():
         hid=household_id();assert IncomePlanVersion.query.filter_by(household_id=hid).count()==2
-        assert resolve_income_plan(hid,at=datetime.now(timezone.utc)).expected_income_cents==100000
+        assert resolve_income_plan(hid,at=now+timedelta(minutes=1)).expected_income_cents==100000
         assert int((changed.get_json()["income_plan"]["pending"])["expected_income_cents"])==145000
-        assert resolve_income_plan(hid,at=NEXT).expected_income_cents==145000
+        assert resolve_income_plan(hid,at=next_boundary).expected_income_cents==145000
     after=client.get("/api/budget/summary").get_json()
     assert before["safe_to_spend"]["period_income_cents"]==after["safe_to_spend"]["period_income_cents"]==100000
     assert before["safe_to_spend"]["safe_to_spend_cents"]==after["safe_to_spend"]["safe_to_spend_cents"]

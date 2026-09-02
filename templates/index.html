@@ -4520,7 +4520,11 @@
           return;
         }
         dialog.close();
-        if (typeof window.rungOpenTab === 'function') window.rungOpenTab('copilot');
+        // Onboarding just established the canonical financial authority.
+        // Re-read it before sending the household to its everyday snapshot;
+        // a completed setup must not leave Safe-to-Spend stale until reload.
+        if (typeof refreshOverview === 'function') await refreshOverview();
+        if (typeof window.rungOpenTab === 'function') window.rungOpenTab('overview');
         if (typeof window.rungCopilotInjectMessage === 'function') {
           window.rungCopilotInjectMessage(resp.data.welcome_message || 'Welcome to Rung.');
         }

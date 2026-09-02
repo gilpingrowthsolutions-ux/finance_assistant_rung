@@ -44,8 +44,9 @@ from tests.meal_plan_support import current_plan_item, install_current_cycle
 
 
 class FakeProvider:
-    def __init__(self) -> None:
+    def __init__(self, *, package_size: str = "1 lb") -> None:
         self.search_calls = 0
+        self.package_size = package_size
         self.detail_calls = 0
 
     def search_products(self, requirement, *, store, limit=20):
@@ -61,7 +62,7 @@ class FakeProvider:
             title=f"Great Value {title} 1 lb",
             brand="Great Value",
             variant=None,
-            package_size="1 lb",
+            package_size=self.package_size,
             price=2.50,
             availability="in_stock",
             price_type="unknown",
@@ -291,6 +292,67 @@ def test_kroger_verified_path_resolves_recipe_requirements(setup):
     assert item["keyword"] == "rice"
     assert item["resolved"] is False
     assert item["store_id"] == VERIFIED_KROGER_STORE.store_id
+
+
+@pytest.mark.parametrize(
+    ("retailer", "store"),
+    [("walmart", VERIFIED_WALMART_STORE), ("kroger", VERIFIED_KROGER_STORE)],
+)
+def test_safe_recipe_container_quantity_resolves_to_adequate_packages(setup, retailer, store):
+    provider = FakeProvider(package_size="2 cans")
+    with app.app_context():
+        hid = current_household_id()
+        recipe = _seed_recipe("Bean Supper", [("3 cans beans", "beans", 3.0, "cans")])
+        db.session.add(current_plan_item(household_id=hid, recipe_id=recipe.id, source="user"))
+        db.session.commit()
+
+        cart = build_verified_retail_cart(retailer=retailer, store=store, provider=provider)
+
+    item = cart["cart_items"][0]
+    assert item["requirement"].get("source_kind") == "recipe"
+    assert item["requirement"]["quantity"] == 3.0
+    assert item["requirement"]["unit"] == "cans"
+    assert item["resolved"] is True
+    assert item["packages_to_buy"] == 2
+    assert item["unit_price"] == 2.50
+    assert item["estimated_price"] == 5.00
+    assert item["package_resolution_uncertain"] is False
+    assert cart["total_cart_cost"] == 5.00
+
+
+def test_recipe_requirement_with_missing_package_truth_remains_unresolved(setup):
+    provider = FakeProvider(package_size="")
+    with app.app_context():
+        hid = current_household_id()
+        recipe = _seed_recipe("Bean Supper", [("3 cans beans", "beans", 3.0, "cans")])
+        db.session.add(current_plan_item(household_id=hid, recipe_id=recipe.id, source="user"))
+        db.session.commit()
+
+        cart = build_verified_walmart_cart(provider=provider)
+
+    item = cart["cart_items"][0]
+    assert item["requirement"]["source_kind"] == "recipe"
+    assert item["resolved"] is False
+    assert item["packages_to_buy"] is None
+    assert item["estimated_price"] is None
+    assert item["package_resolution_uncertain"] is True
+
+
+def test_resolved_recipe_and_manual_requirements_coexist_without_losing_provenance(setup):
+    provider = FakeProvider(package_size="2 cans")
+    with app.app_context():
+        hid = current_household_id()
+        db.session.add(GroceryItem(household_id=hid, item_name="Milk"))
+        recipe = _seed_recipe("Bean Supper", [("3 cans beans", "beans", 3.0, "cans")])
+        db.session.add(current_plan_item(household_id=hid, recipe_id=recipe.id, source="user"))
+        db.session.commit()
+        cart = build_verified_walmart_cart(provider=provider)
+
+    recipe_item = next(item for item in cart["cart_items"] if item["requirement"]["source_kind"] == "recipe")
+    manual_item = next(item for item in cart["cart_items"] if item["requirement"]["source_kind"] == "manual")
+    assert recipe_item["resolved"] is True and recipe_item["packages_to_buy"] == 2
+    assert manual_item["resolved"] is True
+    assert recipe_item["requirement"]["source_recipe_title"] == "Bean Supper"
 
 
 def test_recipe_provenance_survives_into_cart_item(setup):

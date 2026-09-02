@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from decimal import Decimal, ROUND_HALF_UP
+from decimal import Decimal, ROUND_CEILING, ROUND_HALF_UP
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Optional
 
@@ -467,25 +467,70 @@ def _save_cached(requirement: ShoppingRequirement, query: str, selected: Optiona
     db.session.commit()
 
 
+_PACKAGE_UNIT_ALIASES = {
+    "oz": ("mass_oz", Decimal("1")), "ounce": ("mass_oz", Decimal("1")), "ounces": ("mass_oz", Decimal("1")),
+    "lb": ("mass_oz", Decimal("16")), "lbs": ("mass_oz", Decimal("16")), "pound": ("mass_oz", Decimal("16")), "pounds": ("mass_oz", Decimal("16")),
+    "ct": ("count", Decimal("1")), "count": ("count", Decimal("1")), "item": ("count", Decimal("1")), "items": ("count", Decimal("1")), "each": ("count", Decimal("1")), "ea": ("count", Decimal("1")),
+    "bottle": ("container:bottle", Decimal("1")), "bottles": ("container:bottle", Decimal("1")),
+    "can": ("container:can", Decimal("1")), "cans": ("container:can", Decimal("1")),
+    "jar": ("container:jar", Decimal("1")), "jars": ("container:jar", Decimal("1")),
+    "bag": ("container:bag", Decimal("1")), "bags": ("container:bag", Decimal("1")),
+    "box": ("container:box", Decimal("1")), "boxes": ("container:box", Decimal("1")),
+    "pack": ("container:pack", Decimal("1")), "packs": ("container:pack", Decimal("1")),
+    "package": ("container:package", Decimal("1")), "packages": ("container:package", Decimal("1")),
+}
+_PACKAGE_MEASURE_RE = re.compile(
+    r"(?<![a-z0-9])([0-9]+(?:\.[0-9]+)?)\s*(oz|ounces?|lb|lbs?|pounds?|ct|count|items?|each|ea|bottles?|cans?|jars?|bags?|boxes?|packs?|packages?)(?![a-z0-9])",
+    re.IGNORECASE,
+)
+
+
+def _measure(value: Any) -> Optional[tuple[Decimal, str]]:
+    """Return a comparable quantity and dimension only for explicit units."""
+    match = _PACKAGE_MEASURE_RE.fullmatch(str(value or "").strip().lower())
+    if not match:
+        return None
+    quantity = _safe_decimal(match.group(1))
+    unit = _PACKAGE_UNIT_ALIASES.get(match.group(2).lower())
+    if quantity is None or quantity <= 0 or unit is None:
+        return None
+    dimension, multiplier = unit
+    return quantity * multiplier, dimension
+
+
+def _safe_package_count(requirement: ShoppingRequirement, product: dict[str, Any]) -> Optional[int]:
+    """Compute a sufficient sellable-package count without cross-dimension guesses."""
+    requirement_measure = _measure(f"{requirement.quantity} {requirement.unit or ''}")
+    package_measure = _measure(product.get("package_size"))
+    if requirement_measure is None or package_measure is None:
+        return None
+    required, requirement_dimension = requirement_measure
+    per_package, package_dimension = package_measure
+    if requirement_dimension != package_dimension or per_package <= 0:
+        return None
+    return max(1, int((required / per_package).to_integral_value(rounding=ROUND_CEILING)))
+
+
 def _cart_item(requirement: ShoppingRequirement, selected: Optional[dict[str, Any]], alternatives: list[dict[str, Any]], retrieved_at: Optional[str], confidence: str, needs_choice: bool, preference: Optional[dict[str, Any]], preferred: bool, usual_unavailable: bool, substituted: bool, substitution: Optional[dict[str, Any]], suggested: bool, suggestion_reason: Optional[str], *, store: RetailStore, provider_source: str) -> dict[str, Any]:
     raw_quantity = requirement.quantity
     quantity_uncertain = raw_quantity is None
-    package_resolution_uncertain = requirement.source_kind == "recipe"
-    # A recipe/manual volume or mass is a requirement, not a count of retail
-    # packages.  Without a deterministic compatible package conversion, keep
-    # the line unresolved for package arithmetic (e.g. 2 cups rice is never
-    # silently represented as 2 packages).
+    # Source provenance identifies where a requirement came from; it does not
+    # decide whether its quantity can be satisfied by a sellable package.
+    # Resolve only a requirement/product pair whose dimensions are explicitly
+    # comparable.  In particular, never turn cups into ounces or infer a
+    # package count from an ambiguous package label.
     package_count_units = {"item", "items", "each", "ea", "package", "packages", "pack", "packs", "bottle", "bottles", "can", "cans", "jar", "jars", "bag", "bags", "box", "boxes"}
     unit_text = str(requirement.unit or "").strip().lower()
-    # Legacy/manual rows without a unit retain their established item-count
-    # behavior; an explicit dimensional unit must be proven package-countable.
     safe_package_count = not unit_text or unit_text in package_count_units
-    if raw_quantity is None or package_resolution_uncertain or not safe_package_count:
-        packages_to_buy: Optional[int] = None
-        quantity = 1
-    else:
-        quantity = max(1, int(raw_quantity))
-        packages_to_buy = quantity
+    packages_to_buy = _safe_package_count(requirement, selected) if selected is not None else None
+    # Preserve the established manual item-count behavior for old direct
+    # shopping requirements that deliberately state a number of packages but
+    # predate structured package metadata.  Recipe requirements never use
+    # this fallback: their package adequacy must be proven by product truth.
+    if packages_to_buy is None and requirement.source_kind != "recipe" and raw_quantity is not None and safe_package_count:
+        packages_to_buy = max(1, int(raw_quantity))
+    package_resolution_uncertain = packages_to_buy is None
+    quantity = max(1, int(raw_quantity or 1))
     if selected is None:
         # Preserve a deterministic all-out-of-stock result as unavailable;
         # treating it as generic unknown would let Finish lose the exact
@@ -494,7 +539,7 @@ def _cart_item(requirement: ShoppingRequirement, selected: Optional[dict[str, An
         return {"keyword": requirement.base_item.replace(" ", "_"), "requirement": requirement.__dict__, "selected_product": None, "alternatives": alternatives, "resolved": False, "product_label": f"Choose your {requirement.base_item}" if needs_choice else f"{requirement.item_name} — unavailable at selected store", "estimated_price": None, "unit_price": None, "packages_to_buy": packages_to_buy, "quantity_uncertain": quantity_uncertain, "package_resolution_uncertain": package_resolution_uncertain, "price_source": "unresolved", "confirmed_local_store": False, "store_name": store.name, "store_id": store.store_id, "package_size": None, "availability": availability, "retrieved_at": retrieved_at, "selection_confidence": confidence, "needs_user_choice": needs_choice, "preference": preference, "preferred_product": preferred, "usual_unavailable": usual_unavailable, "substituted": substituted, "substitution": substitution, "suggested": False, "suggestion_reason": None, "data_quality": "UNKNOWN", "price_freshness": "UNKNOWN", "availability_freshness": "UNKNOWN"}
     unit_price = selected.get("price")
     data_quality = str(selected.get("data_quality") or "UNKNOWN")
-    estimated_price = round(float(unit_price) * quantity, 2) if (unit_price is not None and packages_to_buy is not None and not quantity_uncertain and not package_resolution_uncertain) else None
+    estimated_price = round(float(unit_price) * packages_to_buy, 2) if (unit_price is not None and packages_to_buy is not None and not quantity_uncertain and not package_resolution_uncertain) else None
     resolved = bool(selected.get("product_id") or selected.get("us_item_id")) and packages_to_buy is not None
     return {"keyword": requirement.base_item.replace(" ", "_"), "requirement": requirement.__dict__, "selected_product": selected, "alternatives": alternatives, "resolved": resolved, "product_label": selected.get("title"), "estimated_price": estimated_price, "unit_price": unit_price if resolved else None, "packages_to_buy": packages_to_buy, "quantity_uncertain": quantity_uncertain, "package_resolution_uncertain": package_resolution_uncertain, "price_source": selected.get("source") or provider_source, "confirmed_local_store": bool(selected.get("verified_location")) and data_quality in {"LIVE_PROVIDER", "RECENT_CONFIRMED"}, "store_name": store.name, "store_id": store.store_id, "package_size": selected.get("package_size"), "availability": selected.get("availability") or "unknown", "fulfillment": selected.get("fulfillment"), "regular_price": selected.get("regular_price"), "promo_price": selected.get("promo_price"), "retrieved_at": retrieved_at or selected.get("retrieved_at"), "selection_confidence": confidence, "needs_user_choice": needs_choice, "preference": preference, "preferred_product": preferred, "usual_unavailable": usual_unavailable, "substituted": substituted, "substitution": substitution, "suggested": suggested, "suggestion_reason": suggestion_reason, "data_quality": data_quality, "price_freshness": selected.get("price_freshness") or "UNKNOWN", "availability_freshness": selected.get("availability_freshness") or "UNKNOWN"}
 

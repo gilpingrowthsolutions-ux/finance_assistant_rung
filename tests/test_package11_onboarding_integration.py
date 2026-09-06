@@ -317,6 +317,14 @@ def test_readiness_is_truthful_when_setup_missing() -> None:
     # must still be reported as missing rather than being invented.
     assert {"long_term_savings_target_percent", "protected_checking_buffer",
             "grocery_need", "fuel_or_transport_need", "payday"} <= missing
+    steps = {row["key"]: row for row in readiness.get("remaining_steps") or []}
+    assert steps["payday"] == {
+        "key": "payday",
+        "label": "Confirm your next payday",
+        "control": "onboardingNextPayday",
+    }
+    assert steps["grocery_need"]["label"] == "Review grocery costs"
+    assert steps["fuel_or_transport_need"]["label"] == "Review transportation costs"
 
 
 # 16 — Household A cannot read or change Household B onboarding state.

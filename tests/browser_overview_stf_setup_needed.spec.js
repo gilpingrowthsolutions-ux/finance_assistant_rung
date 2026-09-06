@@ -65,13 +65,13 @@ test('Overview Scenario A: setup-needed state is truthful and creates no fake st
   // Protected buffer must not fabricate $0.00 when it was never confirmed.
   await expect(page.locator('#allocBufferAmt')).toHaveText('—');
 
-  // CTA/navigation into required setup is understandable and functional.
+  // CTA resumes the served guided setup at the first canonical requirement.
   await page.locator('#overviewSetupBtn').click();
-  await expect(page.locator('#settings')).toBeVisible();
-  await expect(page.locator('[data-settings-pane="financial"]')).toHaveClass(/is-active/);
+  await expect(page.locator('#onboardingDialog')).toBeVisible();
+  await expect(page.locator('#onboardingBalance')).toBeFocused();
 
   // No fake Bills/baselines/store state were created merely by viewing
-  // Overview and navigating: the only mutation so far is the explicit skip.
+  // Overview and opening resumed setup: the only mutation so far is the explicit skip.
   expect(mutations.map((m) => m.path)).toEqual(['/api/onboarding/skip']);
   const billsResp = await page.evaluate(async () => (await fetch('/bills')).json());
   expect(billsResp).toEqual([]);
@@ -96,4 +96,27 @@ test('Overview Scenario A: setup-needed state is truthful and creates no fake st
   const overflowMobile = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
   expect(overflowMobile).toBeLessThanOrEqual(1);
   await page.screenshot({ path: '/tmp/rung-overview-stf-scenario-a-mobile.png', fullPage: true, animations: 'disabled' });
+
+  // Resume does not restart or fabricate setup: it finishes through the
+  // existing canonical onboarding controls and the explicit reviewed-none
+  // path. This fresh household has every financial item remaining.
+  await page.locator('#overviewSetupBtn').click();
+  await expect(page.locator('#onboardingDialog')).toBeVisible();
+  const payday = new Date(Date.now() + 14 * 86400000).toISOString().slice(0, 10);
+  await page.locator('#onboardingBalance').fill('1200');
+  await page.locator('#onboardingPayPeriod').fill('14');
+  await page.locator('#onboardingNextPayday').fill(payday);
+  await page.locator('#onboardingExpectedPaycheck').fill('1200');
+  await page.locator('#onboardingPyfTarget').fill('10');
+  await page.locator('#onboardingSafeBuffer').fill('80');
+  await page.locator('input[name="onboardingExpenses"][value="no"]').check();
+  await expect(page.locator('#onboardingNoExpensesStatus')).toBeVisible();
+  await page.locator('#onboardingNextBtn').click();
+  await page.locator('#onboardingNextBtn').click();
+  await page.locator('#onboardingNextBtn').click();
+  await page.locator('#onboardingNextBtn').click();
+  await expect(page.locator('#onboardingDialog')).not.toBeVisible();
+  await expect(page.locator('#overviewSetupNotice')).not.toHaveClass(/is-visible/);
+  await expect(page.locator('#safeHeroAmount')).not.toHaveText('—');
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBe(true);
 });

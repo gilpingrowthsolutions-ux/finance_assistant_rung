@@ -1094,10 +1094,32 @@ def _onboarding_readiness(account: Account | None) -> dict:
         account = Account.query.filter_by(id=account.id).first() or account
     safe = _compute_safe_to_spend_snapshot(account, owner_scope=household_scope_key())
     missing = safe.get("missing_setup") or []
+    # This is a presentation adapter over the canonical snapshot, not a
+    # second readiness calculation.  Keeping the customer-facing labels and
+    # served controls beside the authoritative keys prevents Overview from
+    # exposing implementation terminology or sending people to Settings to
+    # hunt for a setup requirement.
+    step_definitions = {
+        "checking_balance": {"label": "Confirm your current checking balance", "control": "onboardingBalance"},
+        "pay_period_days": {"label": "Confirm your pay cycle", "control": "onboardingPayPeriod"},
+        "payday": {"label": "Confirm your next payday", "control": "onboardingNextPayday"},
+        "current_period_income": {"label": "Confirm your expected paycheck", "control": "onboardingExpectedPaycheck"},
+        "long_term_savings_target_percent": {"label": "Confirm your Pay Yourself First target", "control": "onboardingPyfTarget"},
+        "protected_checking_buffer": {"label": "Confirm your protected checking buffer", "control": "onboardingSafeBuffer"},
+        "required_expenses_review": {"label": "Review your required expenses", "control": "onboardingRequiredExpenses"},
+        "grocery_need": {"label": "Review grocery costs", "control": "onboardingGroceryBaseline"},
+        "fuel_or_transport_need": {"label": "Review transportation costs", "control": "onboardingFuelBaseline"},
+        "recurring_required_amount": {"label": "Review required expense amounts", "control": "onboardingRequiredExpenses"},
+    }
+    remaining_steps = [
+        {"key": key, **step_definitions.get(key, {"label": key.replace("_", " "), "control": None})}
+        for key in missing
+    ]
     return {
         "complete": bool(safe.get("complete")),
         "safe_to_spend_available": bool(safe.get("complete")),
         "missing_setup": missing,
+        "remaining_steps": remaining_steps,
     }
 
 
@@ -5695,6 +5717,7 @@ def get_budget_summary():
     }
     metrics["readiness"] = _household_readiness(account, owner_scope=owner_scope)
     metrics["safe_to_spend"] = _compute_safe_to_spend_snapshot(account, owner_scope=owner_scope)
+    metrics["onboarding_readiness"] = _onboarding_readiness(account)
     return jsonify(metrics)
 
 

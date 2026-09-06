@@ -259,6 +259,8 @@
     .protection-list { display:flex; flex-direction:column; }
     .protection-row { display:grid; grid-template-columns:34px minmax(0,1fr) auto; gap:11px; align-items:center; padding:13px 0; border-bottom:1px solid var(--border); }
     .protection-row:last-child { border-bottom:0; }
+    button.protection-row { width:100%; border:0; background:transparent; color:inherit; text-align:left; font:inherit; cursor:pointer; border-radius:10px; }
+    button.protection-row:hover, button.protection-row:focus-visible { background:var(--accent-soft); outline:none; }
     .protection-icon { width:32px; height:32px; display:grid; place-items:center; border-radius:10px; background:var(--accent-soft); color:var(--accent); font-weight:800; }
     .protection-label { color:var(--text-dim); font-size:.78rem; }
     .protection-context { color:var(--text-mute); font-size:.69rem; margin-top:2px; }
@@ -1942,14 +1944,13 @@
           <div class="overview-cycle-label"><span id="overviewCycleDates">Loading your current pay cycle…</span><span class="cycle-dot"></span><span id="locationLine">Finding your area…</span></div>
         </div>
         <div class="overview-head-actions">
-          <button id="overviewUpdateBalanceBtn" class="btn is-tertiary" type="button">Update balance</button>
           <button id="overviewAskCopilotBtn" class="btn is-primary" type="button">✦ Ask Copilot</button>
         </div>
       </header>
       <div id="overviewStatus" class="overview-shell-status" role="status" aria-live="polite"></div>
       <div id="overviewSetupNotice" class="overview-setup" role="status">
         <div><strong>Finish your financial setup</strong><span id="overviewSetupText">Rung needs a few confirmed details before it can calculate Safe-to-Spend.</span></div>
-        <button id="overviewSetupBtn" class="btn is-tertiary" type="button">Review setup</button>
+        <button id="overviewSetupBtn" class="btn is-tertiary" type="button">Continue setup</button>
       </div>
 
       <div class="overview-grid">
@@ -1977,7 +1978,7 @@
         <article class="overview-card protection-card" aria-labelledby="protected-heading">
           <div class="overview-card-head"><div><h2 id="protected-heading">Your money is protected</h2><div class="overview-card-sub">What is covered before everyday spending.</div></div></div>
           <div class="protection-list">
-            <div class="protection-row"><span class="protection-icon">$</span><div><div class="protection-label">Checking balance</div><div class="protection-context">Current canonical balance</div></div><strong class="protection-value" id="kpiBalance">—</strong></div>
+            <button id="overviewCheckingBalance" class="protection-row" type="button" aria-label="Update current checking balance"><span class="protection-icon">$</span><span><span class="protection-label">Checking balance</span><span class="protection-context">Update current balance</span></span><strong class="protection-value" id="kpiBalance">—</strong></button>
             <div class="protection-row"><span class="protection-icon">✓</span><div><div class="protection-label">Required Needs</div><div class="protection-context"><span id="kpiBillCount">0</span> obligations currently due</div></div><strong class="protection-value" id="allocUnpaidAmt">—</strong></div>
             <div class="protection-row"><span class="protection-icon">↗</span><div><div class="protection-label">Pay Yourself First</div><div class="protection-context">Feasible current-cycle protection</div></div><strong class="protection-value" id="allocPyfAmt">—</strong></div>
             <div class="protection-row"><span class="protection-icon">◇</span><div><div class="protection-label">Protected buffer</div><div class="protection-context">Kept out of Safe-to-Spend</div></div><strong class="protection-value" id="allocBufferAmt">—</strong></div>
@@ -1994,7 +1995,6 @@
         </article>
         <div class="overview-actions" aria-label="Overview actions">
           <button id="overviewCopilotCard" class="overview-action is-primary" type="button"><span class="overview-action-icon">✦</span><span><strong>Ask Copilot</strong><span>Check affordability or ask about your plan</span></span></button>
-          <button id="overviewBalanceCard" class="overview-action" type="button"><span class="overview-action-icon">↻</span><span><strong>Update balance</strong><span>Keep today’s answer grounded</span></span></button>
         </div>
       </div>
 
@@ -2591,7 +2591,7 @@
       </div>
 
       <div class="onboarding-step is-active" data-step="0">
-        <div class="onboarding-section">
+        <div class="onboarding-section" id="onboardingMoneySection">
           <div class="onboarding-section-label">Money <span class="onboarding-required">(Required)</span></div>
           <div class="field">
             <label for="onboardingBalance">Current checking balance <span class="onboarding-required">(Required)</span></label>
@@ -2618,10 +2618,10 @@
             <input type="number" id="onboardingSafeBuffer" min="0" step="0.01" required placeholder="e.g. 150" />
           </div>
         </div>
-        <div class="onboarding-section">
+        <div class="onboarding-section" id="onboardingExpensesSection">
           <div class="onboarding-section-label">Required expenses <span class="onboarding-required">(Required)</span></div>
           <p class="panel-sub">Do you currently have required expenses, such as bills, groceries, or transportation?</p>
-          <div class="onboarding-choice-row" role="radiogroup" aria-label="Do you currently have required expenses?">
+          <div id="onboardingRequiredExpenses" class="onboarding-choice-row" role="radiogroup" aria-label="Do you currently have required expenses" tabindex="-1">
             <label class="onboarding-choice"><input type="radio" name="onboardingExpenses" value="yes" /> Yes, review my expenses</label>
             <label class="onboarding-choice"><input type="radio" name="onboardingExpenses" value="no" /> No, I do not currently have required expenses</label>
           </div>
@@ -3205,8 +3205,9 @@
       if (setupNotice) setupNotice.classList.toggle('is-visible', safe.state === 'needs_setup' || safe.complete === false);
       var setupText = $('overviewSetupText');
       if (setupText && (safe.state === 'needs_setup' || safe.complete === false)) {
-        var missing = ((safe.readiness || {}).missing_critical || safe.missing_setup || []).map(function(item){ return String(item).replaceAll('_', ' '); });
-        setupText.textContent = missing.length ? 'Confirm ' + missing.join(', ') + ' so Rung can calculate this truthfully.' : 'Confirm your current balance and plan details so Rung can calculate this truthfully.';
+        var remainingSteps = ((d.onboarding_readiness || {}).remaining_steps || []);
+        var labels = remainingSteps.map(function(step) { return String(step.label || ''); }).filter(Boolean);
+        setupText.textContent = labels.length ? labels.length + ' ' + (labels.length === 1 ? 'thing' : 'things') + ' left: ' + labels.join(' • ') + '.' : 'Rung needs a few confirmed details before it can calculate Safe-to-Spend.';
       }
       if ($('settingsStoreName') && d.location) {
         $('settingsStoreName').textContent = d.location.store_name ? d.location.store_name + ' (#' + (d.location.location_id || '\u2014') + ')' : 'Not set';
@@ -4316,6 +4317,7 @@
       var currentStep = 0;
       var requiredExpenseState = 'unanswered';
       var stateWriteInFlight = false;
+      var resumingSetup = false;
       var locationTouched = false;
       var expectedPaycheckOperationId = 'onboarding-pay-plan-' + (window.crypto && window.crypto.randomUUID ? window.crypto.randomUUID() : String(Date.now()));
 
@@ -4519,6 +4521,64 @@
         if (currentStep === steps.length - 1) buildReview();
       }
 
+      function populateFinancialDefaults(defaults) {
+        defaults = defaults || {};
+        var values = [
+          ['onboardingBalance', defaults.checking_balance],
+          ['onboardingPayPeriod', defaults.pay_period_days],
+          ['onboardingExpectedPaycheck', defaults.expected_paycheck],
+          ['onboardingNextPayday', defaults.next_payday],
+          ['onboardingPyfTarget', defaults.long_term_savings_target_percent],
+          ['onboardingSafeBuffer', defaults.protected_buffer],
+          ['onboardingGroceryBaseline', defaults.baseline_grocery_cost],
+          ['onboardingFuelBaseline', defaults.baseline_fuel_cost]
+        ];
+        values.forEach(function (row) {
+          var input = document.getElementById(row[0]);
+          if (input && row[1] != null) input.value = row[1];
+        });
+      }
+
+      function showRemainingSetup(remainingSteps) {
+        var controls = (remainingSteps || []).map(function (step) { return step.control; }).filter(Boolean);
+        var moneyControls = ['onboardingBalance', 'onboardingPayPeriod', 'onboardingNextPayday', 'onboardingExpectedPaycheck', 'onboardingPyfTarget', 'onboardingSafeBuffer'];
+        moneyControls.forEach(function (id) {
+          var input = document.getElementById(id);
+          var field = input && input.closest('.field');
+          if (field) field.hidden = controls.indexOf(id) === -1;
+        });
+        var moneySection = document.getElementById('onboardingMoneySection');
+        if (moneySection) moneySection.hidden = !moneyControls.some(function (id) { return controls.indexOf(id) !== -1; });
+        var expensesSection = document.getElementById('onboardingExpensesSection');
+        if (expensesSection) expensesSection.hidden = controls.indexOf('onboardingRequiredExpenses') === -1 && controls.indexOf('onboardingGroceryBaseline') === -1 && controls.indexOf('onboardingFuelBaseline') === -1;
+        var first = controls[0] && document.getElementById(controls[0]);
+        setTimeout(function () { if (first) first.focus(); }, 0);
+      }
+
+      window.rungResumeOnboarding = async function (readiness) {
+        var response = await api('GET', '/api/onboarding/state');
+        if (!response.ok) { flash('Setup could not be opened right now.', 'error'); return; }
+        var state = response.data || {};
+        var canonicalReadiness = state.readiness || readiness || {};
+        var remainingSteps = canonicalReadiness.remaining_steps || [];
+        if (!remainingSteps.length) { await refreshOverview(); return; }
+        resumingSetup = true;
+        requiredExpenseState = state.required_expense_review || 'unanswered';
+        populateFinancialDefaults(state.defaults || {});
+        var answered = requiredExpenseState === 'no_expenses_reviewed' ? 'no' :
+          (requiredExpenseState === 'has_expenses_pending_review' || requiredExpenseState === 'has_expenses_reviewed' ? 'yes' : '');
+        if (answered) {
+          var answerRadio = dialog.querySelector('input[name="onboardingExpenses"][value="' + answered + '"]');
+          if (answerRadio) answerRadio.checked = true;
+        }
+        renderExpenseState();
+        currentStep = 0;
+        renderStep();
+        showRemainingSetup(remainingSteps);
+        if (skipAllBtn) skipAllBtn.textContent = 'Cancel';
+        if (!dialog.open) dialog.showModal();
+      };
+
       async function finalizeFromWizard() {
         var payload = gatherPayload();
         var resp = await api('POST', '/api/onboarding/complete', payload);
@@ -4540,6 +4600,12 @@
       }
 
       async function skipEntireSetup() {
+        if (resumingSetup) {
+          dialog.close();
+          resumingSetup = false;
+          if (skipAllBtn) skipAllBtn.textContent = 'Set up later';
+          return;
+        }
         var resp = await api('POST', '/api/onboarding/skip', {});
         if (!resp.ok) {
           flash('We could not skip setup right now. Please try again.', 'error');
@@ -4631,7 +4697,6 @@
         .then(function (resp) {
           if (!resp.ok) return;
           var state = resp.data || {};
-          if (!state.show_onboarding) return;
 
           var defaults = state.defaults || {};
           var billTemplates = state.bill_templates || [];
@@ -4645,23 +4710,7 @@
           if (restrictions) restrictions.value = (defaults.dietary_restrictions || []).join(', ');
           var allergies = document.getElementById('onboardingAllergies');
           if (allergies) allergies.value = (defaults.allergies || []).join(', ');
-          var groceryBaseline = document.getElementById('onboardingGroceryBaseline');
-          if (groceryBaseline && defaults.baseline_grocery_cost != null) groceryBaseline.value = defaults.baseline_grocery_cost;
-          var fuelBaseline = document.getElementById('onboardingFuelBaseline');
-          if (fuelBaseline && defaults.baseline_fuel_cost != null) fuelBaseline.value = defaults.baseline_fuel_cost;
-
-          var balance = document.getElementById('onboardingBalance');
-          if (balance && defaults.checking_balance != null) balance.value = defaults.checking_balance;
-          var payPeriod = document.getElementById('onboardingPayPeriod');
-          if (payPeriod && defaults.pay_period_days) payPeriod.value = defaults.pay_period_days;
-          var expectedPaycheck = document.getElementById('onboardingExpectedPaycheck');
-          if (expectedPaycheck && defaults.expected_paycheck != null) expectedPaycheck.value = defaults.expected_paycheck;
-          var nextPayday = document.getElementById('onboardingNextPayday');
-          if (nextPayday && defaults.next_payday) nextPayday.value = defaults.next_payday;
-          var pyfTarget = document.getElementById('onboardingPyfTarget');
-          if (pyfTarget && defaults.long_term_savings_target_percent != null) pyfTarget.value = defaults.long_term_savings_target_percent;
-          var safeBuffer = document.getElementById('onboardingSafeBuffer');
-          if (safeBuffer && defaults.protected_buffer != null) safeBuffer.value = defaults.protected_buffer;
+          populateFinancialDefaults(defaults);
           var shoppingStyle = document.getElementById('onboardingShoppingStyle');
           if (shoppingStyle && defaults.shopping_style) shoppingStyle.value = defaults.shopping_style;
           var shoppingDefaults = defaults.household_shopping_defaults || {};
@@ -4689,7 +4738,7 @@
 
           currentStep = 0;
           renderStep();
-          dialog.showModal();
+          if (state.show_onboarding) dialog.showModal();
         })
         .catch(function () {
           // Non-blocking: onboarding failure should never break app launch.
@@ -6722,7 +6771,7 @@
         dialog.showModal();
         if (input) input.focus();
       }
-      ['overviewUpdateBalanceBtn', 'overviewBalanceCard', 'moneyUpdateBalanceBtn'].forEach(function(id) {
+      ['overviewCheckingBalance', 'moneyUpdateBalanceBtn'].forEach(function(id) {
         var button = document.getElementById(id);
         if (button) button.addEventListener('click', openBalanceDialog);
       });
@@ -6731,7 +6780,9 @@
         if (button) button.addEventListener('click', function() { if (window.rungOpenTab) window.rungOpenTab('copilot'); });
       });
       var setup = document.getElementById('overviewSetupBtn');
-      if (setup) setup.addEventListener('click', function() { if (window.rungOpenTab) window.rungOpenTab('settings'); });
+      if (setup) setup.addEventListener('click', function() {
+        if (window.rungResumeOnboarding) window.rungResumeOnboarding();
+      });
       var cancel = document.getElementById('overviewBalanceCancel');
       if (cancel) cancel.addEventListener('click', function() { if (dialog) dialog.close(); });
       if (form) form.addEventListener('submit', async function(event) {

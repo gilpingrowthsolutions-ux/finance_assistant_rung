@@ -62,7 +62,7 @@ test.describe.serial('Overview Scenarios B-G (ready household)', () => {
     await login(page, 'sts-ready@example.com', 'sts-pass-123');
     mutations.length = 0;
 
-    await page.locator('#overviewUpdateBalanceBtn').click();
+    await page.locator('#overviewCheckingBalance').click();
     await expect(page.locator('#overviewBalanceDialog')).toBeVisible();
     await page.locator('#overviewBalanceInput').fill('2100.00');
     await page.locator('#overviewBalanceSave').click();

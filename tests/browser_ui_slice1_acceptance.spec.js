@@ -45,7 +45,7 @@ test('approved shell and Overview use canonical state without navigation writes'
   }
   expect(apiMutations).toEqual([]);
 
-  await page.locator('#overviewUpdateBalanceBtn').click();
+  await page.locator('#overviewCheckingBalance').click();
   await expect(page.locator('#overviewBalanceDialog')).toBeVisible();
   await page.locator('#overviewBalanceInput').fill(String(nextBalance));
   await page.locator('#overviewBalanceSave').click();

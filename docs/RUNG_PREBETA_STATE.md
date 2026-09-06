@@ -2,7 +2,7 @@
 
 ## Current / next state
 
-**CURRENT — OWNER BETA PAUSED ON P1 SETUP UX DEFECT.** The implementation and focused browser checks are complete, but the required full qualification matrix has not yet finished. Owner beta is not complete.
+**CURRENT — OWNER BETA READY TO RESUME.** The P1 Overview setup-discoverability and duplicate-balance-action qualification matrix passed. Owner beta is not complete.
 
 **NEXT — founder/owner resumes personal beta testing.** External closed beta remains blocked until the owner beta is completed and any newly found blockers are addressed.
 
@@ -27,7 +27,7 @@
 
 ## Known defect
 
-- Owner-beta P1 Overview setup-discoverability and duplicate-balance-action qualification remains open until the full Python suite and the required partial-setup browser matrix pass on disposable data.
+- No separately confirmed current product defect is carried in this ledger.
 
 ## Unresolved
 

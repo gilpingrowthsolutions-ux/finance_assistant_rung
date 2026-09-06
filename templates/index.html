@@ -1380,6 +1380,7 @@
       background: var(--bg-sunken); border: 1px solid var(--border);
       border-radius: var(--radius-md); padding: 14px 16px;
     }
+    .onboarding-step [hidden] { display: none !important; }
     .onboarding-step .onboarding-section-label {
       font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.08em;
       color: var(--text-mute); font-weight: 700; margin-bottom: 10px;
@@ -4551,6 +4552,11 @@
         if (moneySection) moneySection.hidden = !moneyControls.some(function (id) { return controls.indexOf(id) !== -1; });
         var expensesSection = document.getElementById('onboardingExpensesSection');
         if (expensesSection) expensesSection.hidden = controls.indexOf('onboardingRequiredExpenses') === -1 && controls.indexOf('onboardingGroceryBaseline') === -1 && controls.indexOf('onboardingFuelBaseline') === -1;
+        ['onboardingGroceryBaseline', 'onboardingFuelBaseline'].forEach(function (id) {
+          var input = document.getElementById(id);
+          var field = input && input.closest('.field');
+          if (field) field.hidden = controls.indexOf(id) === -1;
+        });
         var first = controls[0] && document.getElementById(controls[0]);
         setTimeout(function () { if (first) first.focus(); }, 0);
       }

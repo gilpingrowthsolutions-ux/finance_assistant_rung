@@ -17,7 +17,9 @@ os.environ.setdefault("PLAID_ENV", "sandbox")
 
 from app import app
 from extensions import db
-from models import Account, ExpenseTransaction, Household, PlaidItem, PlaidTransaction, ShoppingTripCompletion, TransactionReconciliation
+from models import (Account, ExpenseTransaction, Household, IncomePyfProtection, PlaidItem, PlaidTransaction,
+                    SavingsDestination, SavingsTransfer, SavingsTransferReconciliation,
+                    ShoppingTripCompletion, TransactionReconciliation)
 import services.plaid_foundation as pf
 from services.household_context import household_id as current_household_id
 
@@ -169,6 +171,223 @@ def test_confirmed_match_counts_one_expense_and_is_idempotent(monkeypatch: pytes
         assert tx.plaid_transaction_id == "tx_1"
         assert round(float(Account.query.first().checking_balance), 2) == 962.00
         assert TransactionReconciliation.query.filter_by(status="matched").count() == 1
+
+
+def test_manual_savings_transfer_then_plaid_stages_and_reconciles_without_second_debit(monkeypatch: pytest.MonkeyPatch) -> None:
+    _setup(balance=1620.0)
+    with app.app_context():
+        hid = current_household_id()
+        destination = SavingsDestination(household_id=hid, kind='reserve', name='Savings', priority=1)
+        db.session.add(destination); db.session.flush()
+        transfer = SavingsTransfer(household_id=hid, operation_id='manual-bank-transfer', destination_id=destination.id,
+                                  amount_cents=18000, transfer_type='deposit', income_pyf_protection_id=None, external_direction='outflow')
+        db.session.add(transfer); db.session.commit()
+        transfer_id = transfer.id
+    fake = FakePlaidClient(); _connect(monkeypatch, fake)
+    transfer_observation = _plaid_tx(tx_id='plaid-transfer-1', amount=180.0, merchant='TRANSFER TO SAVINGS', date_text=_date_text())
+    transfer_observation['category'] = ['Transfer', 'Savings']
+    _sync(monkeypatch, fake, [{'added': [transfer_observation], 'modified': [], 'removed': [], 'has_more': False, 'next_cursor': 'c1'}])
+    with app.app_context():
+        assert ExpenseTransaction.query.count() == 0
+        assert Account.query.first().checking_balance == 1620.0
+        proposal = SavingsTransferReconciliation.query.one()
+        assert proposal.status == 'proposed' and proposal.savings_transfer_id == transfer_id
+    for _ in range(2):
+        decision = client.post('/api/reconciliation/transfer-decision', json={
+            'user_id': 'anonymous', 'action': 'match', 'savings_transfer_id': transfer_id,
+            'plaid_transaction_id': 'plaid-transfer-1',
+        })
+        assert decision.status_code == 200
+    _sync(monkeypatch, fake, [{'added': [], 'modified': [transfer_observation], 'removed': [], 'has_more': False, 'next_cursor': 'c2'}])
+    with app.app_context():
+        transfer = db.session.get(SavingsTransfer, transfer_id)
+        assert transfer.plaid_transaction_id == 'plaid-transfer-1'
+        assert SavingsTransfer.query.count() == 1 and ExpenseTransaction.query.count() == 0
+        assert SavingsTransferReconciliation.query.one().status == 'matched'
+        assert Account.query.first().checking_balance == 1620.0
+
+
+def test_manual_pyf_transfer_then_plaid_match_and_replay_has_one_effect(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The real manual transfer endpoint and real provider projection share one effect."""
+    _setup(balance=1800.0)
+    with app.app_context():
+        hid = current_household_id(); account = Account.query.one()
+        destination = SavingsDestination(household_id=hid, kind='reserve', name='Savings', priority=1)
+        income = ExpenseTransaction(household_id=hid, description='Payroll', amount=1800,
+                                    category='income', source='manual', local_account_id=account.id)
+        db.session.add_all([destination, income]); db.session.flush()
+        protection = IncomePyfProtection(household_id=hid, income_transaction_id=income.id,
+            operation_id='fixture-income-pyf', target_percent=10, target_cents=18000,
+            protected_cents=18000, status='active')
+        db.session.add(protection); db.session.commit(); destination_id, protection_id = destination.id, protection.id
+    manual = client.post('/api/savings/transfer', json={'confirm': True, 'operation_id': 'manual-pyf-bank-transfer',
+        'amount': 180, 'destination_id': destination_id, 'income_pyf_protection_id': protection_id,
+        'transfer_type': 'deposit', 'purpose': 'Recorded checking-to-savings transfer', 'economic_date': TODAY.isoformat()})
+    assert manual.status_code == 200
+    with app.app_context():
+        transfer = SavingsTransfer.query.one(); assert transfer.external_direction == 'outflow'
+        assert transfer.amount_cents == 18000 and transfer.income_pyf_protection_id == protection_id
+        assert Account.query.one().checking_balance == 1620.0
+        assert db.session.get(IncomePyfProtection, protection_id).fulfilled_cents == 18000
+        transfer_id = transfer.id
+    fake = FakePlaidClient(); _connect(monkeypatch, fake)
+    observed = _plaid_tx(tx_id='plaid-manual-pyf', amount=180.0, merchant='TRANSFER TO SAVINGS', date_text=TODAY.isoformat())
+    observed['category'] = ['Transfer', 'Savings']
+    _sync(monkeypatch, fake, [{'added': [observed], 'modified': [], 'removed': [], 'has_more': False, 'next_cursor': 'c1'}])
+    proposal = _proposal_rows(); assert len(proposal) == 1 and proposal[0]['kind'] == 'transfer'
+    matched = client.post('/api/reconciliation/transfer-decision', json={'action': 'match',
+        'savings_transfer_id': transfer_id, 'plaid_transaction_id': 'plaid-manual-pyf'})
+    assert matched.status_code == 200
+    _sync(monkeypatch, fake, [{'added': [], 'modified': [observed], 'removed': [], 'has_more': False, 'next_cursor': 'c2'}])
+    with app.app_context():
+        assert Account.query.one().checking_balance == 1620.0
+        assert db.session.get(IncomePyfProtection, protection_id).fulfilled_cents == 18000
+        assert SavingsTransfer.query.filter(SavingsTransfer.superseded_by_transfer_id.is_(None)).count() == 1
+        assert ExpenseTransaction.query.filter(ExpenseTransaction.category != 'income').count() == 0
+        assert SavingsTransferReconciliation.query.filter_by(status='matched').count() == 1
+
+
+def test_plaid_first_transfer_records_checking_effect_without_guessing_destination_or_pyf(monkeypatch: pytest.MonkeyPatch) -> None:
+    _setup(balance=1800.0)
+    fake = FakePlaidClient(); _connect(monkeypatch, fake)
+    observation = _plaid_tx(tx_id='plaid-first-transfer', amount=180.0, merchant='TRANSFER TO SAVINGS', date_text=_date_text())
+    observation['category'] = ['Transfer', 'Savings']
+    _sync(monkeypatch, fake, [{'added': [observation], 'modified': [], 'removed': [], 'has_more': False, 'next_cursor': 'c1'}])
+    with app.app_context():
+        proposal = SavingsTransferReconciliation.query.one()
+        assert proposal.status == 'proposed' and proposal.savings_transfer_id is None
+        observed = SavingsTransfer.query.one()
+        assert observed.transfer_type == 'plaid_observation' and observed.destination_id is None and observed.income_pyf_protection_id is None
+        assert ExpenseTransaction.query.count() == 0
+        assert Account.query.first().checking_balance == 1620.0
+
+
+def test_transfer_keep_separate_applies_held_plaid_effect_in_the_decision(monkeypatch: pytest.MonkeyPatch) -> None:
+    _setup(balance=820.0)  # manual transfer A has already debited checking once
+    with app.app_context():
+        hid = current_household_id()
+        dest = SavingsDestination(household_id=hid, kind='reserve', name='Savings', priority=1)
+        db.session.add(dest); db.session.flush()
+        manual = SavingsTransfer(household_id=hid, operation_id='manual-a', destination_id=dest.id,
+                                 amount_cents=18000, transfer_type='deposit', economic_date=TODAY)
+        db.session.add(manual); db.session.commit(); manual_id = manual.id
+    fake = FakePlaidClient(); _connect(monkeypatch, fake)
+    observed = _plaid_tx(tx_id='separate-now', amount=180.0, merchant='TRANSFER TO SAVINGS', date_text=_date_text())
+    observed['category'] = ['Transfer', 'Savings']
+    _sync(monkeypatch, fake, [{'added': [observed], 'modified': [], 'removed': [], 'has_more': False, 'next_cursor': 'c1'}])
+    for expected in ('kept_separate', 'already_kept_separate'):
+        response = client.post('/api/reconciliation/transfer-decision', json={'user_id': 'anonymous', 'action': 'keep_separate', 'savings_transfer_id': manual_id, 'plaid_transaction_id': 'separate-now'})
+        assert response.status_code == 200 and response.get_json()['result']['status'] == expected
+    with app.app_context():
+        assert Account.query.first().checking_balance == 640.0
+        assert SavingsTransfer.query.filter(SavingsTransfer.superseded_by_transfer_id.is_(None)).count() == 2
+    _sync(monkeypatch, fake, [{'added': [], 'modified': [observed], 'removed': [], 'has_more': False, 'next_cursor': 'c2'}])
+    with app.app_context():
+        assert Account.query.first().checking_balance == 640.0
+
+
+def test_plaid_first_review_enriches_the_canonical_observation_without_new_debit(monkeypatch: pytest.MonkeyPatch) -> None:
+    _setup(balance=1000.0)
+    with app.app_context():
+        dest = SavingsDestination(household_id=current_household_id(), kind='reserve', name='Savings', priority=1)
+        db.session.add(dest); db.session.commit(); dest_id = dest.id
+    fake = FakePlaidClient(); _connect(monkeypatch, fake)
+    observed = _plaid_tx(tx_id='review-observation', amount=180.0, merchant='TRANSFER TO SAVINGS', date_text=_date_text())
+    observed['category'] = ['Transfer', 'Savings']
+    _sync(monkeypatch, fake, [{'added': [observed], 'modified': [], 'removed': [], 'has_more': False, 'next_cursor': 'c1'}])
+    response = client.post('/api/savings/transfer', json={'confirm': True, 'operation_id': 'review-op', 'plaid_transaction_id': 'review-observation', 'amount': 180, 'destination_id': dest_id, 'transfer_type': 'deposit', 'purpose': 'Emergency savings'})
+    assert response.status_code == 200
+    with app.app_context():
+        row = SavingsTransfer.query.one()
+        assert row.destination_id == dest_id and row.purpose == 'Emergency savings' and row.economic_date == TODAY
+        assert Account.query.first().checking_balance == 820.0
+
+
+def test_plaid_first_duplicate_manual_match_supersedes_duplicate_and_corrects_checking_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    _setup(balance=1000.0)
+    with app.app_context():
+        hid = current_household_id(); dest = SavingsDestination(household_id=hid, kind='reserve', name='Savings', priority=1)
+        income = ExpenseTransaction(household_id=hid, description='Paycheck', amount=1800, category='income', source='manual')
+        db.session.add_all([dest, income]); db.session.flush()
+        protection = IncomePyfProtection(household_id=hid, income_transaction_id=income.id, operation_id='p', target_percent=10, target_cents=18000, protected_cents=18000, fulfilled_cents=18000, status='fulfilled')
+        db.session.add(protection); db.session.commit(); dest_id, protection_id = dest.id, protection.id
+    fake = FakePlaidClient(); _connect(monkeypatch, fake)
+    observed = _plaid_tx(tx_id='duplicate-observation', amount=180.0, merchant='TRANSFER TO SAVINGS', date_text=_date_text())
+    observed['category'] = ['Transfer', 'Savings']
+    _sync(monkeypatch, fake, [{'added': [observed], 'modified': [], 'removed': [], 'has_more': False, 'next_cursor': 'c1'}])
+    with app.app_context():
+        # Simulate a later manual physical representation that already debited
+        # checking; reconciliation must retain it as provenance, not effect.
+        manual = SavingsTransfer(household_id=current_household_id(), operation_id='duplicate-manual', destination_id=dest_id, amount_cents=18000, transfer_type='deposit', economic_date=TODAY, income_pyf_protection_id=protection_id, external_direction='outflow')
+        db.session.add(manual); db.session.flush(); Account.query.first().checking_balance -= 180; db.session.commit(); manual_id = manual.id
+    response = client.post('/api/reconciliation/transfer-decision', json={'user_id': 'anonymous', 'action': 'match', 'savings_transfer_id': manual_id, 'plaid_transaction_id': 'duplicate-observation'})
+    assert response.status_code == 200
+    with app.app_context():
+        canonical = SavingsTransfer.query.filter_by(plaid_transaction_id='duplicate-observation').one()
+        duplicate = db.session.get(SavingsTransfer, manual_id)
+        assert duplicate.superseded_by_transfer_id == canonical.id
+        assert canonical.income_pyf_protection_id == protection_id
+        assert Account.query.first().checking_balance == 820.0
+
+
+def test_plaid_first_non_pyf_manual_duplicate_match_reverses_the_duplicate_debit(monkeypatch: pytest.MonkeyPatch) -> None:
+    _setup(balance=1000.0)
+    with app.app_context():
+        dest = SavingsDestination(household_id=current_household_id(), kind='goal', name='Car', priority=1)
+        db.session.add(dest); db.session.commit(); destination_id = dest.id
+    fake = FakePlaidClient(); _connect(monkeypatch, fake)
+    observed = _plaid_tx(tx_id='non-pyf-duplicate', amount=180.0, merchant='TRANSFER TO SAVINGS', date_text=_date_text())
+    observed['category'] = ['Transfer', 'Savings']
+    _sync(monkeypatch, fake, [{'added': [observed], 'modified': [], 'removed': [], 'has_more': False, 'next_cursor': 'c1'}])
+    with app.app_context():
+        assert Account.query.first().checking_balance == 820.0
+
+    manual_response = client.post('/api/savings/transfer', json={'confirm': True, 'operation_id': 'non-pyf-manual', 'amount': 180, 'destination_id': destination_id, 'transfer_type': 'deposit', 'purpose': 'Car savings'})
+    assert manual_response.status_code == 200
+    manual_id = manual_response.get_json()['transfer_id']
+    with app.app_context():
+        assert Account.query.first().checking_balance == 640.0
+    for expected in ('matched', 'already_matched'):
+        matched = client.post('/api/reconciliation/transfer-decision', json={'user_id': 'anonymous', 'action': 'match', 'savings_transfer_id': manual_id, 'plaid_transaction_id': 'non-pyf-duplicate'})
+        assert matched.status_code == 200 and matched.get_json()['result']['status'] == expected
+    with app.app_context():
+        canonical = SavingsTransfer.query.filter_by(plaid_transaction_id='non-pyf-duplicate').one()
+        duplicate = db.session.get(SavingsTransfer, manual_id)
+        assert canonical.destination_id == destination_id
+        assert duplicate.superseded_by_transfer_id == canonical.id
+        assert canonical.income_pyf_protection_id is None and duplicate.income_pyf_protection_id is None
+        assert Account.query.first().checking_balance == 820.0
+        from services.savings_allocation import balance_cents
+        assert balance_cents(current_household_id(), destination_id) == 18000
+    _sync(monkeypatch, fake, [{'added': [], 'modified': [observed], 'removed': [], 'has_more': False, 'next_cursor': 'c2'}])
+    with app.app_context():
+        assert Account.query.first().checking_balance == 820.0
+
+
+def test_internal_pyf_allocation_is_never_a_physical_transfer_duplicate(monkeypatch: pytest.MonkeyPatch) -> None:
+    _setup(balance=1000.0)
+    with app.app_context():
+        hid = current_household_id()
+        destination = SavingsDestination(household_id=hid, kind='reserve', name='Reserve', priority=1)
+        db.session.add(destination); db.session.flush()
+        db.session.add(SavingsTransfer(household_id=hid, operation_id='internal-allocation',
+            destination_id=destination.id, amount_cents=18000, transfer_type='pyf_allocation', economic_date=TODAY))
+        db.session.commit()
+    fake = FakePlaidClient(); _connect(monkeypatch, fake)
+    posted = _plaid_tx(tx_id='real-physical-after-allocation', amount=180.0,
+        merchant='TRANSFER TO SAVINGS', date_text=_date_text())
+    posted['category'] = ['Transfer', 'Savings']
+    _sync(monkeypatch, fake, [{'added': [posted], 'modified': [], 'removed': [], 'has_more': False, 'next_cursor': 'c1'}])
+    with app.app_context():
+        proposal = SavingsTransferReconciliation.query.one()
+        assert proposal.savings_transfer_id is None
+        observed = SavingsTransfer.query.filter_by(plaid_transaction_id='real-physical-after-allocation').one()
+        assert observed.external_direction == 'outflow' and observed.income_pyf_protection_id is None
+        assert ExpenseTransaction.query.count() == 0
+        assert Account.query.first().checking_balance == 820.0
+    _sync(monkeypatch, fake, [{'added': [], 'modified': [posted], 'removed': [], 'has_more': False, 'next_cursor': 'c2'}])
+    with app.app_context():
+        assert Account.query.first().checking_balance == 820.0
 
 
 def test_keep_separate_preserves_both_and_rejected_pair_not_resurfaced(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -426,7 +645,7 @@ def test_balance_reconciliation_is_excluded_from_matching(monkeypatch: pytest.Mo
     assert _proposal_rows() == []
 
 
-def test_pending_to_posted_lifecycle_does_not_duplicate_proposals(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_pending_to_posted_lifecycle_proposes_only_the_confirmed_transaction(monkeypatch: pytest.MonkeyPatch) -> None:
     _setup()
     fake = FakePlaidClient()
     _connect(monkeypatch, fake)
@@ -437,7 +656,7 @@ def test_pending_to_posted_lifecycle_does_not_duplicate_proposals(monkeypatch: p
 
     _sync(monkeypatch, fake, [{"added": [_plaid_tx(tx_id="tx_pending", amount=38.0, merchant="DOLLAR GENERAL #1234", date_text=pending_date.isoformat(), pending=True)], "modified": [], "removed": [], "has_more": False, "next_cursor": "c1"}])
     props1 = _proposal_rows()
-    assert len(props1) == 1
+    assert props1 == []
 
     posted = _plaid_tx(tx_id="tx_posted", amount=38.0, merchant="DOLLAR GENERAL #1234", date_text=posted_date.isoformat(), pending=False, pending_id="tx_pending")
     _sync(monkeypatch, fake, [{"added": [posted], "modified": [], "removed": [], "has_more": False, "next_cursor": "c2"}])

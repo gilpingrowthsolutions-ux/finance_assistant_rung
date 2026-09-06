@@ -100,7 +100,9 @@ def test_onboarding_establishes_once_and_settings_edit_is_future_effective():
     after=client.get("/api/budget/summary").get_json()
     assert before["safe_to_spend"]["period_income_cents"]==after["safe_to_spend"]["period_income_cents"]==100000
     assert before["safe_to_spend"]["safe_to_spend_cents"]==after["safe_to_spend"]["safe_to_spend_cents"]
-    assert client.get("/api/paycheck-timeline").get_json()["trajectory"]["components"]["confirmed_income_variance_cents"]==-100000
+    timeline = client.get("/api/paycheck-timeline").get_json()
+    assert timeline["income"]["is_due"] is False
+    assert "trajectory" not in timeline
 
 
 def test_missing_plan_keeps_pyf_setup_needed_despite_legacy_default():

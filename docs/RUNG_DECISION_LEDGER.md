@@ -53,6 +53,14 @@ The first bounded UI-convergence slice is Global Shell + Overview. This priority
 - Ahead/Behind is informational only. It is not a second Safe-to-Spend engine, and favorable variance does not automatically grant spending permission.
 - Current mutable expected-paycheck input must never rewrite historical pay-cycle expectations. Expected-income authority is effective-dated and historical cycles resolve the version effective for that cycle.
 
+## Owner-beta financial authority closeout
+
+- A real paycheck has one canonical income effect and one linked PYF consequence. Pending payroll and balance refresh have zero PYF effect; posted/replayed payroll and manual/provider income are exactly-once effects.
+- Ambiguous manual/provider income is a served Match-or-Keep-Separate review, never an automatic guess. Outbound or inbound transfers are not income.
+- A real physical savings movement has one economic effect and at most one reviewed PYF fulfillment. Internal allocation is distinct from a physical transfer, and reconciliation replays after Match or Keep Separate are inert.
+- Recurring required Needs are managed as separate authority from an occurrence. A recurring authority remains manageable when its occurrence is absent.
+- Safe-to-Spend is the singular forward-adjusted spending authority for Overview, Shopping, and Copilot. Global Ahead/Behind is retired; protected savings, reserves, and the checking buffer are never silently made spendable.
+
 ## Transaction-deletion authority
 
 - Ordinary unlinked manual or Copilot `ExpenseTransaction` rows may be directly deleted only when deletion reverses their original checking-balance effect exactly once in the same authoritative financial operation.

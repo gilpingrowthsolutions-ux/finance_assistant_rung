@@ -105,9 +105,9 @@ def test_completed_cycle_expectation_is_cycle_bound_and_current_account_change_c
     after = build(transactions=rows[0], bills=rows[1], transfers=rows[2],
                   destinations=rows[3], runs=rows[4], acct=account(expected_paycheck=1750),
                   income_expectation=historical)
-    assert before["finish_status"] == "on_track"
+    assert before["finish_status"] == "factual"
     assert after["finish_status"] == before["finish_status"]
-    assert after["finish_amount_cents"] == before["finish_amount_cents"] == 0
+    assert after["finish_amount_cents"] == before["finish_amount_cents"] is None
     assert after["completed_cycle_detail"]["expected_income_authority"] == historical["authority"]
     assert after["current_safe_to_spend_cents"] == before["current_safe_to_spend_cents"] == 43210
 
@@ -127,15 +127,15 @@ def test_missing_or_wrong_cycle_historical_income_authority_is_not_ready_instead
         assert result["current_safe_to_spend_cents"] == 43210
 
 
-@pytest.mark.parametrize(("income","need","expected","pyf","status","amount"), [
-    (1000, 80, 100, 20000, "ahead", 2000),
-    (900, 100, 100, 20000, "behind", -10000),
-    (1000, 100, 100, 20000, "on_track", 0),
+@pytest.mark.parametrize(("income","need","expected","pyf"), [
+    (1000, 80, 100, 20000),
+    (900, 100, 100, 20000),
+    (1000, 100, 100, 20000),
 ])
-def test_finish_status_reuses_package15_trajectory(income, need, expected, pyf, status, amount):
+def test_recap_keeps_factual_components_without_a_global_score(income, need, expected, pyf):
     rows = base_rows(actual_income=income, need_actual=need, expected_need=expected, pyf_actual=pyf)
     result = build(transactions=rows[0], bills=rows[1], transfers=rows[2], destinations=rows[3], runs=rows[4])
-    assert result["finish_status"] == status and result["finish_amount_cents"] == amount
+    assert result["finish_status"] == "factual" and result["finish_amount_cents"] is None
     assert result["informational_only"] is True and result["safe_to_spend_effect_cents"] == 0
     assert result["current_safe_to_spend_cents"] == 43210
     assert result["current_protected_buffer_cents"] == 10000
@@ -148,8 +148,8 @@ def test_settled_bill_reality_replaces_forecast_and_future_need_is_not_favorable
     result = build(transactions=rows[0], bills=[*rows[1], future], transfers=rows[2], destinations=rows[3], runs=rows[4])
     matched = [row for row in result["completed_cycle_detail"]["events"] if row.get("supersedes") == "bill:1"]
     assert len(matched) == 1 and matched[0]["provenance"] == "reconciled_manual_plaid"
-    assert result["finish_amount_cents"] == 2000
-    assert len(result["biggest_changes"]) <= 3 and result["biggest_changes"][0]["kind"] == "settled_needs"
+    assert result["finish_amount_cents"] is None
+    assert len(result["biggest_changes"]) <= 3
 
 
 def test_protection_summary_counts_goal_and_reserve_ledger_rows_once_and_classifies_transfers():
@@ -173,7 +173,7 @@ def test_protection_summary_counts_goal_and_reserve_ledger_rows_once_and_classif
 def test_unmet_pyf_is_not_described_as_success_and_no_auto_allocation_or_rollover():
     rows = base_rows(pyf_actual=10000)
     result = build(transactions=rows[0], bills=rows[1], transfers=rows[2], destinations=rows[3], runs=rows[4])
-    assert result["finish_status"] == "behind"
+    assert result["finish_status"] == "factual"
     assert result["protected_summary"]["pyf_successfully_protected"] is False
     assert result["automatic_allocation"] is False and result["rollover_or_spending_grant_cents"] == 0
 

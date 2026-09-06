@@ -8,10 +8,13 @@ from decimal import Decimal, ROUND_HALF_UP
 from typing import Any, Optional
 
 from extensions import db
-from models import Account, ExpenseTransaction, PlaidAccount, PlaidTransaction, ShoppingTripCompletion, TransactionReconciliation
+from models import (Account, ExpenseTransaction, PlaidAccount, PlaidTransaction,
+                    SavingsTransfer, SavingsTransferReconciliation,
+                    ShoppingTripCompletion, TransactionReconciliation)
 from sqlalchemy.exc import IntegrityError
 from services.household_context import household_id as current_household_id
 from services.financial_state import apply_balance_delta, get_household_account
+from services.income_pyf import establish_for_income
 
 
 PROPOSAL_STATUS = "proposed"
@@ -222,6 +225,141 @@ def _plaid_to_category(plaid_tx: PlaidTransaction) -> str:
     return "discretionary"
 
 
+def _is_plaid_transfer(plaid_tx: PlaidTransaction) -> bool:
+    """Use provider classification only; never guess a transfer from its memo."""
+    try:
+        categories = json.loads(plaid_tx.category_json or '[]')
+    except Exception:
+        categories = []
+    return any('transfer' in str(value or '').lower() for value in (categories or []))
+
+
+def _transfer_recon_query(household_id: int):
+    return SavingsTransferReconciliation.query.filter_by(household_id=household_id)
+
+
+def _stage_transfer_reconciliation(owner_scope: str, household_id: int, plaid_tx: PlaidTransaction) -> bool:
+    """Stage a Plaid transfer without creating a second economic effect.
+
+    Exact amount/date is useful only to attach a *proposal*.  It is never an
+    authorization to link the provider identity or fulfill PYF automatically.
+    """
+    prior = _transfer_recon_query(household_id).filter_by(plaid_transaction_id=plaid_tx.plaid_transaction_id).first()
+    existing = SavingsTransfer.query.filter_by(plaid_transaction_id=plaid_tx.plaid_transaction_id).first()
+    if existing is not None:
+        return False
+    if prior is not None and prior.status == REJECTED_STATUS:
+        # KEEP SEPARATE is final and its request already recorded this distinct
+        # bank movement.  A later provider replay is therefore a no-op.
+        return False
+    if prior is not None:
+        return prior.status == PROPOSAL_STATUS
+    candidates = SavingsTransfer.query.filter(
+        SavingsTransfer.household_id == household_id,
+        SavingsTransfer.plaid_transaction_id.is_(None),
+        SavingsTransfer.superseded_by_transfer_id.is_(None),
+        SavingsTransfer.external_direction == 'outflow',
+        SavingsTransfer.source_destination_id.is_(None),
+        SavingsTransfer.destination_id.isnot(None),
+        SavingsTransfer.amount_cents == int(plaid_tx.amount_cents or 0),
+    ).all()
+    if plaid_tx.transaction_date is not None:
+        # economic_date is event authority.  Legacy NULL rows may only fall
+        # back to creation metadata until they are reviewed/enriched.
+        candidates = [row for row in candidates if (
+            (row.economic_date is not None and abs((row.economic_date - plaid_tx.transaction_date).days) <= DATE_WINDOW_DAYS)
+            or (row.economic_date is None and row.created_at is not None
+                and abs((row.created_at.date() - plaid_tx.transaction_date).days) <= DATE_WINDOW_DAYS)
+        )]
+    candidate_id = candidates[0].id if len(candidates) == 1 else None
+    db.session.add(SavingsTransferReconciliation(
+        household_id=household_id, owner_scope=owner_scope,
+        savings_transfer_id=candidate_id, plaid_transaction_id=plaid_tx.plaid_transaction_id,
+        status=PROPOSAL_STATUS,
+    ))
+    # A confident manual candidate is held for reviewed identity matching;
+    # otherwise this posted bank movement must be represented immediately.
+    if candidate_id is None:
+        _apply_plaid_transfer_effect(household_id, plaid_tx)
+    return True
+
+
+def _apply_plaid_transfer_effect(household_id: int, plaid_tx: PlaidTransaction) -> SavingsTransfer:
+    """Record one provider-identified transfer effect, without a purpose/PYF guess."""
+    existing = SavingsTransfer.query.filter_by(plaid_transaction_id=plaid_tx.plaid_transaction_id).first()
+    if existing is not None:
+        return existing
+    amount_cents = int(plaid_tx.amount_cents or 0)
+    row = SavingsTransfer(household_id=household_id, operation_id=f'plaid-transfer:{plaid_tx.plaid_transaction_id}',
+        plaid_transaction_id=plaid_tx.plaid_transaction_id, amount_cents=amount_cents,
+        transfer_type='plaid_observation', purpose='Posted Plaid transfer; destination and PYF linkage require review.',
+        economic_date=plaid_tx.transaction_date, external_direction=str(plaid_tx.direction or 'outflow'))
+    db.session.add(row); db.session.flush()
+    amount = float(Decimal(amount_cents) / Decimal('100'))
+    apply_balance_delta(household_id, amount if str(plaid_tx.direction or '') == 'inflow' else -amount)
+    return row
+
+
+def decide_transfer_reconciliation(*, owner_scope: str, savings_transfer_id: int, plaid_transaction_id: str, action: str) -> dict[str, Any]:
+    """Approve/reject a staged transfer identity without moving money again."""
+    hid = current_household_id()
+    if str(action or '').strip().lower() not in {'match', 'keep_separate'}:
+        raise ValueError("action must be 'match' or 'keep_separate'.")
+    row = _transfer_recon_query(hid).filter_by(plaid_transaction_id=plaid_transaction_id).with_for_update().first()
+    plaid = PlaidTransaction.query.filter_by(household_id=hid, owner_scope=owner_scope, plaid_transaction_id=plaid_transaction_id, is_removed=False, is_active_event=True).with_for_update().first()
+    transfer = SavingsTransfer.query.filter_by(household_id=hid, id=savings_transfer_id).with_for_update().first()
+    if row is None or plaid is None or transfer is None:
+        raise ValueError('Transfer reconciliation candidate was not found.')
+    requested_action = str(action).lower()
+    if row.status == MATCHED_STATUS:
+        if requested_action != 'match':
+            raise ValueError('Transfer reconciliation is already finalized as matched.')
+        return {'status': 'already_matched', 'transfer_id': transfer.id}
+    if row.status == REJECTED_STATUS:
+        if requested_action != 'keep_separate':
+            raise ValueError('Transfer reconciliation is already finalized as kept separate.')
+        return {'status': 'already_kept_separate', 'transfer_id': transfer.id}
+    if row.savings_transfer_id is not None and int(row.savings_transfer_id) != int(transfer.id):
+        raise ValueError('This reviewed proposal is bound to a different savings transfer.')
+    if requested_action == 'keep_separate':
+        # The decision says these are two real events.  Apply the held provider
+        # movement in this same atomic decision, never on a future sync.
+        _apply_plaid_transfer_effect(hid, plaid)
+        row.status = REJECTED_STATUS; row.user_confirmed = True; db.session.add(row); db.session.commit()
+        return {'status': 'kept_separate', 'transfer_id': transfer.id}
+    observation = SavingsTransfer.query.filter_by(household_id=hid, plaid_transaction_id=plaid_transaction_id).with_for_update().first()
+    if observation is not None and observation.id != transfer.id:
+        if observation.amount_cents != transfer.amount_cents:
+            raise ValueError('Provider observation and manual transfer amounts differ.')
+        if str(observation.external_direction or 'outflow') != 'outflow':
+            raise ValueError('An inbound provider transfer cannot be matched to a checking-to-savings transfer.')
+        # The observation already owns both provider identity and checking
+        # movement.  Preserve the manual row as audit provenance but remove its
+        # duplicate economic contribution exactly once.
+        observation.destination_id = transfer.destination_id
+        observation.source_destination_id = transfer.source_destination_id
+        observation.transfer_type = transfer.transfer_type if transfer.transfer_type != 'plaid_observation' else 'deposit'
+        observation.purpose = transfer.purpose or observation.purpose
+        observation.income_pyf_protection_id = transfer.income_pyf_protection_id
+        if observation.economic_date is None:
+            observation.economic_date = transfer.economic_date
+        transfer.superseded_by_transfer_id = observation.id
+        # Only rows explicitly recorded by the served physical-transfer path
+        # own a checking debit. Internal allocation ledger rows never do.
+        if transfer.external_direction == 'outflow':
+            apply_balance_delta(hid, float(Decimal(transfer.amount_cents) / Decimal('100')))
+        row.savings_transfer_id = observation.id; row.status = MATCHED_STATUS; row.user_confirmed = True
+        db.session.add_all([observation, transfer, row]); db.session.commit()
+        return {'status': 'matched', 'transfer_id': observation.id, 'superseded_transfer_id': transfer.id}
+    if transfer.plaid_transaction_id not in (None, plaid_transaction_id):
+        raise ValueError('Savings transfer already has a different provider identity.')
+    # A transfer-classified Plaid event may be linked only through this review.
+    transfer.plaid_transaction_id = plaid_transaction_id
+    row.savings_transfer_id = transfer.id; row.status = MATCHED_STATUS; row.user_confirmed = True
+    db.session.add_all([transfer, row]); db.session.commit()
+    return {'status': 'matched', 'transfer_id': transfer.id}
+
+
 def _apply_plaid_financial_effect(owner_scope: str, household_id: int, plaid_tx: PlaidTransaction) -> ExpenseTransaction:
     existing = _tx_query(household_id).filter_by(plaid_transaction_id=plaid_tx.plaid_transaction_id).first()
     if existing is not None:
@@ -243,6 +381,7 @@ def _apply_plaid_financial_effect(owner_scope: str, household_id: int, plaid_tx:
         if plaid_tx.transaction_date else _utcnow(),
     )
     db.session.add(tx)
+    db.session.flush()
 
     account = None
     plaid_account = PlaidAccount.query.filter_by(
@@ -262,6 +401,9 @@ def _apply_plaid_financial_effect(owner_scope: str, household_id: int, plaid_tx:
         else:
             apply_balance_delta(household_id, -amount)
 
+    if category == "income":
+        establish_for_income(tx)
+
     return tx
 
 
@@ -278,6 +420,8 @@ def _migrate_pending_identity(owner_scope: str, household_id: int, plaid_tx: Pla
             prior_effect.amount = float(Decimal(int(plaid_tx.amount_cents or 0)) / Decimal("100"))
             prior_effect.category = _plaid_to_category(plaid_tx)
             db.session.add(prior_effect)
+            if str(prior_effect.category or "").lower() == "income":
+                establish_for_income(prior_effect)
 
     rows = _recon_query(household_id).filter_by(owner_scope=owner_scope, plaid_transaction_id=pending_id).all()
     for row in rows:
@@ -326,6 +470,14 @@ def project_plaid_transactions(owner_scope: str, plaid_item_id: Optional[int] = 
     stats = {"applied": 0, "proposed": 0, "skipped": 0}
 
     for plaid_tx in rows:
+        # A pending Plaid row is bank-provided context, not a confirmed cash
+        # event.  In particular it must not establish actual income or its
+        # income-linked PYF protection.  When Plaid posts the replacement,
+        # its pending_transaction_id is migrated below before the one actual
+        # economic effect is applied.
+        if plaid_tx.is_pending:
+            stats["skipped"] += 1
+            continue
         _migrate_pending_identity(owner_scope, hid, plaid_tx)
 
         if _tx_query(hid).filter_by(plaid_transaction_id=plaid_tx.plaid_transaction_id).first() is not None:
@@ -343,6 +495,13 @@ def project_plaid_transactions(owner_scope: str, plaid_item_id: Optional[int] = 
                 manual.plaid_transaction_id = plaid_tx.plaid_transaction_id
                 db.session.add(manual)
             stats["skipped"] += 1
+            continue
+
+        if _is_plaid_transfer(plaid_tx):
+            if _stage_transfer_reconciliation(owner_scope, hid, plaid_tx):
+                stats['proposed'] += 1
+            else:
+                stats['skipped'] += 1
             continue
 
         candidates = _manual_candidates_for_plaid(owner_scope, hid, plaid_tx)
@@ -390,6 +549,47 @@ def list_reconciliation_proposals(owner_scope: str) -> list[dict[str, Any]]:
                 "date": manual.date.isoformat() if manual.date else None,
             },
             "bank": plaid.to_summary(),
+        })
+    transfer_rows = (
+        _transfer_recon_query(hid).filter_by(owner_scope=owner_scope, status=PROPOSAL_STATUS)
+        .order_by(SavingsTransferReconciliation.id.asc()).all()
+    )
+    for row in transfer_rows:
+        plaid = PlaidTransaction.query.filter_by(household_id=hid, owner_scope=owner_scope,
+            plaid_transaction_id=row.plaid_transaction_id, is_removed=False, is_active_event=True).first()
+        if plaid is None:
+            continue
+        transfer = db.session.get(SavingsTransfer, row.savings_transfer_id) if row.savings_transfer_id else None
+        if transfer is None:
+            # A Plaid-first observation may be reviewed after a manual record
+            # is added. Expose only one date/amount-compatible local candidate;
+            # ambiguity remains safely un-actionable.
+            candidates = SavingsTransfer.query.filter(
+                SavingsTransfer.household_id == hid,
+                SavingsTransfer.plaid_transaction_id.is_(None),
+                SavingsTransfer.superseded_by_transfer_id.is_(None),
+                SavingsTransfer.external_direction == 'outflow',
+                SavingsTransfer.amount_cents == int(plaid.amount_cents or 0),
+                SavingsTransfer.destination_id.isnot(None),
+            ).all()
+            candidates = [candidate for candidate in candidates if (
+                plaid.transaction_date is None or (
+                    candidate.economic_date is not None and abs((candidate.economic_date - plaid.transaction_date).days) <= DATE_WINDOW_DAYS
+                ) or (
+                    candidate.economic_date is None and candidate.created_at is not None and abs((candidate.created_at.date() - plaid.transaction_date).days) <= DATE_WINDOW_DAYS
+                )
+            )]
+            transfer = candidates[0] if len(candidates) == 1 else None
+        if transfer is None:
+            continue
+        payload.append({
+            'id': f'transfer:{row.id}', 'kind': 'transfer', 'status': row.status,
+            'match_strength': 100, 'transfer': {
+                'transfer_id': transfer.id, 'purpose': transfer.purpose or 'Savings transfer',
+                'amount_cents': int(transfer.amount_cents),
+                'economic_date': transfer.economic_date.isoformat() if transfer.economic_date else None,
+                'destination_id': transfer.destination_id,
+            }, 'bank': plaid.to_summary(),
         })
     return payload
 
@@ -651,6 +851,8 @@ def ensure_plaid_effect_exists(*, owner_scope: str, plaid_transaction_id: str) -
         is_active_event=True,
     ).first()
     if tx is None:
+        return
+    if tx.is_pending:
         return
     _migrate_pending_identity(owner_scope, hid, tx)
     _apply_plaid_financial_effect(owner_scope, hid, tx)

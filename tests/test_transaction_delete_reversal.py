@@ -16,6 +16,7 @@ from services.household_context import household_id as current_household_id  # n
 from models import (  # noqa: E402
     Account,
     ExpenseTransaction,
+    IncomePyfProtection,
     ShoppingTripCompletion,
     TransactionReconciliation,
 )
@@ -81,6 +82,31 @@ def test_delete_income_transaction_reverses_balance_exactly_once(client):
     assert delete_resp.status_code == 200
     assert delete_resp.get_json()["new_balance"] == 500.0
     assert _balance() == 500.0
+
+
+def test_income_linked_to_pyf_is_refused_by_direct_delete(client):
+    """Direct deletion must not violate the income→PYF foreign-key lineage."""
+    with app.app_context():
+        account = Account.query.first()
+        tx = ExpenseTransaction(
+            household_id=current_household_id(), description="Protected paycheck", amount=250.0,
+            category="income", source="manual", local_account_id=account.id,
+        )
+        db.session.add(tx); db.session.flush()
+        # The protected row is sufficient here; the test concerns the served
+        # deletion guard rather than PYF target selection.
+        db.session.add(IncomePyfProtection(
+            household_id=current_household_id(), income_transaction_id=tx.id,
+            operation_id=f"delete-guard:{tx.id}", target_percent=10,
+            target_cents=2500, protected_cents=2500,
+        ))
+        db.session.commit()
+        txn_id = tx.id
+
+    deleted = client.delete(f"/transactions/{txn_id}")
+    assert deleted.status_code == 409
+    with app.app_context():
+        assert db.session.get(ExpenseTransaction, txn_id) is not None
 
 
 def test_delete_missing_transaction_does_not_change_balance(client):

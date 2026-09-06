@@ -261,6 +261,8 @@ from models import (
     SavingsTransfer,
     BehaviorIntelligenceDecision,
     IncomePlanVersion,
+    IncomePyfProtection,
+    RecurringRequiredObligation,
     UsageEvent,
     Household,
     StoreTaxProfile,
@@ -320,6 +322,7 @@ from services.plaid_foundation import (
     sync_plaid_transactions,
 )
 from services.transaction_reconciliation import (
+    decide_transfer_reconciliation,
     decide_reconciliation_pair,
     list_reconciliation_proposals,
     project_plaid_transactions,
@@ -1800,6 +1803,26 @@ def _infer_next_income(account: Account, now_utc: datetime) -> dict[str, Any]:
     }
 
 
+def _forward_expected_income(account: Account, *, next_income: dict[str, Any], horizon_end: datetime) -> list[dict[str, Any]]:
+    """Resolve canonical forecast income dates through the forward horizon."""
+    next_date = next_income.get("date")
+    period_days = max(1, int(account.pay_period_days or 0))
+    if not isinstance(next_date, datetime):
+        return []
+    rows: list[dict[str, Any]] = []
+    candidate = next_date
+    index = 0
+    while candidate <= horizon_end:
+        plan = resolve_income_plan(account.household_id, at=candidate)
+        if plan is not None and int(plan.expected_income_cents) > 0:
+            rows.append({"key": f"income_plan:{candidate.date().isoformat()}:{index}", "date": candidate,
+                         "amount_cents": int(plan.expected_income_cents), "label": "Expected paycheck",
+                         "provenance": "income_plan_v1"})
+        candidate += timedelta(days=period_days)
+        index += 1
+    return rows
+
+
 def _household_readiness(account: Account | None, owner_scope: str = "anonymous") -> dict[str, Any]:
     missing_financial: list[str] = []
     setup_gaps: list[str] = []
@@ -1948,7 +1971,11 @@ def _compute_legacy_safe_to_spend_snapshot(account: Account, owner_scope: str = 
         .filter(
             Bill.is_paid == False,
             Bill.is_gas_estimate == False,
-            Bill.due_date <= window_end,
+            # A Need due exactly on the scheduled payday belongs to the
+            # forward calendar, where the canonical event ordering makes that
+            # day's expected income available first.  It must not be charged
+            # once as a pre-payday Need and again (or differently) there.
+            Bill.due_date < window_end,
         )
         .all()
     )
@@ -2130,6 +2157,7 @@ def _compute_safe_to_spend_snapshot(account: Account, owner_scope: str = "anonym
         window_end = now + timedelta(days=pay_period_days)
 
     bills_total_cents = 0
+    bills: list[Bill] = []
     if window_end is not None:
         bills = _household_bill_query().filter(
             Bill.is_paid == False,
@@ -2137,6 +2165,54 @@ def _compute_safe_to_spend_snapshot(account: Account, owner_scope: str = "anonym
             Bill.due_date <= window_end,
         ).all()
         bills_total_cents = sum(_money_to_cents(row.amount, field_name="bill amount") for row in bills)
+
+    # Explicit Bills and confirmed recurring obligations feed one authority.
+    forward_projection = None
+    forward_reserve_cents = 0
+    forward_shortfall_cents = 0
+    current_recurring_cents = 0
+    current_recurring_occurrences: list[dict[str, Any]] = []
+    if window_end is not None and account is not None:
+        from services.forward_needs import calculate_forward_needs_reserve, forward_horizon
+        # Forward Needs is calendar planning, so its public read-model anchor
+        # is the as-of calendar day, not a volatile request microsecond.
+        forward_as_of = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        horizon_end = forward_horizon(as_of=forward_as_of, next_payday=window_end, pay_period_days=pay_period_days)
+        forward_bills = _household_bill_query().filter(
+            Bill.is_paid == False,
+            Bill.is_gas_estimate == False,
+            Bill.due_date >= window_end,
+            Bill.due_date <= horizon_end,
+        ).order_by(Bill.due_date.asc(), Bill.id.asc()).all()
+        explicit_links = {(int(row.recurring_obligation_id), row.due_date.date().isoformat())
+                          for row in _household_bill_query().filter(Bill.recurring_obligation_id.isnot(None)).all()}
+        from services.recurring_needs import project_occurrences
+        recurring = project_occurrences(
+            obligations=RecurringRequiredObligation.query.filter_by(household_id=account.household_id).all(),
+            as_of=forward_as_of, horizon_end=horizon_end, explicit_bill_links=explicit_links,
+        )
+        # The current-Needs authority must include every unrepresented
+        # occurrence through the immediate payday, not merely an optional
+        # first explicit Bill.  A projected occurrence belongs either here or
+        # in the forward reserve, never both.
+        current_recurring_occurrences = [row for row in recurring['occurrences'] if row['due_date'] < window_end]
+        current_recurring_cents = sum(int(row['amount_cents']) for row in current_recurring_occurrences)
+        forward_rows = [{"key": f"bill:{row.id}", "due_date": row.due_date,
+                         "amount_cents": _money_to_cents(row.amount, field_name="bill amount"), "label": row.name,
+                         "provenance": "explicit_bill"} for row in forward_bills]
+        forward_rows.extend(row for row in recurring['occurrences'] if row['due_date'] >= window_end)
+        forward_projection = calculate_forward_needs_reserve(
+            as_of=forward_as_of,
+            current_boundary=window_end,
+            horizon_end=horizon_end,
+            bills=forward_rows,
+            expected_income=_forward_expected_income(account, next_income=next_income, horizon_end=horizon_end),
+        )
+        forward_reserve_cents = int(forward_projection["forward_needs_reserve_cents"])
+        forward_shortfall_cents = int(forward_projection["projected_required_cash_shortfall_cents"])
+        forward_projection['incomplete_recurring_obligations'] = recurring['incomplete']
+        if recurring['incomplete']:
+            missing.append('recurring_required_amount')
 
     fuel_bill = _household_bill_query().filter_by(is_gas_estimate=True, is_paid=False).first()
     if fuel_bill is None:
@@ -2159,19 +2235,58 @@ def _compute_safe_to_spend_snapshot(account: Account, owner_scope: str = "anonym
     needs = [
         {"key": "bills", "label": "Bills before payday", "amount_cents": bills_total_cents, "amount": _cents_to_float(bills_total_cents)},
     ]
+    if current_recurring_cents:
+        needs.append({"key": "recurring_needs_before_payday", "label": "Recurring required Needs before payday", "amount_cents": current_recurring_cents, "amount": _cents_to_float(current_recurring_cents)})
     if grocery_remaining_cents is not None:
         needs.append({"key": "groceries_remaining", "label": "Required groceries remaining", "amount_cents": grocery_remaining_cents, "amount": _cents_to_float(grocery_remaining_cents)})
     if fuel_cents is not None:
         needs.append({"key": "fuel_transport", "label": "Required fuel / transport", "amount_cents": fuel_cents, "amount": _cents_to_float(fuel_cents)})
+    if forward_reserve_cents:
+        needs.append({"key": "forward_needs_reserve", "label": "Protected for upcoming required bills", "amount_cents": forward_reserve_cents, "amount": _cents_to_float(forward_reserve_cents)})
 
+    active_pyf_rows = IncomePyfProtection.query.filter_by(household_id=account.household_id, status='active').all()
+    active_income_pyf_cents = sum(
+        max(0, int(row.protected_cents or 0) - int(row.fulfilled_cents or 0))
+        for row in active_pyf_rows
+    )
+    cycle_start = window_end - timedelta(days=pay_period_days) if isinstance(window_end, datetime) else now
+    current_cycle_income_pyf_cents = 0
+    current_cycle_established_pyf_cents = 0
+    all_pyf_rows = IncomePyfProtection.query.filter_by(household_id=account.household_id).filter(IncomePyfProtection.status != 'reversed').all()
+    for protection in all_pyf_rows:
+        income_row = db.session.get(ExpenseTransaction, protection.income_transaction_id)
+        income_at = _parse_iso_datetime(income_row.date) if income_row is not None else None
+        # SQLite returns DateTime values without their UTC offset. Normalize at
+        # this authority boundary so a served manual income is classified in
+        # the same cycle on SQLite and PostgreSQL. The next-payday timestamp
+        # remains the exclusive end of the cycle.
+        if income_at is not None and cycle_start <= income_at < window_end:
+            current_cycle_established_pyf_cents += max(0, int(protection.protected_cents or 0))
+            if protection.status == 'active':
+                current_cycle_income_pyf_cents += max(0, int(protection.protected_cents or 0) - int(protection.fulfilled_cents or 0))
     snapshot = calculate_pyf_snapshot(
         checking_cents=checking_cents,
         period_income_cents=period_income_cents,
         savings_target_percent=target_pct,
         protected_buffer_cents=protected_buffer_cents,
+        active_income_pyf_cents=active_income_pyf_cents,
+        current_cycle_income_pyf_cents=current_cycle_income_pyf_cents,
+        current_cycle_established_pyf_cents=current_cycle_established_pyf_cents,
         needs=needs,
         missing_setup=missing,
     )
+    # A reserve is a protection, not an asserted bank transfer.  If even all
+    # available checking cannot cover known required cash (before optional PYF
+    # savings), expose that fact instead of lowering the long-term target or
+    # pretending discretionary money exists.
+    if snapshot.get("complete"):
+        required_cash_shortfall_cents = max(
+            forward_shortfall_cents,
+            int(snapshot.get("needs_total_cents") or 0) + int(protected_buffer_cents or 0) - int(checking_cents or 0),
+        )
+        if forward_projection is not None:
+            forward_projection["projected_required_cash_shortfall_cents"] = required_cash_shortfall_cents
+        forward_shortfall_cents = required_cash_shortfall_cents
     snapshot["until_payday_days"] = next_income.get("days_until")
     next_date = next_income.get("date")
     snapshot["next_expected_income"] = {
@@ -2188,6 +2303,9 @@ def _compute_safe_to_spend_snapshot(account: Account, owner_scope: str = "anonym
         "actual_forecast_needs": snapshot.get("needs_total"),
         "bills_before_payday": _cents_to_float(bills_total_cents),
         "bills_before_payday_count": len(bills) if window_end is not None else 0,
+        "recurring_needs_before_payday": _cents_to_float(current_recurring_cents),
+        "recurring_needs_before_payday_cents": current_recurring_cents,
+        "recurring_needs_before_payday_occurrences": current_recurring_occurrences,
         "grocery_commitment_total": _cents_to_float(grocery_baseline_cents) if grocery_baseline_cents is not None else None,
         "grocery_spend_to_date": _cents_to_float(grocery_spend_cents),
         "groceries_remaining": _cents_to_float(grocery_remaining_cents) if grocery_remaining_cents is not None else None,
@@ -2195,6 +2313,14 @@ def _compute_safe_to_spend_snapshot(account: Account, owner_scope: str = "anonym
         "protected_buffer": _cents_to_float(protected_buffer_cents) if protected_buffer_cents is not None else None,
         "grocery_commitment_source": "explicit_onboarding_baseline" if grocery_baseline_cents is not None else "missing_setup",
         "required_expense_review": required_expense_review,
+        "forward_needs_reserve": _cents_to_float(forward_reserve_cents),
+        "forward_needs_reserve_cents": forward_reserve_cents,
+        "projected_required_cash_shortfall": _cents_to_float(forward_shortfall_cents),
+        "projected_required_cash_shortfall_cents": forward_shortfall_cents,
+        "forward_needs": forward_projection,
+        "active_income_pyf_protection": _cents_to_float(active_income_pyf_cents),
+        "active_income_pyf_protection_cents": active_income_pyf_cents,
+        "current_cycle_income_pyf_protection_cents": current_cycle_income_pyf_cents,
     }
     if snapshot.get("complete"):
         lines = [
@@ -3763,9 +3889,33 @@ def transactions_crud():
         if not desc:
             return jsonify({"error": "Description required"}), 400
         amount = float(data.get("amount", 0))
-        category = data.get("category", "discretionary")
+        # Preserve the legacy signed-income import/manual compatibility path;
+        # the served form itself restricts new entries to positive amounts.
+        if amount == 0:
+            return jsonify({"error": "Amount must not be zero"}), 400
+        category = str(data.get("category", "discretionary")).strip() or "discretionary"
         hid = current_household_id()
         account = _household_account()
+        operation_id = str(data.get('operation_id') or '').strip() or None
+        if operation_id and len(operation_id) > 120:
+            return jsonify({'error': 'Operation ID is too long.'}), 400
+
+        def _same_manual_request(existing: ExpenseTransaction) -> bool:
+            # An operation id authorizes only an exact replay; it must never
+            # become a way to alter the details of an already recorded event.
+            return (
+                existing.source == 'manual'
+                and existing.description == desc
+                and str(existing.category or '') == category
+                and float(existing.amount) == amount
+            )
+
+        if operation_id:
+            existing = _household_tx_query().filter_by(operation_id=operation_id).first()
+            if existing is not None:
+                if not _same_manual_request(existing):
+                    return jsonify({'error': 'Operation ID was already used for a different transaction.'}), 409
+                return jsonify({'message': 'Transaction already logged', 'id': existing.id, 'already_logged': True})
         t = ExpenseTransaction(
             household_id=hid,
             description=desc,
@@ -3773,10 +3923,27 @@ def transactions_crud():
             category=category,
             source="manual",
             local_account_id=account.id if account else None,
+            operation_id=operation_id,
         )
         db.session.add(t)
-        apply_balance_delta(hid, -amount)
-        db.session.commit()
+        db.session.flush()
+        if str(category).lower() == "income":
+            from services.income_pyf import establish_for_income
+            apply_balance_delta(hid, amount)
+            establish_for_income(t)
+        else:
+            apply_balance_delta(hid, -amount)
+        try:
+            db.session.commit()
+        except IntegrityError:
+            # A duplicate request can race after both callers observed no
+            # prior row.  The household-scoped unique constraint decides; a
+            # matching committed request is still a successful replay.
+            db.session.rollback()
+            existing = _household_tx_query().filter_by(operation_id=operation_id).first() if operation_id else None
+            if existing is None or not _same_manual_request(existing):
+                raise
+            return jsonify({'message': 'Transaction already logged', 'id': existing.id, 'already_logged': True})
         return jsonify({
             "message": "Expense logged",
             "id": t.id,
@@ -3959,6 +4126,26 @@ def reconciliation_decide():
         "metrics": _canonical_financial_metrics(account, owner_scope=user_id) if account else None,
     })
 
+
+@app.route('/api/reconciliation/transfer-decision', methods=['POST'])
+def transfer_reconciliation_decide():
+    data = request.json or {}
+    user_id = _resolve_request_user_id(data)
+    try:
+        transfer_id = int(data.get('savings_transfer_id'))
+    except (TypeError, ValueError):
+        return jsonify({'error': 'savings_transfer_id must be an integer.'}), 400
+    plaid_tx_id = str(data.get('plaid_transaction_id') or '').strip()
+    if not plaid_tx_id:
+        return jsonify({'error': 'plaid_transaction_id is required.'}), 400
+    try:
+        result = decide_transfer_reconciliation(owner_scope=user_id, savings_transfer_id=transfer_id,
+            plaid_transaction_id=plaid_tx_id, action=str(data.get('action') or ''))
+    except ValueError as exc:
+        db.session.rollback()
+        return jsonify({'error': str(exc)}), 400
+    return jsonify({'result': result})
+
 # ----- BILLS CRUD ------------------------------------------------------------
 
 @app.route("/bills", methods=["GET", "POST"])
@@ -3977,7 +4164,16 @@ def bills_crud():
                 due_date = datetime.now(timezone.utc) + timedelta(days=7)
         else:
             due_date = datetime.now(timezone.utc) + timedelta(days=7)
-        b = Bill(household_id=current_household_id(), name=name, amount=amount, due_date=due_date)
+        recurrence = str(data.get('recurrence') or '').strip().lower()
+        recurring_id = None
+        if recurrence:
+            if recurrence not in {'weekly', 'biweekly', 'monthly', 'quarterly', 'yearly'}:
+                return jsonify({'error': 'Unsupported recurrence'}), 400
+            obligation = RecurringRequiredObligation(household_id=current_household_id(), name=name,
+                category=str(data.get('category') or 'required')[:50], expected_amount_cents=_money_to_cents(amount, field_name='bill amount'),
+                next_due_date=due_date, recurrence=recurrence, source='user_confirmed')
+            db.session.add(obligation); db.session.flush(); recurring_id = obligation.id
+        b = Bill(household_id=current_household_id(), name=name, amount=amount, due_date=due_date, recurring_obligation_id=recurring_id)
         db.session.add(b)
         db.session.commit()
         return jsonify({"message": "Bill added", "id": b.id})
@@ -3988,7 +4184,7 @@ def bills_crud():
         "name": b.name,
         "amount": b.amount,
         "due_date": b.due_date.strftime("%Y-%m-%d") if b.due_date else "",
-        "is_paid": b.is_paid
+        "is_paid": b.is_paid, "recurring_obligation_id": b.recurring_obligation_id
     } for b in bills])
 
 @app.route("/bills/<int:bid>/pay", methods=["POST"])
@@ -4008,6 +4204,43 @@ def delete_bill(bid):
     db.session.delete(b)
     db.session.commit()
     return jsonify({"message": f"Bill {bid} deleted"})
+
+
+@app.route('/api/recurring-needs', methods=['GET'])
+@app.route('/api/recurring-needs/<int:obligation_id>', methods=['PATCH'])
+def recurring_needs_api(obligation_id=None):
+    hid = current_household_id()
+    if request.method == 'GET':
+        rows = RecurringRequiredObligation.query.filter_by(household_id=hid).order_by(RecurringRequiredObligation.next_due_date).all()
+        return jsonify([{'id': row.id, 'name': row.name, 'category': row.category, 'expected_amount_cents': row.expected_amount_cents,
+                         'next_due_date': row.next_due_date.date().isoformat(), 'recurrence': row.recurrence,
+                         'is_active': bool(row.is_active), 'source': row.source} for row in rows])
+    row = RecurringRequiredObligation.query.filter_by(household_id=hid, id=obligation_id).first()
+    if row is None: return jsonify({'error': 'Recurring obligation not found.'}), 404
+    data = request.json or {}
+    if 'expected_amount' in data:
+        cents = _money_to_cents(data['expected_amount'], field_name='expected amount')
+        if cents <= 0: return jsonify({'error': 'Expected amount must be positive.'}), 400
+        row.expected_amount_cents = cents
+    if 'next_due_date' in data:
+        try: row.next_due_date = datetime.strptime(str(data['next_due_date']), '%Y-%m-%d')
+        except ValueError: return jsonify({'error': 'next_due_date must be YYYY-MM-DD.'}), 400
+    if 'recurrence' in data:
+        recurrence = str(data['recurrence']).lower()
+        if recurrence not in {'weekly','biweekly','monthly','quarterly','yearly'}: return jsonify({'error': 'Unsupported recurrence.'}), 400
+        row.recurrence = recurrence
+    if 'is_active' in data:
+        active = data['is_active']
+        # JSON booleans are unambiguous.  Form-compatible 0/1 are accepted,
+        # but strings such as "false" must not silently activate a Need.
+        if isinstance(active, bool):
+            row.is_active = active
+        elif isinstance(active, int) and active in (0, 1):
+            row.is_active = bool(active)
+        else:
+            return jsonify({'error': 'is_active must be a boolean.'}), 400
+    db.session.commit()
+    return jsonify({'id': row.id, 'is_active': bool(row.is_active), 'expected_amount_cents': row.expected_amount_cents, 'recurrence': row.recurrence})
 
 
 def _validate_groq_key(api_key: str):
@@ -5120,7 +5353,22 @@ def grocery_rebalance_preview():
     hid = current_household_id(); cart = current_cart(hid)
     if cart is None: return jsonify({'error': 'Build a current cart before rebalancing.'}), 409
     cart_items = _authoritative_rebalance_items(cart)
-    budget_limit = float(data.get("budget_limit") or 0)
+    # Rebalance is a Shopping presentation of the same protected-money
+    # authority used everywhere else.  A browser-provided budget can make a
+    # shopper more conservative, but it must never revive a stale or
+    # immediate-only spending number after forward required Needs lower STS.
+    requested_budget_limit = float(data.get("budget_limit") or 0)
+    safe_snapshot = _compute_safe_to_spend_snapshot(
+        _household_account(), owner_scope=_resolve_request_user_id(data)
+    )
+    canonical_safe_cents = safe_snapshot.get("safe_to_spend_cents") if safe_snapshot.get("complete") else None
+    # A user may still review a deliberately-entered Shopping budget while
+    # financial setup is incomplete; there is no canonical STS to substitute
+    # in that state.  Once it is available, it is the non-bypassable ceiling.
+    budget_limit = (
+        min(max(0.0, requested_budget_limit), _cents_to_float(int(canonical_safe_cents)))
+        if canonical_safe_cents is not None else max(0.0, requested_budget_limit)
+    )
     raw_context = data.get("cart_context")
     context: dict[str, Any] = raw_context if isinstance(raw_context, dict) else {}
     selected = get_selected_store(hid)
@@ -5148,7 +5396,14 @@ def grocery_rebalance_preview():
     op_id = str(data.get('operation_id') or f'rebalance_{uuid.uuid4().hex}')
     proposal = create_proposal(household_id=hid, cart=cart, operation_id=op_id, changes=preview.get('changes') or [])
     db.session.commit()
-    return jsonify({**preview, 'proposal': _proposal_dict(proposal), 'authoritative_cart_id': cart.id, 'authoritative_cart_version': cart.version})
+    return jsonify({
+        **preview,
+        'canonical_safe_to_spend_cents': canonical_safe_cents,
+        'budget_authority': 'canonical_pyf_v1' if canonical_safe_cents is not None else 'explicit_request_setup_incomplete',
+        'proposal': _proposal_dict(proposal),
+        'authoritative_cart_id': cart.id,
+        'authoritative_cart_version': cart.version,
+    })
 
 
 @app.route("/api/grocery/rebalance/apply", methods=["POST"])
@@ -5234,7 +5489,32 @@ def _current_savings_allocation_plan(household_id: int, account: Account, pyf: d
 @app.route("/api/savings/state", methods=["GET"])
 def get_savings_state():
     account = _household_account()
-    return jsonify(savings_state(current_household_id(), pay_period_days=max(1, int(account.pay_period_days or 14))))
+    hid = current_household_id()
+    state = savings_state(hid, pay_period_days=max(1, int(account.pay_period_days or 14)))
+    # A physical checking-to-savings record must bind to a concrete income
+    # consequence.  Expose only still-unfulfilled protections and real local
+    # savings destinations; the browser never calculates or invents either.
+    protections = (IncomePyfProtection.query.join(
+        ExpenseTransaction, IncomePyfProtection.income_transaction_id == ExpenseTransaction.id
+    ).filter(
+        IncomePyfProtection.household_id == hid,
+        IncomePyfProtection.status == "active",
+        IncomePyfProtection.protected_cents > IncomePyfProtection.fulfilled_cents,
+    ).order_by(ExpenseTransaction.date.asc(), ExpenseTransaction.id.asc(), IncomePyfProtection.id.asc()).all())
+    state["pyf_transfer_options"] = {
+        "protections": [{
+            "id": row.id,
+            "income_transaction_id": row.income_transaction_id,
+            "income_date": income.date.date().isoformat() if income.date else None,
+            "income_description": income.description or "Income",
+            "remaining_cents": max(0, int(row.protected_cents or 0) - int(row.fulfilled_cents or 0)),
+            "protected_cents": int(row.protected_cents or 0),
+            "fulfilled_cents": int(row.fulfilled_cents or 0),
+        } for row in protections if (income := db.session.get(ExpenseTransaction, row.income_transaction_id)) is not None],
+        "destinations": [{"id": row.id, "name": row.name, "kind": row.kind}
+                         for row in SavingsDestination.query.filter_by(household_id=hid).order_by(SavingsDestination.priority.asc(), SavingsDestination.id.asc()).all()],
+    }
+    return jsonify(state)
 
 
 @app.route("/api/goals", methods=["POST"])
@@ -5294,7 +5574,74 @@ def savings_transfer_api():
             match = match_reserve_purpose(purpose)
             if source_reserve.category != "emergency" and match.get("category") != source_reserve.category:
                 return jsonify({"error": "The purpose does not clearly match this protected Reserve.", "purpose_match": match, "requires_review": True}), 409
-        row = savings_transfer(current_household_id(), operation_id=str(data.get("operation_id") or "").strip(), amount_cents=_savings_request_cents(data), source_id=source_id, destination_id=int(data["destination_id"]) if data.get("destination_id") is not None else None, transfer_type=transfer_type, purpose=purpose)
+        amount_cents = _savings_request_cents(data)
+        transfer_operation_id = str(data.get("operation_id") or "").strip()
+        hid = current_household_id()
+        destination_id = int(data["destination_id"]) if data.get("destination_id") is not None else None
+        # Rung's date-only financial authority is UTC throughout its cycle,
+        # income, and Plaid code.  Do not use the host-local calendar date.
+        economic_date = _parse_optional_date(data.get('economic_date') or data.get('transaction_date')) or datetime.now(timezone.utc).date()
+        plaid_transaction_id = str(data.get('plaid_transaction_id') or '').strip() or None
+        observed = (SavingsTransfer.query.filter_by(household_id=hid, plaid_transaction_id=plaid_transaction_id)
+                    .with_for_update().first()) if plaid_transaction_id else None
+        if observed is not None:
+            if observed.superseded_by_transfer_id is not None:
+                raise SavingsError('This provider transfer was superseded and cannot be reviewed again.')
+            if observed.amount_cents != amount_cents or str(observed.external_direction or 'outflow') != 'outflow':
+                raise SavingsError('The reviewed transfer does not match this outbound provider observation.')
+        protection_id = data.get("income_pyf_protection_id")
+        protection = None
+        if protection_id is not None:
+            try:
+                protection_id = int(protection_id)
+            except (TypeError, ValueError):
+                raise SavingsError("income_pyf_protection_id must be an integer.")
+            protection = IncomePyfProtection.query.filter_by(household_id=hid, id=protection_id).first()
+            if protection is None:
+                raise SavingsError("Income-linked PYF protection was not found.")
+            # PYF fulfillment represents an actual checking-to-savings move,
+            # not an internal destination shuffle or an asserted allocation.
+            if source_id is not None or destination_id is None:
+                raise SavingsError("PYF fulfillment requires a checking-to-savings destination transfer.")
+            if observed is None and amount_cents > int((_household_account().checking_balance or 0) * 100):
+                raise SavingsError("Checking does not have enough money for this PYF transfer.")
+        if observed is not None:
+            # Plaid already recorded the physical checking movement.  Review
+            # enriches that single canonical row and, when applicable, gives
+            # it the PYF meaning without charging checking a second time.
+            if protection_id is not None and observed.income_pyf_protection_id not in (None, protection_id):
+                raise SavingsError('This provider transfer already has different PYF linkage.')
+            if protection_id is not None and observed.income_pyf_protection_id is None:
+                from services.income_pyf import fulfill
+                fulfill(protection, amount_cents)
+                observed.income_pyf_protection_id = protection_id
+            observed.destination_id = destination_id
+            observed.source_destination_id = source_id
+            observed.transfer_type = transfer_type
+            observed.purpose = purpose[:200] or observed.purpose
+            # Provider date remains the authority; only a legacy NULL value
+            # may be completed from the explicitly reviewed event date.
+            if observed.economic_date is None:
+                observed.economic_date = economic_date
+            db.session.add(observed)
+            db.session.commit()
+            return jsonify({"transfer_id": observed.id, "operation_id": observed.operation_id, "is_expense": False, "reviewed_provider_observation": True, "state": savings_state(hid, pay_period_days=max(1, int(_household_account().pay_period_days or 14)))})
+        existing_transfer = SavingsTransfer.query.filter_by(household_id=hid, operation_id=transfer_operation_id).first()
+        is_checking_to_savings = source_id is None and destination_id is not None
+        if is_checking_to_savings and existing_transfer is None:
+            if amount_cents > int((_household_account().checking_balance or 0) * 100):
+                raise SavingsError("Checking does not have enough money for this physical transfer.")
+        if protection_id is not None and existing_transfer is None:
+            from services.income_pyf import fulfill
+            # Lock/validate the parent before inserting the FK-bearing ledger
+            # row.  Reversing that order can deadlock two concurrent physical
+            # transfers on PostgreSQL (each has a shared FK lock and waits to
+            # promote it to a row lock).
+            protection = fulfill(protection, amount_cents)
+        row = savings_transfer(hid, operation_id=transfer_operation_id, amount_cents=amount_cents, source_id=source_id, destination_id=destination_id, transfer_type=transfer_type, purpose=purpose, income_pyf_protection_id=protection_id, economic_date=economic_date, external_direction='outflow' if is_checking_to_savings else None, commit=False)
+        if is_checking_to_savings and existing_transfer is None:
+            apply_balance_delta(hid, -amount_cents / 100)
+        db.session.commit()
         return jsonify({"transfer_id": row.id, "operation_id": row.operation_id, "is_expense": False, "state": savings_state(current_household_id(), pay_period_days=max(1, int(_household_account().pay_period_days or 14)))})
     except (SavingsError, ValueError) as exc: db.session.rollback(); return jsonify({"error": str(exc)}), 400
 
@@ -5361,8 +5708,8 @@ def paycheck_timeline_api():
             "status": "unavailable", "setup_needed": True,
             "cycle": {"available": False, "missing": ["account", "authoritative_pay_schedule"]},
             "events": [], "important_events": [],
-            "trajectory": {"status": "unavailable", "amount_cents": None, "amount": None,
-                           "reasons": ["Complete financial and pay-cycle setup to use the timeline."]},
+            "income": {"forecast_only": True, "is_due": False},
+            "factual_components": {},
         })
     hid = current_household_id()
     owner_scope = _resolve_request_user_id({"user_id": request.args.get("user_id")})
@@ -5381,6 +5728,7 @@ def paycheck_timeline_api():
         ).order_by(ExpenseTransaction.date.asc(), ExpenseTransaction.id.asc()).all(),
         transfer_query=lambda household_id, start, end: SavingsTransfer.query.filter(
             SavingsTransfer.household_id == household_id,
+            SavingsTransfer.superseded_by_transfer_id.is_(None),
             SavingsTransfer.created_at >= start, SavingsTransfer.created_at < end,
         ).order_by(SavingsTransfer.created_at.asc(), SavingsTransfer.id.asc()).all(),
         allocation_query=lambda household_id, cycle_key: SavingsAllocationRun.query.filter_by(
@@ -5393,7 +5741,7 @@ def paycheck_timeline_api():
     payload["safe_to_spend_proof"] = {
         "authority": pyf.get("authority"),
         "safe_to_spend_cents": pyf.get("safe_to_spend_cents"),
-        "trajectory_affects_safe_to_spend": False,
+        "timeline_affects_safe_to_spend": False,
     }
     return jsonify(payload)
 
@@ -5436,6 +5784,7 @@ def payday_recap_api():
         ).order_by(ExpenseTransaction.date.asc(), ExpenseTransaction.id.asc()).all(),
         transfer_query=lambda household_id, start, end: SavingsTransfer.query.filter(
             SavingsTransfer.household_id == household_id,
+            SavingsTransfer.superseded_by_transfer_id.is_(None),
             SavingsTransfer.created_at >= start, SavingsTransfer.created_at < end,
         ).order_by(SavingsTransfer.created_at.asc(), SavingsTransfer.id.asc()).all(),
         allocation_query=lambda household_id, cycle_key: SavingsAllocationRun.query.filter_by(

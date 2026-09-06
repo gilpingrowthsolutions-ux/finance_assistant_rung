@@ -179,6 +179,16 @@ function setupTransactionsInit(deps) {
 
   const form = document.getElementById('logExpenseForm');
   if (!form) return;
+  // This identity belongs to the pending economic request, rather than to a
+  // click.  In particular, a response which is lost after the server commits
+  // must be retried with the same identity.  Button disabling is only a UI
+  // affordance; it is not the idempotency mechanism.
+  let pendingSubmission = null;
+  const operationId = () => {
+    if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') return crypto.randomUUID();
+    return 'manual-tx-' + Date.now() + '-' + Math.random().toString(16).slice(2);
+  };
+  const requestKey = (body) => JSON.stringify([body.description, body.amount, body.category]);
   form.addEventListener('submit', async (e) => {
     e.preventDefault();
     const desc = document.getElementById('tDesc');
@@ -190,6 +200,11 @@ function setupTransactionsInit(deps) {
       category: cat && cat.value ? cat.value : '',
     };
     if (!body.description) { if (flashFn) flashFn('Add a short description.', 'error'); return; }
+    const key = requestKey(body);
+    if (!pendingSubmission || pendingSubmission.key !== key) {
+      pendingSubmission = { key, operation_id: operationId() };
+    }
+    body.operation_id = pendingSubmission.operation_id;
     const submitBtn = form.querySelector('button[type="submit"]');
     if (submitBtn) { if (submitBtn.disabled) return; submitBtn.disabled = true; }
     let resp;
@@ -202,6 +217,9 @@ function setupTransactionsInit(deps) {
       if (flashFn) flashFn('We could not add this expense right now.', 'error');
       return;
     }
+    // Only a confirmed server success releases the identity.  The next
+    // genuinely new entry therefore gets a new operation id.
+    pendingSubmission = null;
     if (desc) desc.value = '';
     if (flashFn) flashFn('Expense added', 'success');
     const dialog = typeof form.closest === 'function' ? form.closest('dialog') : null;
@@ -229,26 +247,63 @@ async function refreshBills() {
     return;
   }
   const data = resp.data || [];
-  if (!Array.isArray(data) || data.length === 0) {
-    list.innerHTML = '<div class="money-empty"><strong>No Bills yet</strong><span>Add a real required obligation and Rung will include it in Needs.</span><button class="btn is-primary" type="button" data-money-open="bill">Add Bill</button></div>';
+  // Bills are occurrences; recurring obligations are a separate canonical
+  // management authority. Always read both so removing one occurrence cannot
+  // hide an active (or ended but reactivatable) repeating Need.
+  let recurringResp = {ok: false, data: []};
+  try { recurringResp = await fetchTx_('GET', '/api/recurring-needs', undefined); } catch (_) { recurringResp = {ok: false, data: []}; }
+  const recurring = recurringResp.ok && Array.isArray(recurringResp.data) ? recurringResp.data : [];
+  const recurringById = Object.fromEntries(recurring.map(row => [String(row.id), row]));
+  if ((!Array.isArray(data) || data.length === 0) && recurring.length === 0) {
+    // A failed recurring-authority read is not the same thing as a confirmed
+    // empty recurring list.  Do not tell the customer there are no repeating
+    // Bills while their canonical management state is unavailable.
+    list.innerHTML = recurringResp.ok
+      ? '<div class="money-empty"><strong>No Bills yet</strong><span>Add a real required obligation and Rung will include it in Needs.</span><button class="btn is-primary" type="button" data-money-open="bill">Add Bill</button></div>'
+      : '<div class="error-banner"><span>Repeating Bill management is unavailable right now. No financial state was changed.</span><button class="btn is-tertiary" type="button" data-action="retry-bills">Retry</button></div>';
     const preview = document.getElementById('moneyUpcomingBills');
     if (preview) preview.innerHTML = '<div class="money-empty"><strong>No upcoming Bills</strong><span>Required obligations will appear here when added.</span></div>';
+    const retry = list.querySelector('[data-action="retry-bills"]');
+    if (retry) retry.addEventListener('click', refreshBills);
     return;
   }
   data.forEach(b => {
     const row = document.createElement('div');
     row.className = 'list-item';
+    const obligation = b.recurring_obligation_id ? recurringById[String(b.recurring_obligation_id)] : null;
+    const cadence = obligation ? `${obligation.is_active ? 'Repeats' : 'Repeating Bill ended'} · ${obligation.recurrence}` : '';
     row.innerHTML = `
       <div class="money-row-icon">▣</div>
-      <div class="money-row-main"><div class="li-title">${escapeHtml_(b.name || 'Bill')}</div><div class="li-meta-line"><span>Due ${escapeHtml_(b.due_date || 'date unavailable')}</span><span>·</span><span class="badge ${b.is_paid ? 'is-paid' : ''}">${b.is_paid ? 'Paid' : 'Upcoming Need'}</span></div></div>
+      <div class="money-row-main"><div class="li-title">${escapeHtml_(b.name || 'Bill')}</div><div class="li-meta-line"><span>Due ${escapeHtml_(b.due_date || 'date unavailable')}</span><span>·</span><span class="badge ${b.is_paid ? 'is-paid' : ''}">${b.is_paid ? 'Paid' : 'Upcoming Need'}</span>${cadence ? `<span>· ${escapeHtml_(cadence)}</span>` : ''}</div></div>
       <div class="li-amount">${fmt_(b.amount)}</div>
       <div class="row-actions">
         <button class="btn is-ghost" type="button" data-action="toggle" data-id="${b.id}">${b.is_paid ? 'Mark Unpaid' : 'Mark Paid'}</button>
         <button class="btn is-ghost" type="button" data-action="del" data-id="${b.id}">Remove</button>
+        ${obligation ? `<button class="btn is-ghost" type="button" data-action="manage-recurring" data-recurring-id="${obligation.id}">Manage repeat</button>` : ''}
       </div>
     `;
     list.appendChild(row);
   });
+  if (!recurringResp.ok) {
+    const notice = document.createElement('div'); notice.className = 'error-banner';
+    notice.textContent = 'Repeating Bill management is unavailable right now. Existing Bills are unchanged.';
+    list.appendChild(notice);
+  }
+  const represented = new Set(data.map(b => String(b.recurring_obligation_id || '')).filter(Boolean));
+  recurring.filter(row => !represented.has(String(row.id))).forEach(row => {
+    const item = document.createElement('div'); item.className = 'list-item';
+    item.innerHTML = `<div class="money-row-icon">▣</div><div class="money-row-main"><div class="li-title">${escapeHtml_(row.name || 'Repeating Bill')}</div><div class="li-meta-line"><span>Next due ${escapeHtml_(row.next_due_date || '')}</span><span>· ${escapeHtml_(row.recurrence || '')}</span><span>· ${row.is_active ? 'Active' : 'Ended'}</span></div></div><div class="li-amount">${fmt_(Number(row.expected_amount_cents || 0) / 100)}</div><div class="row-actions"><button class="btn is-ghost" type="button" data-action="manage-recurring" data-recurring-id="${row.id}">Manage repeat</button></div>`;
+    list.appendChild(item);
+  });
+  list.querySelectorAll('button[data-action="manage-recurring"]').forEach(button => button.addEventListener('click', () => {
+    const row = recurringById[String(button.dataset.recurringId)]; const dialog = document.getElementById('recurringBillDialog');
+    if (!row || !dialog) return;
+    document.getElementById('recurringBillId').value = row.id;
+    document.getElementById('recurringBillAmount').value = (Number(row.expected_amount_cents || 0) / 100).toFixed(2);
+    document.getElementById('recurringBillDate').value = row.next_due_date || '';
+    document.getElementById('recurringBillCadence').value = row.recurrence || 'monthly';
+    document.getElementById('recurringBillActive').checked = !!row.is_active; dialog.showModal();
+  }));
   const preview = document.getElementById('moneyUpcomingBills');
   if (preview) preview.innerHTML = data.filter(b => !b.is_paid).slice(0, 4).map(b => `<div class="list-item"><div class="money-row-icon">▣</div><div class="money-row-main"><div class="li-title">${escapeHtml_(b.name || 'Bill')}</div><div class="li-meta-line"><span>Due ${escapeHtml_(b.due_date || 'date unavailable')}</span><span>·</span><span>Upcoming Need</span></div></div><div class="li-amount">${fmt_(b.amount)}</div></div>`).join('') || '<div class="money-empty"><strong>No unpaid Bills</strong><span>Nothing currently recorded is awaiting payment.</span></div>';
   list.querySelectorAll('button[data-action="toggle"]').forEach(b => {
@@ -292,16 +347,23 @@ function setupBillsInit(deps) {
   const flashFn = deps.flash || flash;
 
   const form = document.getElementById('addBillForm');
+  const recurringForm = document.getElementById('recurringBillForm');
+  if (recurringForm) {
+    ['closeRecurringBillDialog','cancelRecurringBillDialog'].forEach(id => { const el = document.getElementById(id); if (el) el.addEventListener('click', () => document.getElementById('recurringBillDialog').close()); });
+    recurringForm.addEventListener('submit', async e => { e.preventDefault(); const id = document.getElementById('recurringBillId').value; const body = {expected_amount: Number(document.getElementById('recurringBillAmount').value), next_due_date: document.getElementById('recurringBillDate').value, recurrence: document.getElementById('recurringBillCadence').value, is_active: document.getElementById('recurringBillActive').checked}; const response = await fetchTx_('PATCH', '/api/recurring-needs/' + id, body); if (!response.ok) { if (flashFn) flashFn('Could not update this repeating Bill.', 'error'); return; } document.getElementById('recurringBillDialog').close(); if (flashFn) flashFn('Repeating Bill updated', 'success'); await refreshFn(); if (typeof refreshOverview_ === 'function') await refreshOverview_(); });
+  }
   if (!form) return;
   form.addEventListener('submit', async (e) => {
     e.preventDefault();
     const name = document.getElementById('bName');
     const amt = document.getElementById('bAmt');
     const date = document.getElementById('bDate');
+    const recurrence = document.getElementById('bRecurrence');
     const body = {
       name: name && name.value ? name.value.trim() : '',
       amount: parseFloat(amt && amt.value ? amt.value : '0'),
       due_date: date && date.value ? date.value : '',
+      recurrence: recurrence && recurrence.value ? recurrence.value : '',
     };
     if (!body.name) { if (flashFn) flashFn('Enter a bill name.', 'error'); return; }
     const submitBtn = form.querySelector('button[type="submit"]');
@@ -323,6 +385,7 @@ function setupBillsInit(deps) {
     if (name) name.value = '';
     if (amt) amt.value = '';
     if (date) date.value = '';
+    if (recurrence) recurrence.value = '';
     if (flashFn) flashFn('Bill added', 'success');
     const dialog = typeof form.closest === 'function' ? form.closest('dialog') : null;
     if (dialog && typeof dialog.close === 'function') dialog.close();

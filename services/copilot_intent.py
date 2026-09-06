@@ -27,6 +27,7 @@ from models import (
 from extensions import db
 from services.household_context import household_id as current_household_id
 from services.financial_state import apply_balance_delta, get_household_account, set_balance_absolute
+from services.income_pyf import establish_for_income
 from services.selected_store import get_selected_store
 from services.recipe_recommend import recommend_recipes
 from services.recipe_access import visible_recipe_by_id, visible_recipe_query
@@ -2576,6 +2577,7 @@ def _apply_staged_actions_once(staged_actions: Dict[str, Any], raw_user_text: st
             db.session.add(tx)
             db.session.flush()
             apply_balance_delta(hid, amount)
+            establish_for_income(tx)
 
             if income_action == "record_another" and income_selected:
                 keep_separate_after_manual_creation(

@@ -1981,6 +1981,7 @@
             <div class="protection-row"><span class="protection-icon">✓</span><div><div class="protection-label">Required Needs</div><div class="protection-context"><span id="kpiBillCount">0</span> obligations currently due</div></div><strong class="protection-value" id="allocUnpaidAmt">—</strong></div>
             <div class="protection-row"><span class="protection-icon">↗</span><div><div class="protection-label">Pay Yourself First</div><div class="protection-context">Feasible current-cycle protection</div></div><strong class="protection-value" id="allocPyfAmt">—</strong></div>
             <div class="protection-row"><span class="protection-icon">◇</span><div><div class="protection-label">Protected buffer</div><div class="protection-context">Kept out of Safe-to-Spend</div></div><strong class="protection-value" id="allocBufferAmt">—</strong></div>
+            <div class="protection-row"><span class="protection-icon">→</span><div><div class="protection-label">Upcoming required bills</div><div class="protection-context">Current money held only when future income is not enough</div></div><strong class="protection-value" id="allocForwardNeedsAmt">—</strong></div>
           </div>
           <div id="pyfStatusRow" class="pyf-status" style="display:none;"><span class="pyf-dot is-missing"></span><span id="pyfStatusText"></span></div>
         </article>
@@ -1988,7 +1989,7 @@
 
       <div class="overview-secondary-grid">
         <article id="overviewTrajectory" class="overview-card overview-cycle-card" aria-live="polite">
-          <div><div class="overview-eyebrow">This pay cycle</div><div id="overviewTrajectoryValue" class="trajectory-value">Loading cycle status…</div><div id="overviewTrajectoryReason" class="panel-sub">Comparing confirmed reality with your plan.</div></div>
+          <div><div class="overview-eyebrow">This pay cycle</div><div id="overviewTrajectoryValue" class="trajectory-value">Loading cycle…</div><div id="overviewTrajectoryReason" class="panel-sub">Current dates, expected income, and required obligations.</div></div>
           <button id="openPaycheckTimeline" class="btn is-tertiary" type="button">View timeline</button>
         </article>
         <div class="overview-actions" aria-label="Overview actions">
@@ -2215,10 +2216,10 @@
       <div class="money-view" data-money-panel="cashflow">
         <div class="money-flow-grid">
           <article class="money-card" id="paycheckTimelinePanel">
-            <div class="money-card-head"><div><div class="behavior-eyebrow">Current cycle</div><h2>Paycheck Timeline</h2><div id="timelineCycleDates" class="money-card-sub">Loading current pay cycle…</div></div><div id="timelineTrajectoryValue" class="trajectory-value" style="font-size:1.12rem;">—</div></div>
+            <div class="money-card-head"><div><div class="behavior-eyebrow">Current cycle</div><h2>Paycheck Timeline</h2><div id="timelineCycleDates" class="money-card-sub">Loading current pay cycle…</div></div><div id="timelineTrajectoryValue" class="trajectory-value" style="font-size:1.12rem;">Cycle facts</div></div>
             <div id="timelineStatus" class="money-card-sub">Important events appear first.</div>
             <div id="paycheckTimelineList" class="timeline-list" aria-live="polite"><div class="skeleton skeleton-block"></div><div class="skeleton skeleton-block"></div></div>
-            <div class="money-information-note"><span>ⓘ</span><span>Ahead/Behind is informational. It does not change Safe-to-Spend or grant additional spending permission.</span></div>
+            <div class="money-information-note"><span>ⓘ</span><span>Timeline facts do not change Safe-to-Spend. Safe-to-Spend uses current Needs, forward protections, PYF, and checking protection.</span></div>
             <details id="timelineDetails" class="money-disclosure"><summary>Show full cycle detail</summary><div id="paycheckTimelineFull" class="timeline-list"></div></details>
             <button id="retryPaycheckTimeline" class="btn is-tertiary" type="button" style="display:none;margin-top:12px;">Retry</button>
           </article>
@@ -2249,7 +2250,7 @@
           <form id="logExpenseForm">
             <div class="field"><label for="tDesc">Description</label><input type="text" id="tDesc" placeholder="e.g. Hardware Store" required /></div>
             <div class="field"><label for="tAmt">Amount ($)</label><input type="number" id="tAmt" min="0.01" step="0.01" required /></div>
-            <div class="field"><label for="tCat">Category</label><select id="tCat"><option value="discretionary">Discretionary</option><option value="essentials">Essentials</option><option value="savings">Savings</option></select></div>
+            <div class="field"><label for="tCat">Category</label><select id="tCat"><option value="discretionary">Discretionary</option><option value="essentials">Essentials</option><option value="savings">Savings</option><option value="income">Income</option></select></div>
             <div class="money-dialog-actions"><button id="cancelTransactionDialog" class="btn is-tertiary" type="button">Cancel</button><button class="btn is-primary" type="submit">Add transaction</button></div>
           </form>
         </div>
@@ -2262,10 +2263,12 @@
             <div class="field"><label for="bName">Bill name</label><input type="text" id="bName" placeholder="e.g. Rent" required /></div>
             <div class="field"><label for="bAmt">Amount ($)</label><input type="number" id="bAmt" min="0.01" step="0.01" required /></div>
             <div class="field"><label for="bDate">Due date</label><input type="date" id="bDate" required /></div>
+            <div class="field"><label for="bRecurrence">Repeats</label><select id="bRecurrence"><option value="">Does not repeat</option><option value="weekly">Weekly</option><option value="biweekly">Every 2 weeks</option><option value="monthly">Monthly</option><option value="quarterly">Quarterly</option><option value="yearly">Yearly</option></select></div>
             <div class="money-dialog-actions"><button id="cancelBillDialog" class="btn is-tertiary" type="button">Cancel</button><button class="btn is-primary" type="submit">Add Bill</button></div>
           </form>
         </div>
       </dialog>
+      <dialog id="recurringBillDialog" class="money-dialog" aria-labelledby="recurringBillTitle"><div class="money-dialog-inner"><div class="money-dialog-head"><div><h2 id="recurringBillTitle">Manage repeating Bill</h2><div class="money-card-sub">Changes apply to future required Needs only.</div></div><button id="closeRecurringBillDialog" class="btn is-ghost" type="button">Close</button></div><form id="recurringBillForm"><input id="recurringBillId" type="hidden" /><div class="field"><label for="recurringBillAmount">Expected amount ($)</label><input id="recurringBillAmount" type="number" min="0.01" step="0.01" required /></div><div class="field"><label for="recurringBillDate">Next due date</label><input id="recurringBillDate" type="date" required /></div><div class="field"><label for="recurringBillCadence">Repeats</label><select id="recurringBillCadence"><option value="weekly">Weekly</option><option value="biweekly">Every 2 weeks</option><option value="monthly">Monthly</option><option value="quarterly">Quarterly</option><option value="yearly">Yearly</option></select></div><div class="field"><label><input id="recurringBillActive" type="checkbox" /> Active for future Needs</label></div><div class="money-dialog-actions"><button id="cancelRecurringBillDialog" class="btn is-tertiary" type="button">Cancel</button><button class="btn is-primary" type="submit">Save changes</button></div></form></div></dialog>
     </section>
 
     <!-- SAVINGS ---------------------------------------------------------- -->
@@ -2274,7 +2277,7 @@
       <nav class="savings-tabs" aria-label="Savings sections"><span class="is-active">Overview</span><span>Protected savings</span><span>Wealth</span></nav>
       <div id="savingsStatus" aria-live="polite"></div>
       <div class="savings-hero">
-        <article class="savings-card savings-pyf-card"><div id="savingsPyfRing" class="savings-pyf-ring">—</div><div><div class="card-label">Pay Yourself First</div><div id="savingsPyfStatus" class="bucket-name">Loading your current plan…</div><div id="savingsPyfContext" class="bucket-context">Your long-term target remains unchanged when a cycle is tight.</div></div><button id="previewSavingsAllocation" class="btn is-primary" type="button">Review this pay cycle</button></article>
+        <article class="savings-card savings-pyf-card"><div id="savingsPyfRing" class="savings-pyf-ring">—</div><div><div class="card-label">Pay Yourself First</div><div id="savingsPyfStatus" class="bucket-name">Loading your current plan…</div><div id="savingsPyfContext" class="bucket-context">Your long-term target remains unchanged when a cycle is tight.</div></div><div class="bucket-actions"><button id="previewSavingsAllocation" class="btn is-primary" type="button">Review this pay cycle</button><button id="openPhysicalSavingsTransfer" class="btn is-tertiary" type="button">Record savings transfer</button></div></article>
         <article class="savings-card"><div class="card-label">Total protected &amp; saved</div><div id="savingsTotal" class="savings-total">—</div><div id="savingsTakeaway" class="panel-sub">Loading your savings destinations…</div></article>
       </div>
       <article class="savings-card savings-section"><div class="savings-section-head"><div><h2>Emergency Reserves</h2><div class="panel-sub">Protected, purpose-oriented money for likely life expenses. Legitimate use can be replenished.</div></div></div><div id="reserveCards" class="bucket-grid reserve-grid"><div class="skeleton skeleton-block"></div><div class="skeleton skeleton-block"></div></div></article>
@@ -2294,6 +2297,7 @@
     </section>
 
     <dialog id="allocationDialog" class="savings-dialog" aria-labelledby="allocationDialogTitle"><div class="savings-dialog-inner"><div class="savings-dialog-head"><div><h2 id="allocationDialogTitle">Review this pay cycle</h2><div class="panel-sub">Preview only. Nothing changes until you confirm.</div></div><button class="btn is-ghost savings-dialog-close" type="button">Close</button></div><div id="allocationPreview" class="allocation-list"></div><div class="savings-dialog-actions"><button id="cancelSavingsAllocation" class="btn is-tertiary" type="button">Cancel</button><button id="confirmSavingsAllocation" class="btn is-primary" type="button" disabled>Confirm allocation</button></div></div></dialog>
+    <dialog id="physicalSavingsTransferDialog" class="savings-dialog" aria-labelledby="physicalSavingsTransferTitle"><div class="savings-dialog-inner"><div class="savings-dialog-head"><div><h2 id="physicalSavingsTransferTitle">Record savings transfer</h2><div class="panel-sub">Record money you already moved from checking to savings. Rung does not move money at your bank.</div></div><button class="btn is-ghost savings-dialog-close" type="button">Close</button></div><form id="physicalSavingsTransferForm" class="inline-form-grid"><div class="field"><label for="physicalSavingsProtection">Income protection</label><select id="physicalSavingsProtection" required></select><div id="physicalSavingsProtectionHint" class="bucket-context"></div></div><div class="field"><label for="physicalSavingsDestination">Savings destination</label><select id="physicalSavingsDestination" required></select></div><div class="field"><label for="physicalSavingsAmount">Amount moved ($)</label><input id="physicalSavingsAmount" type="number" min="0.01" step="0.01" required></div><div class="field"><label for="physicalSavingsDate">Transfer date</label><input id="physicalSavingsDate" type="date" required></div><div class="truth-warning">Confirm only after the real checking-to-savings movement is complete outside Rung.</div><div class="savings-dialog-actions"><button class="btn is-tertiary savings-dialog-close" type="button">Cancel</button><button class="btn is-primary" type="submit">Record transfer</button></div></form></div></dialog>
     <dialog id="goalDialog" class="savings-dialog" aria-labelledby="goalDialogTitle"><div class="savings-dialog-inner"><div class="savings-dialog-head"><div><h2 id="goalDialogTitle">Add new Goal</h2><div class="panel-sub">Goal progress uses only savings assigned to this Goal.</div></div><button class="btn is-ghost savings-dialog-close" type="button">Close</button></div><form id="goalForm" class="inline-form-grid"><input id="goalEditId" type="hidden"><div class="field"><label for="goalName">Goal name</label><input id="goalName" required placeholder="Family vacation"></div><div class="field"><label for="goalTarget">Target</label><input id="goalTarget" type="number" min="0.01" step="0.01" required></div><div class="field"><label for="goalDate">Target date (optional)</label><input id="goalDate" type="date"></div><div class="field"><label for="goalPriority">Priority</label><input id="goalPriority" type="number" min="0" step="1" value="100" required></div><div class="savings-dialog-actions"><button class="btn is-tertiary savings-dialog-close" type="button">Cancel</button><button id="saveGoalButton" class="btn is-primary" type="submit">Create Goal</button></div></form></div></dialog>
     <dialog id="reserveDialog" class="savings-dialog" aria-labelledby="reserveDialogTitle"><div class="savings-dialog-inner"><div class="savings-dialog-head"><div><h2 id="reserveDialogTitle">Add a Reserve</h2><div class="panel-sub">Protected money for a real household purpose.</div></div><button class="btn is-ghost savings-dialog-close" type="button">Close</button></div><form id="reserveForm" class="inline-form-grid"><input id="reserveEditId" type="hidden"><div class="field"><label for="reserveName">Reserve name</label><input id="reserveName" required placeholder="Vehicle Repair Reserve"></div><div class="field" id="reserveCategoryField"><label for="reserveCategory">Purpose</label><select id="reserveCategory"><option value="emergency">Emergency</option><option value="vehicle">Vehicle repair</option><option value="home_appliance">Home &amp; appliance</option><option value="medical">Medical</option><option value="custom">Custom</option></select></div><div class="field"><label for="reserveTarget">Target</label><input id="reserveTarget" type="number" min="0.01" step="0.01" required></div><div class="savings-dialog-actions"><button class="btn is-tertiary savings-dialog-close" type="button">Cancel</button><button id="saveReserveButton" class="btn is-primary" type="submit">Create Reserve</button></div></form></div></dialog>
     <dialog id="reserveUseDialog" class="savings-dialog" aria-labelledby="reserveUseTitle"><div class="savings-dialog-inner"><div class="savings-dialog-head"><div><h2 id="reserveUseTitle">Use protected Reserve</h2><div class="panel-sub">Rung verifies that the purpose matches this Reserve before writing the ledger transfer.</div></div><button class="btn is-ghost savings-dialog-close" type="button">Close</button></div><form id="reserveUseForm" class="inline-form-grid"><input id="reserveUseDestination" type="hidden"><div class="field"><label for="reserveUsePurpose">What is it for?</label><input id="reserveUsePurpose" required placeholder="Truck transmission repair"></div><div class="field"><label for="reserveUseAmount">Amount</label><input id="reserveUseAmount" type="number" min="0.01" step="0.01" required></div><div class="truth-warning">This uses protected savings. It is not ordinary discretionary spending.</div><div class="savings-dialog-actions"><button class="btn is-tertiary savings-dialog-close" type="button">Cancel</button><button class="btn is-primary" type="submit">Confirm Reserve use</button></div></form></div></dialog>
@@ -3012,21 +3016,36 @@
     var paydayRecapState = null;
     function recapFinishLabel(data) {
       var status=String((data||{}).finish_status||'unavailable'), cents=Number((data||{}).finish_amount_cents||0);
-      if(status==='ahead')return 'Finished '+fmt(Math.abs(cents)/100)+' ahead';
-      if(status==='behind')return 'Finished '+fmt(Math.abs(cents)/100)+' behind';
-      if(status==='on_track')return 'Finished on track';
+      if(status==='factual')return 'Completed-cycle facts';
       return 'Recap not ready';
     }
-    function recapCycleLabel(cycle){
-      if(!cycle||!cycle.start_date||!cycle.end_date)return 'No completed cycle is available yet.';
-      var start=new Date(cycle.start_date+'T00:00:00Z'), end=new Date(new Date(cycle.end_date+'T00:00:00Z').getTime()-86400000);
-      return start.toLocaleDateString('en-US',{month:'short',day:'numeric'})+' through '+end.toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'});
+    function formatCalendarDate(dateOnly, options) {
+      var match = /^([0-9]{4})-([0-9]{2})-([0-9]{2})$/.exec(String(dateOnly || ''));
+      if (!match) return '';
+      // Canonical cycle values are DATEs, not UTC instants.  Construct a
+      // local calendar date (at noon for DST safety) before formatting it.
+      return new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3]), 12)
+        .toLocaleDateString('en-US', options);
     }
+    function calendarDayBefore(dateOnly) {
+      var match = /^([0-9]{4})-([0-9]{2})-([0-9]{2})$/.exec(String(dateOnly || ''));
+      if (!match) return '';
+      var day = new Date(Date.UTC(Number(match[1]), Number(match[2]) - 1, Number(match[3])));
+      day.setUTCDate(day.getUTCDate() - 1);
+      return day.getUTCFullYear() + '-' + String(day.getUTCMonth() + 1).padStart(2, '0') + '-' + String(day.getUTCDate()).padStart(2, '0');
+    }
+    function cycleDateLabel(cycle, unavailableLabel){
+      if(!cycle||!cycle.start_date||!cycle.end_date)return unavailableLabel;
+      var start=formatCalendarDate(cycle.start_date,{month:'short',day:'numeric'});
+      var end=formatCalendarDate(calendarDayBefore(cycle.end_date),{month:'short',day:'numeric',year:'numeric'});
+      return start&&end ? start+' through '+end : unavailableLabel;
+    }
+    function recapCycleLabel(cycle){ return cycleDateLabel(cycle, 'No completed cycle is available yet.'); }
     function renderPaydayRecap(data){
       paydayRecapState=data||{};var available=paydayRecapState.status==='available';
       var label=recapFinishLabel(paydayRecapState), reasons=paydayRecapState.finish_reasons||[], protectedData=paydayRecapState.protected_summary||{};
       var overviewValue=document.getElementById('overviewRecapValue'),overviewSummary=document.getElementById('overviewRecapSummary'),finish=document.getElementById('recapFinishValue');
-      [overviewValue,finish].forEach(function(el){if(!el)return;el.textContent=label;el.className='trajectory-value'+(paydayRecapState.finish_status==='ahead'?' is-ahead':paydayRecapState.finish_status==='behind'?' is-behind':'');if(el===finish)el.style.fontSize='1.15rem';});
+      [overviewValue,finish].forEach(function(el){if(!el)return;el.textContent=label;el.className='trajectory-value';if(el===finish)el.style.fontSize='1.15rem';});
       var explanation=available?(protectedData.pyf_successfully_protected&&Number(protectedData.actual_protected_cents||0)>0?'Protected '+fmt(Number(protectedData.actual_protected_cents)/100)+' through confirmed savings allocations.':(reasons[0]||'Confirmed completed-cycle activity is ready to review.')):(reasons[0]||'Complete a full supported pay cycle to see a recap.');
       if(overviewSummary)overviewSummary.textContent=explanation;
       var dates=document.getElementById('recapCycleDates');if(dates)dates.textContent=recapCycleLabel(paydayRecapState.completed_cycle);
@@ -3047,14 +3066,6 @@
     }
 
     var paycheckTimelineState = null;
-    function trajectoryLabel(trajectory) {
-      var status = String((trajectory || {}).status || 'unavailable');
-      var cents = Number((trajectory || {}).amount_cents || 0);
-      if (status === 'ahead') return fmt(Math.abs(cents) / 100) + ' ahead';
-      if (status === 'behind') return fmt(Math.abs(cents) / 100) + ' behind';
-      if (status === 'on_track') return 'On track';
-      return 'Cycle status unavailable';
-    }
     function renderTimelineEvents(target, rows) {
       if (!target) return;
       if (!Array.isArray(rows) || !rows.length) {
@@ -3077,30 +3088,26 @@
     }
     function renderPaycheckTimeline(data) {
       paycheckTimelineState = data || {};
-      var trajectory = paycheckTimelineState.trajectory || {};
       var available = paycheckTimelineState.status === 'available';
-      var label = trajectoryLabel(trajectory);
-      var reason = (trajectory.reasons || [])[0] || 'Complete pay-cycle setup to compare this cycle truthfully.';
+      var income = paycheckTimelineState.income || {};
+      var label = available ? 'Cycle facts' : 'Cycle unavailable';
+      var reason = !available ? 'Complete pay-cycle setup to view this timeline truthfully.' : (income.is_due && Number(income.unconfirmed_due_cents||0)>0 ? 'Expected income is due but not yet confirmed.' : (income.scheduled_at ? 'Expected income remains a forecast until its scheduled payday.' : 'Current dates and supported financial events.'));
       var overviewValue = document.getElementById('overviewTrajectoryValue');
       var overviewReason = document.getElementById('overviewTrajectoryReason');
       var moneyValue = document.getElementById('timelineTrajectoryValue');
       [overviewValue, moneyValue].forEach(function(el) {
         if (!el) return;
         el.textContent = label;
-        el.className = 'trajectory-value' + (trajectory.status === 'ahead' ? ' is-ahead' : trajectory.status === 'behind' ? ' is-behind' : '');
+        el.className = 'trajectory-value';
       });
       if (overviewReason) overviewReason.textContent = reason;
       var dates = document.getElementById('timelineCycleDates');
       var cycle = paycheckTimelineState.cycle || {};
-      if (dates) {
-        var startDate = new Date(cycle.start_date + 'T00:00:00Z');
-        var finalDate = new Date(new Date(cycle.end_date + 'T00:00:00Z').getTime() - 86400000);
-        dates.textContent = available ? startDate.toLocaleDateString('en-US', {month:'short',day:'numeric'}) + ' through ' + finalDate.toLocaleDateString('en-US', {month:'short',day:'numeric',year:'numeric'}) : 'Pay-cycle setup needed';
-      }
+      if (dates) dates.textContent = available ? cycleDateLabel(cycle, 'Pay-cycle setup needed') : 'Pay-cycle setup needed';
       var overviewDates = document.getElementById('overviewCycleDates');
       if (overviewDates) overviewDates.textContent = dates ? dates.textContent : (available ? 'Current pay cycle' : 'Pay-cycle setup needed');
       var status = document.getElementById('timelineStatus');
-      if (status) status.textContent = available ? (trajectory.reasons || []).join(' ') : reason;
+      if (status) status.textContent = reason;
       renderTimelineEvents(document.getElementById('paycheckTimelineList'), paycheckTimelineState.important_events || []);
       renderTimelineEvents(document.getElementById('paycheckTimelineFull'), paycheckTimelineState.events || []);
       var details = document.getElementById('timelineDetails');
@@ -3217,6 +3224,7 @@
       if ($('allocPyfAmt')) $('allocPyfAmt').textContent = pyfValue == null ? '\u2014' : fmt(pyfValue);
       if ($('allocPyfBar')) $('allocPyfBar').style.width = allocationPct(pyfValue) + '%';
       if ($('allocBufferAmt')) $('allocBufferAmt').textContent = components.protected_buffer == null ? '—' : fmt(components.protected_buffer);
+      if ($('allocForwardNeedsAmt')) $('allocForwardNeedsAmt').textContent = components.forward_needs_reserve == null ? '—' : fmt(components.forward_needs_reserve);
       if ($('allocBufferBar')) $('allocBufferBar').style.width = allocationPct(components.protected_buffer) + '%';
       if ($('allocSafeAmt')) $('allocSafeAmt').textContent = safeAvailable ? fmt(safe.safe_to_spend) : '\u2014';
       if ($('allocSafeBar')) $('allocSafeBar').style.width = allocationPct(safe.safe_to_spend) + '%';
@@ -6939,15 +6947,33 @@
 
         reconciliationList.className = '';
         reconciliationList.innerHTML = rows.map(function (row) {
+          if (row.kind === 'transfer') {
+            var transfer = row.transfer || {};
+            var transferBank = row.bank || {};
+            return '<div class="stage-line is-financial" style="margin-bottom:8px;">' +
+              '<div class="stage-line-head"><span>Possible duplicate transfer</span><span class="stage-line-badges"><span class="stage-line-badge">Review needed</span></span></div>' +
+              '<div class="stage-line-grid" style="grid-template-columns:1fr;">' +
+              '<div><strong>Recorded transfer:</strong> ' + escapeHtml(String(transfer.purpose || 'Savings transfer')) + ' · $' + (Number(transfer.amount_cents || 0) / 100).toFixed(2) + ' · ' + escapeHtml(String(transfer.economic_date || 'date not recorded')) + '</div>' +
+              '<div><strong>Bank transfer:</strong> ' + escapeHtml(String(transferBank.merchant_name || transferBank.name || 'Bank transfer')) + ' · $' + (Number(transferBank.amount_cents || 0) / 100).toFixed(2) + ' · ' + escapeHtml(String(transferBank.transaction_date || '')) + '</div>' +
+              '<div class="row" style="gap:8px; margin-top:6px;">' +
+              '<button class="btn" type="button" data-transfer-recon-action="match" data-transfer-id="' + escapeHtml(String(transfer.transfer_id || '')) + '" data-plaid-id="' + escapeHtml(String(transferBank.plaid_transaction_id || '')) + '">Match</button>' +
+              '<button class="btn is-ghost" type="button" data-transfer-recon-action="keep_separate" data-transfer-id="' + escapeHtml(String(transfer.transfer_id || '')) + '" data-plaid-id="' + escapeHtml(String(transferBank.plaid_transaction_id || '')) + '">Keep Separate</button>' +
+              '</div></div></div>';
+          }
           var manual = row.manual || {};
           var bank = row.bank || {};
+          var isIncomeReconciliation = String(manual.category || '').toLowerCase() === 'income';
+          var reconciliationTitle = isIncomeReconciliation ? 'Possible duplicate income' : 'Possible duplicate';
+          var manualLabel = isIncomeReconciliation ? 'Recorded income' : 'Manual';
+          var bankLabel = isIncomeReconciliation ? 'Bank income' : 'Bank';
+          var matchLabel = isIncomeReconciliation ? 'Match' : 'Same Purchase';
           return '<div class="stage-line is-financial" style="margin-bottom:8px;">' +
-            '<div class="stage-line-head"><span>Possible duplicate</span><span class="stage-line-badges"><span class="stage-line-badge">Confidence ' + escapeHtml(String(row.match_strength || 0)) + '</span></span></div>' +
+            '<div class="stage-line-head"><span>' + reconciliationTitle + '</span><span class="stage-line-badges"><span class="stage-line-badge">Confidence ' + escapeHtml(String(row.match_strength || 0)) + '</span></span></div>' +
             '<div class="stage-line-grid" style="grid-template-columns:1fr;">' +
-            '<div><strong>Manual:</strong> ' + escapeHtml(String(manual.description || '')) + ' · $' + Number(manual.amount || 0).toFixed(2) + ' · ' + escapeHtml(String(manual.date || '')) + '</div>' +
-            '<div><strong>Bank:</strong> ' + escapeHtml(String(bank.merchant_name || bank.name || '')) + ' · $' + (Number(bank.amount_cents || 0) / 100).toFixed(2) + ' · ' + escapeHtml(String(bank.transaction_date || '')) + '</div>' +
+            '<div><strong>' + manualLabel + ':</strong> ' + escapeHtml(String(manual.description || '')) + ' · $' + Number(manual.amount || 0).toFixed(2) + ' · ' + escapeHtml(String(manual.date || '')) + '</div>' +
+            '<div><strong>' + bankLabel + ':</strong> ' + escapeHtml(String(bank.merchant_name || bank.name || '')) + ' · $' + (Number(bank.amount_cents || 0) / 100).toFixed(2) + ' · ' + escapeHtml(String(bank.transaction_date || '')) + '</div>' +
             '<div class="row" style="gap:8px; margin-top:6px;">' +
-            '<button class="btn" type="button" data-recon-action="match" data-manual-id="' + escapeHtml(String(manual.transaction_id || '')) + '" data-plaid-id="' + escapeHtml(String(bank.plaid_transaction_id || '')) + '">Same Purchase</button>' +
+            '<button class="btn" type="button" data-recon-action="match" data-manual-id="' + escapeHtml(String(manual.transaction_id || '')) + '" data-plaid-id="' + escapeHtml(String(bank.plaid_transaction_id || '')) + '">' + matchLabel + '</button>' +
             '<button class="btn is-ghost" type="button" data-recon-action="keep_separate" data-manual-id="' + escapeHtml(String(manual.transaction_id || '')) + '" data-plaid-id="' + escapeHtml(String(bank.plaid_transaction_id || '')) + '">Keep Separate</button>' +
             '</div>' +
             '</div>' +
@@ -6973,6 +6999,17 @@
             await refreshReconciliationProposals();
             await refreshOverview();
             if (typeof refreshTransactions === 'function') await refreshTransactions();
+          });
+        });
+        reconciliationList.querySelectorAll('button[data-transfer-recon-action]').forEach(function (btnEl) {
+          btnEl.addEventListener('click', async function () {
+            var transferId = parseInt(btnEl.getAttribute('data-transfer-id') || '0', 10);
+            var plaidId = btnEl.getAttribute('data-plaid-id') || '';
+            var action = btnEl.getAttribute('data-transfer-recon-action') || '';
+            var resp = await api('POST', '/api/reconciliation/transfer-decision', {savings_transfer_id: transferId, plaid_transaction_id: plaidId, action: action});
+            if (!resp.ok) { flash('Could not save your transfer decision right now.', 'error'); return; }
+            flash(action === 'match' ? 'Transfers matched as one event.' : 'Transfers kept separate.', 'success');
+            await refreshReconciliationProposals(); await refreshOverview();
           });
         });
       }
@@ -7105,6 +7142,7 @@
     var $ = function (id) { return document.getElementById(id); };
     var savingsSnapshot = null;
     var savingsAllocationPlan = null;
+    var physicalSavingsOperationId = null;
     function savingsMoney(cents) { return new Intl.NumberFormat('en-US', {style:'currency',currency:'USD'}).format((Number(cents)||0)/100); }
     function savingsOperation(prefix) { return prefix + '_' + (window.crypto && crypto.randomUUID ? crypto.randomUUID() : Date.now() + '_' + Math.random().toString(16).slice(2)); }
     function savingsEscape(value) { var node=document.createElement('span'); node.textContent=String(value == null ? '' : value); return node.innerHTML; }
@@ -7135,11 +7173,30 @@
     function savingsBody(form) { return JSON.stringify(form); }
     function openSavingsDialog(id) { var dialog=$(id); if(dialog && !dialog.open) dialog.showModal(); }
     function closeSavingsDialog(dialog) { if(dialog && dialog.open) dialog.close(); }
+    function localDateOnly(value) { var d=value||new Date(); return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0'); }
+    function physicalTransferOptions() { return (savingsSnapshot && savingsSnapshot.pyf_transfer_options) || {protections:[], destinations:[]}; }
+    function renderPhysicalSavingsTransferForm() {
+      var options=physicalTransferOptions(), protections=options.protections||[], destinations=options.destinations||[];
+      var protectionSelect=$('physicalSavingsProtection'), destinationSelect=$('physicalSavingsDestination');
+      protectionSelect.innerHTML=protections.map(function(p){return '<option value="'+p.id+'">'+savingsEscape(formatCalendarDate(p.income_date,{month:'short',day:'numeric'})||p.income_date||'Income')+' · '+savingsEscape(p.income_description||'Income')+' · '+savingsMoney(p.remaining_cents)+' remaining</option>';}).join('');
+      destinationSelect.innerHTML=destinations.map(function(d){return '<option value="'+d.id+'">'+savingsEscape(d.name)+'</option>';}).join('');
+      function syncProtection(){var selected=protections.find(function(p){return String(p.id)===protectionSelect.value;});var remaining=selected?selected.remaining_cents:0;$('physicalSavingsProtectionHint').textContent=selected?savingsMoney(remaining)+' remains protected until you record the real transfer.':'No unfulfilled income protection is available.';$('physicalSavingsAmount').max=(remaining/100).toFixed(2);if(selected)$('physicalSavingsAmount').value=(remaining/100).toFixed(2);}
+      protectionSelect.onchange=syncProtection; syncProtection();
+      return protections.length>0 && destinations.length>0;
+    }
     function openGoalForm(goal) { $('goalForm').reset(); $('goalPriority').value='100'; $('goalEditId').value=goal?goal.id:''; $('goalDialogTitle').textContent=goal?'Edit Goal':'Add new Goal'; $('saveGoalButton').textContent=goal?'Save changes':'Create Goal'; if(goal){$('goalName').value=goal.name;$('goalTarget').value=(Number(goal.target_cents)/100).toFixed(2);$('goalDate').value=goal.target_date||'';$('goalPriority').value=goal.priority;} openSavingsDialog('goalDialog'); }
     function openReserveForm(reserve) { $('reserveForm').reset(); $('reserveEditId').value=reserve?reserve.id:''; $('reserveDialogTitle').textContent=reserve?'Edit Reserve target':'Add a Reserve'; $('saveReserveButton').textContent=reserve?'Save target':'Create Reserve'; $('reserveCategoryField').style.display=reserve?'none':'block'; if(reserve){$('reserveName').value=reserve.name;$('reserveTarget').value=(Number(reserve.target_cents)/100).toFixed(2);} openSavingsDialog('reserveDialog'); }
     if ($('openGoalDialog')) $('openGoalDialog').addEventListener('click',function(){openGoalForm(null);});
     if ($('emptyAddGoal')) $('emptyAddGoal').addEventListener('click',function(){openGoalForm(null);});
     if ($('openReserveDialog')) $('openReserveDialog').addEventListener('click',function(){openReserveForm(null);});
+    if ($('openPhysicalSavingsTransfer')) $('openPhysicalSavingsTransfer').addEventListener('click',async function(){
+      // Income can be recorded elsewhere in the served Money UI after the
+      // initial Savings snapshot. Refresh the server authority immediately
+      // before offering a concrete protection for physical fulfillment.
+      await refreshSavings();
+      if (!renderPhysicalSavingsTransferForm()) { if($('savingsStatus')) $('savingsStatus').innerHTML='<div class="info-banner">There is no unfulfilled income protection ready to record.</div>'; return; }
+      physicalSavingsOperationId=savingsOperation('physical_savings'); $('physicalSavingsDate').value=localDateOnly(); openSavingsDialog('physicalSavingsTransferDialog');
+    });
     document.querySelectorAll('.savings-dialog-close').forEach(function(button){button.addEventListener('click',function(){closeSavingsDialog(button.closest('dialog'));});});
     if ($('goalForm')) $('goalForm').addEventListener('submit', async function(e){ e.preventDefault(); var button=e.target.querySelector('button[type="submit"]'); if(button.disabled)return; button.disabled=true; var id=$('goalEditId').value; try { var payload={name:$('goalName').value,target:$('goalTarget').value,target_date:$('goalDate').value||null,priority:Number($('goalPriority').value)}; if(id) await savingsRequest('/api/goals/'+id,{method:'PATCH',body:savingsBody(payload)}); else {payload.operation_id=savingsOperation('goal');await savingsRequest('/api/goals',{method:'POST',body:savingsBody(payload)});} closeSavingsDialog($('goalDialog')); e.target.reset(); await refreshSavings(); if($('goalsStatus')) $('goalsStatus').innerHTML='<div class="success-banner">Goal '+(id?'updated':'created')+'.</div>'; } catch(err){ if($('goalsStatus')) $('goalsStatus').innerHTML='<div class="error-banner">'+savingsEscape(err.message)+'</div>'; } finally { button.disabled=false; } });
     if ($('reserveForm')) $('reserveForm').addEventListener('submit', async function(e){ e.preventDefault(); var button=e.target.querySelector('button[type="submit"]'); if(button.disabled)return; button.disabled=true; var id=$('reserveEditId').value; try { var payload={name:$('reserveName').value,target:$('reserveTarget').value}; if(id) await savingsRequest('/api/reserves/'+id,{method:'PATCH',body:savingsBody(payload)}); else {payload.operation_id=savingsOperation('reserve');payload.category=$('reserveCategory').value;await savingsRequest('/api/reserves',{method:'POST',body:savingsBody(payload)});} closeSavingsDialog($('reserveDialog')); e.target.reset(); await refreshSavings(); if($('savingsStatus')) $('savingsStatus').innerHTML='<div class="success-banner">Reserve '+(id?'updated':'created')+'.</div>'; } catch(err){ if($('savingsStatus')) $('savingsStatus').innerHTML='<div class="error-banner">'+savingsEscape(err.message)+'</div>'; } finally { button.disabled=false; } });
@@ -7151,6 +7208,7 @@
       var use=e.target.closest('.reserve-use'); if(use){$('reserveUseForm').reset();$('reserveUseDestination').value=use.dataset.destination;openSavingsDialog('reserveUseDialog');}
     });
     if ($('reserveUseForm')) $('reserveUseForm').addEventListener('submit',async function(e){e.preventDefault();var button=e.target.querySelector('button[type="submit"]');if(button.disabled)return;button.disabled=true;try{await savingsRequest('/api/savings/transfer',{method:'POST',body:savingsBody({operation_id:savingsOperation('reserve_use'),source_destination_id:Number($('reserveUseDestination').value),amount:$('reserveUseAmount').value,transfer_type:'reserve_use',purpose:$('reserveUsePurpose').value,confirm:true})});closeSavingsDialog($('reserveUseDialog'));await refreshSavings();if($('savingsStatus'))$('savingsStatus').innerHTML='<div class="success-banner">Reserve use recorded. This Reserve is eligible for replenishment when below target.</div>';}catch(err){if($('savingsStatus'))$('savingsStatus').innerHTML='<div class="error-banner">'+savingsEscape(err.message)+'</div>';}finally{button.disabled=false;}});
+    if ($('physicalSavingsTransferForm')) $('physicalSavingsTransferForm').addEventListener('submit',async function(e){e.preventDefault();var button=e.target.querySelector('button[type="submit"]');if(button.disabled)return;button.disabled=true;try{await savingsRequest('/api/savings/transfer',{method:'POST',body:savingsBody({operation_id:physicalSavingsOperationId||(physicalSavingsOperationId=savingsOperation('physical_savings')),amount:$('physicalSavingsAmount').value,destination_id:Number($('physicalSavingsDestination').value),transfer_type:'deposit',purpose:'Recorded checking-to-savings transfer',income_pyf_protection_id:Number($('physicalSavingsProtection').value),economic_date:$('physicalSavingsDate').value,confirm:true})});closeSavingsDialog($('physicalSavingsTransferDialog'));physicalSavingsOperationId=null;await refreshSavings();if($('savingsStatus'))$('savingsStatus').innerHTML='<div class="success-banner">Savings transfer recorded. Your bank movement was not initiated by Rung.</div>';}catch(err){if($('savingsStatus'))$('savingsStatus').innerHTML='<div class="error-banner">'+savingsEscape(err.message)+'</div>';}finally{button.disabled=false;}});
     if ($('cancelSavingsAllocation')) $('cancelSavingsAllocation').addEventListener('click',function(){closeSavingsDialog($('allocationDialog'));});
     if ($('previewSavingsAllocation')) $('previewSavingsAllocation').addEventListener('click', async function(){ savingsAllocationPlan=null;$('allocationPreview').innerHTML='<div class="skeleton skeleton-block"></div><div class="skeleton skeleton-block"></div>';$('confirmSavingsAllocation').disabled=true;openSavingsDialog('allocationDialog');try { var plan=await savingsRequest('/api/savings/allocation/preview');savingsAllocationPlan=plan;var available=plan.remaining_available_cents == null ? plan.feasible_cents : plan.remaining_available_cents;var html='<div class="bucket-context">Available to allocate this cycle: <strong>'+savingsMoney(available)+'</strong></div>'+plan.allocations.map(function(a){return '<div class="allocation-row"><div><div class="bucket-name">'+savingsEscape(a.name)+'</div><div class="bucket-context">'+savingsEscape(String(a.reason||'').replaceAll('_',' '))+'</div></div><strong>'+savingsMoney(a.amount_cents)+'</strong></div>';}).join('');if(!plan.allocations.length)html+='<div class="empty-state"><div class="empty-title">No allocation available this cycle</div><div class="empty-desc">Your long-term target remains unchanged. No savings will be moved.</div></div>';if(plan.impossible_schedules.length)html+='<div class="truth-warning">'+plan.impossible_schedules.map(function(x){return savingsEscape(x.name)+': current feasible savings cannot keep this Goal on schedule.';}).join('<br>')+'</div>';$('allocationPreview').innerHTML=html;$('confirmSavingsAllocation').disabled=!plan.allocations.length;} catch(err){$('allocationPreview').innerHTML='<div class="error-banner">'+savingsEscape(err.message)+'</div>';}});
     if ($('confirmSavingsAllocation')) $('confirmSavingsAllocation').addEventListener('click',async function(){if(!savingsAllocationPlan)return;var button=this;button.disabled=true;try{await savingsRequest('/api/savings/allocation/apply',{method:'POST',body:savingsBody({operation_id:savingsOperation('allocation'),confirm:true})});closeSavingsDialog($('allocationDialog'));await refreshSavings();if($('savingsStatus'))$('savingsStatus').innerHTML='<div class="success-banner">Savings allocation applied once.</div>';}catch(err){button.disabled=false;$('allocationPreview').insertAdjacentHTML('beforeend','<div class="error-banner">'+savingsEscape(err.message)+'</div>');}});

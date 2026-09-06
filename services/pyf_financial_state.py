@@ -42,6 +42,9 @@ def calculate_pyf_snapshot(
     period_income_cents: int | None,
     savings_target_percent: Any | None,
     protected_buffer_cents: int | None,
+    active_income_pyf_cents: int = 0,
+    current_cycle_income_pyf_cents: int = 0,
+    current_cycle_established_pyf_cents: int | None = None,
     needs: list[dict[str, Any]],
     missing_setup: list[str] | None = None,
 ) -> dict[str, Any]:
@@ -87,12 +90,28 @@ def calculate_pyf_snapshot(
     buffer_cents = max(0, int(protected_buffer_cents))
     needs_total = sum(max(0, int(row.get("amount_cents") or 0)) for row in needs)
     target_cents = percentage_amount_cents(income, savings_target_percent)
+    active_pyf = max(0, int(active_income_pyf_cents or 0))
+    current_cycle_pyf = min(active_pyf, max(0, int(current_cycle_income_pyf_cents or 0)))
+    # Fulfilled money has left checking and must not remain a virtual
+    # deduction, but its established income consequence still satisfies this
+    # cycle's target. Without this distinction a physical transfer would both
+    # lower checking and cause the same PYF amount to be re-created virtually.
+    current_cycle_established = max(current_cycle_pyf, int(
+        current_cycle_income_pyf_cents if current_cycle_established_pyf_cents is None
+        else current_cycle_established_pyf_cents
+    ))
     available_after_needs_and_buffer = max(0, checking - needs_total - buffer_cents)
-    feasible_cents = min(target_cents, available_after_needs_and_buffer)
-    shortfall_cents = max(0, target_cents - feasible_cents)
-    safe_cents = max(0, checking - needs_total - buffer_cents - feasible_cents)
+    # All unfulfilled protection remains unavailable in checking.  Only the
+    # portion created by current-cycle income may satisfy this cycle's PYF
+    # target; prior-cycle savings never erase a new paycheck's consequence.
+    remaining_target_cents = max(0, target_cents - current_cycle_established)
+    feasible_cents = min(remaining_target_cents, max(0, available_after_needs_and_buffer - active_pyf))
+    total_protected_cents = active_pyf + feasible_cents
+    current_cycle_total_cents = current_cycle_established + feasible_cents
+    shortfall_cents = max(0, target_cents - current_cycle_total_cents)
+    safe_cents = max(0, checking - needs_total - buffer_cents - total_protected_cents)
 
-    if feasible_cents >= target_cents:
+    if current_cycle_total_cents >= target_cents:
         feasibility = "full_target_feasible"
     elif feasible_cents > 0:
         feasibility = "partial_target_feasible"
@@ -115,8 +134,10 @@ def calculate_pyf_snapshot(
         "long_term_savings_target_percent": float(Decimal(str(savings_target_percent))),
         "target_savings_cents": target_cents,
         "target_savings_amount": cents_to_money(target_cents),
-        "feasible_savings_cents": feasible_cents,
-        "feasible_savings_contribution": cents_to_money(feasible_cents),
+        "feasible_savings_cents": total_protected_cents,
+        "feasible_savings_contribution": cents_to_money(total_protected_cents),
+        "active_income_pyf_cents": active_pyf,
+        "current_cycle_income_pyf_cents": current_cycle_pyf,
         "savings_shortfall_cents": shortfall_cents,
         "savings_shortfall": cents_to_money(shortfall_cents),
         "protected_buffer_cents": buffer_cents,

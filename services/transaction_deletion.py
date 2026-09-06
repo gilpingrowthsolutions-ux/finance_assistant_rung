@@ -10,10 +10,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from sqlalchemy import delete, exists, select
+from sqlalchemy import delete, exists, select, union_all
 
 from extensions import db
-from models import ExpenseTransaction, ShoppingTripCompletion, TransactionReconciliation
+from models import ExpenseTransaction, IncomePyfProtection, ShoppingTripCompletion, TransactionReconciliation
 from services.financial_state import apply_balance_delta
 
 
@@ -46,10 +46,17 @@ def _protection_conditions(transaction_id: int, household_id: int):
             TransactionReconciliation.manual_transaction_id == transaction_id,
         )
     )
+    income_pyf_reference = exists(
+        select(IncomePyfProtection.id).where(
+            IncomePyfProtection.household_id == household_id,
+            IncomePyfProtection.income_transaction_id == transaction_id,
+        )
+    )
     return (
         ExpenseTransaction.plaid_transaction_id.is_(None),
         ~shopping_reference,
         ~reconciliation_reference,
+        ~income_pyf_reference,
     )
 
 
@@ -62,16 +69,19 @@ def transaction_delete_eligibility(
     if transaction.plaid_transaction_id:
         return DeleteEligibility(False, PROTECTED_MESSAGE)
     protected = db.session.execute(
-        select(ShoppingTripCompletion.id)
-        .where(
-            ShoppingTripCompletion.household_id == household_id,
-            ShoppingTripCompletion.transaction_id == transaction.id,
-        )
-        .union_all(
+        union_all(
+            select(ShoppingTripCompletion.id).where(
+                ShoppingTripCompletion.household_id == household_id,
+                ShoppingTripCompletion.transaction_id == transaction.id,
+            ),
             select(TransactionReconciliation.id).where(
                 TransactionReconciliation.household_id == household_id,
                 TransactionReconciliation.manual_transaction_id == transaction.id,
-            )
+            ),
+            select(IncomePyfProtection.id).where(
+                IncomePyfProtection.household_id == household_id,
+                IncomePyfProtection.income_transaction_id == transaction.id,
+            ),
         )
         .limit(1)
     ).first()

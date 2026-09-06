@@ -5,6 +5,7 @@ import os
 
 os.environ["RUNG_DB_PATH"] = ":memory:"
 
+import app as app_module
 from app import app
 from extensions import db
 from models import Account, GroceryItem, HouseholdShoppingDefault, RetailProductPreference
@@ -142,6 +143,36 @@ def _preview_payload(cart: dict, *, budget_limit: float) -> dict:
             "store_name": VERIFIED_WALMART_STORE.name,
         },
     }
+
+
+def test_served_rebalance_caps_a_stale_browser_budget_at_canonical_safe_to_spend(monkeypatch) -> None:
+    """Shopping cannot use a stale immediate-only budget after Needs lower STS."""
+    _setup()
+    with app.app_context():
+        selected = get_selected_store(current_household_id())
+        replace_current_from_resolution(
+            household_id=current_household_id(),
+            store_identity_id=selected['retail_store_identity_id'],
+            resolved_cart={
+                'subtotal': 12, 'total_cart_cost': 12,
+                'cart_items': [{
+                    'requirement': {'item_name': 'Detergent', 'base_item': 'detergent', 'quantity': 1, 'unit': 'bottle'},
+                    'selected_product': {'product_id': 'detergent-current', 'title': 'Current detergent', 'price': 12, 'availability': 'in_stock', 'retailer': 'walmart'},
+                    'packages_to_buy': 1, 'availability': 'in_stock',
+                }],
+            },
+        )
+        db.session.commit()
+    monkeypatch.setattr(app_module, '_compute_safe_to_spend_snapshot', lambda *_args, **_kwargs: {
+        'complete': True, 'safe_to_spend_cents': 500,
+    })
+    response = app.test_client().post('/api/grocery/rebalance/preview', json={'budget_limit': 99})
+    assert response.status_code == 200
+    body = response.get_json()
+    assert body['budget_authority'] == 'canonical_pyf_v1'
+    assert body['canonical_safe_to_spend_cents'] == 500
+    assert body['budget_cents'] == 500
+    assert body['status'] != 'within_budget'
 
 
 def test_rebalance_preview_within_budget_not_eligible() -> None:

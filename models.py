@@ -198,6 +198,18 @@ class SavingsTransfer(ModelBase):
     operation_id = db.Column(db.String(120), nullable=False)
     source_destination_id = db.Column(db.Integer, db.ForeignKey('savings_destination.id'), nullable=True)
     destination_id = db.Column(db.Integer, db.ForeignKey('savings_destination.id'), nullable=True)
+    # A physical transfer which fulfills PYF must retain its reviewed income
+    # consequence.  It is not inferred from description, amount, or date.
+    income_pyf_protection_id = db.Column(db.Integer, db.ForeignKey('income_pyf_protection.id'), nullable=True, index=True)
+    # The provider identity is populated only by reviewed reconciliation; it
+    # is never inferred from a memo or amount.
+    plaid_transaction_id = db.Column(db.String(120), nullable=True, unique=True)
+    economic_date = db.Column(db.Date, nullable=True)
+    external_direction = db.Column(db.String(20), nullable=True)
+    # A manually recorded representation can be retained for audit after it is
+    # folded into the provider-identified canonical movement.  Superseded rows
+    # are provenance only and must not contribute another economic effect.
+    superseded_by_transfer_id = db.Column(db.Integer, db.ForeignKey('savings_transfer.id'), nullable=True, index=True)
     amount_cents = db.Column(db.Integer, nullable=False)
     transfer_type = db.Column(db.String(30), nullable=False)
     purpose = db.Column(db.String(200), nullable=True)
@@ -207,8 +219,29 @@ class SavingsTransfer(ModelBase):
     __table_args__ = (
         db.UniqueConstraint('household_id', 'operation_id', name='uq_savings_transfer_household_operation'),
         db.CheckConstraint('amount_cents > 0', name='ck_savings_transfer_amount_positive'),
+        db.CheckConstraint('superseded_by_transfer_id IS NULL OR superseded_by_transfer_id <> id', name='ck_savings_transfer_not_self_superseded'),
         db.CheckConstraint('source_destination_id IS NULL OR destination_id IS NULL OR source_destination_id <> destination_id', name='ck_savings_transfer_distinct_destinations'),
-        db.CheckConstraint("transfer_type IN ('pyf_allocation','deposit','transfer','reserve_use','goal_use','withdrawal','adjustment')", name='ck_savings_transfer_type'),
+        db.CheckConstraint("transfer_type IN ('pyf_allocation','deposit','transfer','reserve_use','goal_use','withdrawal','adjustment','plaid_observation')", name='ck_savings_transfer_type'),
+        {'extend_existing': True},
+    )
+
+
+class SavingsTransferReconciliation(ModelBase):
+    """Reviewed identity relationship between a Plaid transfer and savings ledger row."""
+    __tablename__ = 'savings_transfer_reconciliation'
+    id = db.Column(db.Integer, primary_key=True)
+    household_id = db.Column(db.Integer, db.ForeignKey('household.id'), nullable=False, index=True)
+    owner_scope = db.Column(db.String(80), nullable=False, default='anonymous')
+    savings_transfer_id = db.Column(db.Integer, db.ForeignKey('savings_transfer.id'), nullable=True)
+    plaid_transaction_id = db.Column(db.String(120), nullable=False)
+    status = db.Column(db.String(30), nullable=False, default='proposed')
+    user_confirmed = db.Column(db.Boolean, nullable=False, default=False)
+    created_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)
+    updated_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc), nullable=False)
+
+    __table_args__ = (
+        db.UniqueConstraint('household_id', 'plaid_transaction_id', name='uq_savings_transfer_recon_household_plaid'),
+        db.CheckConstraint("status IN ('proposed','matched','rejected')", name='ck_savings_transfer_recon_status'),
         {'extend_existing': True},
     )
 
@@ -263,6 +296,31 @@ class Bill(ModelBase):
     due_date = db.Column(db.DateTime, nullable=False)
     is_gas_estimate = db.Column(db.Boolean, default=False)
     is_paid = db.Column(db.Boolean, default=False)
+    # An explicit dated Bill may authoritatively represent one projected
+    # recurring occurrence.  The link is deliberately durable; display-name
+    # matching is never financial identity.
+    recurring_obligation_id = db.Column(db.Integer, db.ForeignKey('recurring_required_obligation.id'), nullable=True, index=True)
+
+
+class RecurringRequiredObligation(ModelBase):
+    """Household-owned authority for future required-Need projections."""
+    __tablename__ = 'recurring_required_obligation'
+    id = db.Column(db.Integer, primary_key=True)
+    household_id = db.Column(db.Integer, db.ForeignKey('household.id'), nullable=False, index=True)
+    name = db.Column(db.String(100), nullable=False)
+    category = db.Column(db.String(50), nullable=False, default='required')
+    expected_amount_cents = db.Column(db.Integer, nullable=True)
+    next_due_date = db.Column(db.DateTime, nullable=False)
+    recurrence = db.Column(db.String(16), nullable=False)
+    is_active = db.Column(db.Boolean, nullable=False, default=True)
+    source = db.Column(db.String(40), nullable=False, default='user_confirmed')
+    created_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)
+    updated_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc), nullable=False)
+    __table_args__ = (
+        db.CheckConstraint("recurrence IN ('weekly','biweekly','monthly','quarterly','yearly')", name='ck_recurring_required_recurrence'),
+        db.CheckConstraint('expected_amount_cents IS NULL OR expected_amount_cents > 0', name='ck_recurring_required_amount'),
+        {'extend_existing': True},
+    )
 
 
 class PantryItem(ModelBase):
@@ -347,8 +405,38 @@ class ExpenseTransaction(ModelBase):
     category = db.Column(db.String(50), default='discretionary')
     source = db.Column(db.String(30), nullable=False, default='manual')
     plaid_transaction_id = db.Column(db.String(120), nullable=True, unique=True)
+    operation_id = db.Column(db.String(120), nullable=True)
     local_account_id = db.Column(db.Integer, db.ForeignKey('account.id'), nullable=True)
     date = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
+
+    __table_args__ = (
+        db.UniqueConstraint('household_id', 'operation_id', name='uq_expense_transaction_household_operation'),
+        {'extend_existing': True},
+    )
+
+
+class IncomePyfProtection(ModelBase):
+    """One durable automatic PYF consequence for one canonical income row."""
+    __tablename__ = 'income_pyf_protection'
+    id = db.Column(db.Integer, primary_key=True)
+    household_id = db.Column(db.Integer, db.ForeignKey('household.id'), nullable=False, index=True)
+    income_transaction_id = db.Column(db.Integer, db.ForeignKey('expense_transactions.id'), nullable=False)
+    operation_id = db.Column(db.String(120), nullable=False)
+    target_percent = db.Column(db.Numeric(8, 4), nullable=False)
+    target_cents = db.Column(db.Integer, nullable=False)
+    protected_cents = db.Column(db.Integer, nullable=False)
+    fulfilled_cents = db.Column(db.Integer, nullable=False, default=0)
+    status = db.Column(db.String(20), nullable=False, default='active')
+    created_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)
+    updated_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc), nullable=False)
+
+    __table_args__ = (
+        db.UniqueConstraint('household_id', 'income_transaction_id', name='uq_income_pyf_household_income'),
+        db.UniqueConstraint('household_id', 'operation_id', name='uq_income_pyf_household_operation'),
+        db.CheckConstraint('target_cents >= 0 AND protected_cents >= 0 AND fulfilled_cents >= 0 AND fulfilled_cents <= protected_cents', name='ck_income_pyf_amounts'),
+        db.CheckConstraint("status IN ('active','fulfilled','reversed')", name='ck_income_pyf_status'),
+        {'extend_existing': True},
+    )
 
 
 class GroceryItem(ModelBase):

@@ -9,7 +9,8 @@ import pytest
 os.environ.setdefault("RUNG_DB_PATH", f"/tmp/rung_gate7_auth_{uuid.uuid4().hex}.db")
 
 from app import app, db  # noqa: E402
-from models import Account, Bill, Household, HouseholdMembership, LoginThrottle, User  # noqa: E402
+from models import (Account, Bill, Household, HouseholdMembership, LoginThrottle, PlaidItem,
+                    PlaidTransaction, SavingsTransfer, SavingsTransferReconciliation, User)  # noqa: E402
 from werkzeug.security import generate_password_hash  # noqa: E402
 
 
@@ -50,6 +51,8 @@ def _seed_households_and_users() -> dict[str, int]:
         return {
             "house_a_id": int(house_a.id),
             "house_b_id": int(house_b.id),
+            "user_a_id": int(user_a.id),
+            "user_b_id": int(user_b.id),
         }
 
 
@@ -236,3 +239,84 @@ def test_authorization_failures_do_not_increment_login_throttle():
     assert client.delete("/bills/999999").status_code == 404
     with app.app_context():
         assert LoginThrottle.query.count() == 0
+
+
+def _seed_transfer_proposal(*, household_id: int, owner_scope: str, suffix: str) -> tuple[int, str]:
+    """Create one proposed transfer reconciliation owned by exactly one household."""
+    item = PlaidItem(
+        household_id=household_id, owner_scope=owner_scope, plaid_item_id=f'gate7-item-{suffix}',
+        access_token_encrypted='test-token', connection_status='connected',
+    )
+    db.session.add(item); db.session.flush()
+    plaid_id = f'gate7-plaid-{suffix}'
+    plaid = PlaidTransaction(
+        household_id=household_id, owner_scope=owner_scope, plaid_item_id=item.id,
+        plaid_transaction_id=plaid_id, plaid_account_id=f'gate7-account-{suffix}', amount_cents=18000,
+        signed_amount_cents=-18000, direction='outflow', name='Savings transfer', description='Savings transfer',
+    )
+    transfer = SavingsTransfer(
+        household_id=household_id, operation_id=f'gate7-transfer-{suffix}', amount_cents=18000,
+        transfer_type='deposit', purpose='Emergency savings', external_direction='outflow',
+    )
+    db.session.add_all([plaid, transfer]); db.session.flush()
+    proposal = SavingsTransferReconciliation(
+        household_id=household_id, owner_scope=owner_scope, savings_transfer_id=transfer.id,
+        plaid_transaction_id=plaid_id, status='proposed', user_confirmed=False,
+    )
+    db.session.add(proposal); db.session.commit()
+    return int(transfer.id), plaid_id
+
+
+def test_transfer_reconciliation_uses_authenticated_principal_and_fails_closed_for_foreign_ids():
+    ids = _seed_households_and_users()
+    with app.app_context():
+        transfer_b_id, plaid_b_id = _seed_transfer_proposal(
+            household_id=ids['house_b_id'], owner_scope=f"user:{ids['user_b_id']}", suffix='b',
+        )
+        transfer_a_id, plaid_a_id = _seed_transfer_proposal(
+            household_id=ids['house_a_id'], owner_scope=f"user:{ids['user_a_id']}", suffix='a',
+        )
+
+    client = app.test_client()
+    assert _login(client, 'alpha@example.com', 'pass-alpha-123').status_code == 200
+    # A sees only A's proposal even when query data claims B's identity.
+    visible = client.get('/api/reconciliation/proposals', query_string={
+        'user_id': f"user:{ids['user_b_id']}", 'household_id': ids['house_b_id'], 'owner_scope': f"user:{ids['user_b_id']}"
+    })
+    assert visible.status_code == 200
+    transfer_proposals = [row for row in (visible.get_json() or {}).get('proposals', []) if row.get('kind') == 'transfer']
+    assert [row['transfer']['transfer_id'] for row in transfer_proposals] == [transfer_a_id]
+
+    foreign_payload = {
+        'savings_transfer_id': transfer_b_id, 'plaid_transaction_id': plaid_b_id, 'action': 'match',
+        'user_id': f"user:{ids['user_b_id']}", 'household_id': ids['house_b_id'], 'owner_scope': f"user:{ids['user_b_id']}",
+    }
+    assert client.post('/api/reconciliation/transfer-decision', json=foreign_payload).status_code == 400
+    assert client.post('/api/reconciliation/transfer-decision', json={**foreign_payload, 'action': 'keep_separate'}).status_code == 400
+    # Cross-bind attempts are equally ineligible: the request stays in A's
+    # household/scope despite payload authority-looking fields.
+    assert client.post('/api/reconciliation/transfer-decision', json={**foreign_payload, 'savings_transfer_id': transfer_a_id}).status_code == 400
+    assert client.post('/api/reconciliation/transfer-decision', json={**foreign_payload, 'plaid_transaction_id': plaid_a_id}).status_code == 400
+
+    with app.app_context():
+        b_proposal = SavingsTransferReconciliation.query.filter_by(household_id=ids['house_b_id'], plaid_transaction_id=plaid_b_id).one()
+        b_transfer = db.session.get(SavingsTransfer, transfer_b_id)
+        assert (b_proposal.status, b_proposal.user_confirmed, b_transfer.plaid_transaction_id) == ('proposed', False, None)
+        assert Account.query.filter_by(household_id=ids['house_b_id']).one().checking_balance == 800.0
+
+
+def test_unauthenticated_beta_transfer_reconciliation_is_rejected_before_mutation():
+    ids = _seed_households_and_users()
+    with app.app_context():
+        transfer_b_id, plaid_b_id = _seed_transfer_proposal(
+            household_id=ids['house_b_id'], owner_scope=f"user:{ids['user_b_id']}", suffix='unauth-b',
+        )
+    response = app.test_client().post('/api/reconciliation/transfer-decision', json={
+        'savings_transfer_id': transfer_b_id, 'plaid_transaction_id': plaid_b_id, 'action': 'keep_separate', 'user_id': 'anonymous',
+    })
+    assert response.status_code == 401
+    with app.app_context():
+        proposal = SavingsTransferReconciliation.query.filter_by(household_id=ids['house_b_id'], plaid_transaction_id=plaid_b_id).one()
+        transfer = db.session.get(SavingsTransfer, transfer_b_id)
+        assert (proposal.status, proposal.user_confirmed, transfer.plaid_transaction_id) == ('proposed', False, None)
+        assert Account.query.filter_by(household_id=ids['house_b_id']).one().checking_balance == 800.0

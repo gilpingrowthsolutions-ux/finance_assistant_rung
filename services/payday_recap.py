@@ -113,16 +113,21 @@ def build_payday_recap(
     # Passing the completed payday as the resolver's next payday gives the
     # Package 15 service exactly [previous payday, completed payday).
     timeline = build_paycheck_timeline(
+        # Preserve the completed [start, end) cycle identity, while marking
+        # its scheduled endpoint as income-comparable for the historical
+        # read-only recap.
         household_id=household_id, account=account, now=completed_end - timedelta(microseconds=1),
         next_income={"known": True, "date": completed_end, "source": current.get("schedule_source")},
         pyf_snapshot=historical_plan, bill_query=bill_query,
         transaction_query=transaction_query, transfer_query=transfer_query,
         allocation_query=allocation_query, destination_query=destination_query,
+        income_comparable_at=completed_end,
     )
     if timeline.get("status") != "available":
         return _unavailable(reason="Completed-cycle evidence is insufficient for a truthful recap.", current_cycle=current, current_safe=current_safe_snapshot)
 
-    transfers = list(transfer_query(household_id, completed_start, completed_end))
+    transfers = [row for row in transfer_query(household_id, completed_start, completed_end)
+                 if getattr(row, 'superseded_by_transfer_id', None) is None]
     destinations = {row.id: row for row in destination_query(household_id)}
     funding = {"goal": 0, "reserve": 0, "flexible": 0, "wealth_cash": 0, "wealth_investment": 0}
     external_funding_total = 0
@@ -143,25 +148,12 @@ def build_payday_recap(
 
     matched_need_events = [row for row in timeline["events"] if row.get("kind") == "need_actual" and row.get("supersedes")]
     bills_covered_cents = sum(int(row.get("amount_cents") or 0) for row in matched_need_events)
-    trajectory = timeline["trajectory"]
-    components = trajectory.get("components") or {}
-    component_changes = [
-        (abs(int(components.get("confirmed_income_variance_cents") or 0)), "income", int(components.get("confirmed_income_variance_cents") or 0), trajectory["reasons"]),
-        (abs(int(components.get("settled_needs_variance_cents") or 0)), "settled_needs", int(components.get("settled_needs_variance_cents") or 0), trajectory["reasons"]),
-        (abs(int(components.get("pyf_progress_variance_cents") or 0)), "pyf", int(components.get("pyf_progress_variance_cents") or 0), trajectory["reasons"]),
-    ]
-    reason_by_kind = {}
-    for reason in trajectory["reasons"]:
-        lowered = reason.lower()
-        if "income" in lowered: reason_by_kind["income"] = reason
-        elif "settled needs" in lowered: reason_by_kind["settled_needs"] = reason
-        elif "pyf" in lowered: reason_by_kind["pyf"] = reason
+    components = timeline.get("factual_components") or {}
     biggest = []
-    for magnitude, kind, signed, _reasons in sorted(component_changes, key=lambda row: (-row[0], row[1])):
-        if magnitude <= 0: continue
-        biggest.append({"kind": kind, "amount_cents": signed, "amount": _money(signed), "direction": "favorable" if signed > 0 else "unfavorable", "summary": reason_by_kind.get(kind, "A supported cycle component changed.")})
-    if not biggest:
-        biggest = [{"kind": "on_track", "amount_cents": 0, "amount": 0.0, "direction": "neutral", "summary": "Confirmed reality matched the supported completed-cycle expectations."}]
+    if confirmed_income:
+        biggest.append({"kind": "confirmed_income", "amount_cents": sum(_cents(row.amount) for row in confirmed_income), "amount": _money(sum(_cents(row.amount) for row in confirmed_income)), "summary": "Confirmed income received in this completed cycle."})
+    if expected_pyf_cents:
+        biggest.append({"kind": "pyf_protection", "amount_cents": expected_pyf_cents, "amount": _money(expected_pyf_cents), "summary": "PYF savings protection recorded for this completed cycle."})
 
     discretionary_cents = 0
     needs_actual_cents = 0
@@ -177,13 +169,12 @@ def build_payday_recap(
         else:
             discretionary_cents += amount
 
-    finish_cents = int(trajectory["amount_cents"])
     current_safe_cents = int(current_safe_snapshot["safe_to_spend_cents"]) if current_safe_snapshot.get("complete") else None
     return {
         "authority": "payday_recap_v1", "read_only": True, "status": "available",
         "completed_cycle": {key: value for key, value in completed_cycle.items() if key not in {"start", "end"}},
-        "finish_status": trajectory["status"], "finish_amount_cents": finish_cents,
-        "finish_amount": _money(finish_cents), "finish_reasons": list(trajectory["reasons"][:3]),
+        "finish_status": "factual", "finish_amount_cents": None,
+        "finish_amount": None, "finish_reasons": ["Completed-cycle facts are shown without a global financial score."],
         "protected_summary": {
             "actual_protected_cents": external_funding_total, "actual_protected": _money(external_funding_total),
             "pyf_expected_cents": expected_pyf_cents, "pyf_completed_cents": sum(int(row.amount_cents) for row in transfers if row.transfer_type == "pyf_allocation"),

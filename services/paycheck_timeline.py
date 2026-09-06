@@ -83,6 +83,7 @@ def build_paycheck_timeline(
     bill_query: Callable[..., Any], transaction_query: Callable[..., Any],
     transfer_query: Callable[..., Any], allocation_query: Callable[..., Any],
     destination_query: Callable[..., Any],
+    income_comparable_at: datetime | None = None,
 ) -> dict[str, Any]:
     """Build the deterministic household-scoped Package 15 read model."""
     now = _utc(now)
@@ -91,8 +92,8 @@ def build_paycheck_timeline(
         "authority": "paycheck_timeline_v1", "read_only": True,
         "status": "unavailable", "setup_needed": True,
         "cycle": cycle, "events": [], "important_events": [],
-        "trajectory": {"status": "unavailable", "amount_cents": None, "amount": None,
-                       "reasons": ["Complete pay-cycle setup to compare this cycle truthfully."]},
+        "income": {"forecast_only": True, "is_due": False},
+        "factual_components": {},
     }
     if not cycle.get("available") or not pyf_snapshot.get("complete"):
         if pyf_snapshot.get("missing_setup"):
@@ -122,10 +123,18 @@ def build_paycheck_timeline(
     # Use the same current-period income authority already resolved by the PYF
     # engine (configured paycheck first, established history fallback).
     expected_income = int(pyf_snapshot.get("period_income_cents") or 0)
+    scheduled_income_at = next_income.get("date")
+    if isinstance(scheduled_income_at, datetime):
+        scheduled_income_at = _utc(scheduled_income_at)
+    else:
+        # A supported cycle always has this authority.  Retaining the cycle
+        # start fallback keeps the read model conservative if an older caller
+        # provides a cycle without a usable scheduled point.
+        scheduled_income_at = start
     actual_income = sum(_cents(row.amount) for row in income_rows if _utc(row.date) <= now)
     if not income_rows and expected_income > 0:
         events.append(_event(
-            key="forecast:cycle_income", occurred_at=start, label="Expected paycheck",
+            key="forecast:cycle_income", occurred_at=scheduled_income_at, label="Expected paycheck",
             amount_cents=expected_income, kind="income", state="forecast",
             provenance=str(cycle.get("schedule_source") or "canonical_pay_schedule"),
             uncertainty="Expected amount; no confirmed cycle income yet.",
@@ -168,12 +177,17 @@ def build_paycheck_timeline(
     # Package 13–14 ledger is the sole actual savings/allocation evidence.
     actual_pyf = 0
     for row in transfers:
+        if getattr(row, 'superseded_by_transfer_id', None) is not None:
+            continue
         if row.transfer_type != "pyf_allocation":
             continue
         actual_pyf += int(row.amount_cents)
         destination = destinations.get(row.destination_id)
         events.append(_event(
-            key=f"savings_transfer:{row.id}", occurred_at=_utc(row.created_at),
+            key=f"savings_transfer:{row.id}", occurred_at=(
+                datetime.combine(row.economic_date, time.min, tzinfo=timezone.utc)
+                if row.economic_date is not None else _utc(row.created_at)
+            ),
             label=(destination.name if destination else "Savings allocation"),
             amount_cents=int(row.amount_cents), kind="pyf_allocation", state="completed",
             provenance="packages_13_14_savings_ledger",
@@ -186,37 +200,38 @@ def build_paycheck_timeline(
             provenance="canonical_pyf_v1", uncertainty="Expected protection not yet recorded in the savings ledger.",
         ))
 
-    # Income is comparable once its scheduled point has arrived. Future Needs
-    # remain neutral until settled, preventing false favorable variance.
-    income_variance = actual_income - expected_income
+    # Expected income remains a forecast until its canonical scheduled payday.
+    # Do not describe an unarrived paycheck as missing.  Confirmed income is
+    # still reality, and becomes comparable to the expected amount once due.
+    comparison_as_of = _utc(income_comparable_at) if income_comparable_at is not None else now
+    comparable_expected_income = expected_income if scheduled_income_at <= comparison_as_of else 0
+    # Future Needs remain neutral until settled, preventing false favorable
+    # variance.  PYF timing deliberately remains governed by its own current
+    # behavior until product authority establishes its comparable point.
+    # Global aggregate plan scoring is intentionally retired.  These are
+    # factual component values, not a household financial judgment and never
+    # affect Safe-to-Spend.
+    income_variance = actual_income - comparable_expected_income
     pyf_variance = actual_pyf - expected_pyf
-    variance = income_variance + need_variance + pyf_variance
-    reasons: list[tuple[int, str]] = []
-    if income_variance:
-        reasons.append((abs(income_variance), f"Confirmed income is ${abs(income_variance)/100:,.2f} {'above' if income_variance > 0 else 'below'} the cycle expectation."))
-    if need_variance:
-        reasons.append((abs(need_variance), f"Settled Needs are ${abs(need_variance)/100:,.2f} {'below' if need_variance > 0 else 'above'} forecast."))
-    if pyf_variance:
-        reasons.append((abs(pyf_variance), f"PYF protection is ${abs(pyf_variance)/100:,.2f} {'ahead of' if pyf_variance > 0 else 'behind'} expected progress."))
-    reasons.sort(key=lambda item: (-item[0], item[1]))
-    if not reasons:
-        reason_text = ["Confirmed reality matches the supported cycle expectations so far."]
-    else:
-        reason_text = [item[1] for item in reasons[:3]]
-    trajectory_status = "ahead" if variance > 0 else ("behind" if variance < 0 else "on_track")
 
     events.sort(key=lambda row: (row["occurred_at"], row["key"]))
     return {
         "authority": "paycheck_timeline_v1", "read_only": True,
         "status": "available", "setup_needed": False, "cycle": cycle,
         "events": events, "important_events": [row for row in events if row["important"]],
-        "trajectory": {
-            "status": trajectory_status, "amount_cents": variance,
-            "amount": float(Decimal(variance) / 100), "reasons": reason_text,
-            "components": {"confirmed_income_variance_cents": income_variance,
-                           "settled_needs_variance_cents": need_variance,
-                           "pyf_progress_variance_cents": pyf_variance},
-            "informational_only": True, "affects_safe_to_spend": False,
+        "income": {
+            "expected_cents": expected_income, "confirmed_cents": actual_income,
+            "scheduled_at": scheduled_income_at.isoformat(),
+            "is_due": bool(scheduled_income_at <= comparison_as_of),
+            "unconfirmed_due_cents": max(0, comparable_expected_income - actual_income),
+            "forecast_only": True,
         },
+        "factual_components": {
+            "confirmed_income_variance_cents": income_variance,
+            "settled_needs_variance_cents": need_variance,
+            "pyf_progress_cents": actual_pyf,
+            "expected_pyf_cents": expected_pyf,
+        },
+        "safe_to_spend_effect_cents": 0,
         "evidence": {"allocation_run_count": len(runs), "transaction_count": len(transactions)},
     }

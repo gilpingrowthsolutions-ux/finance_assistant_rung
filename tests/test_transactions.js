@@ -27,6 +27,9 @@ async function mockFetch(method, path, body) {
     if (r.expectedBody === undefined) return true;
     return JSON.stringify(r.expectedBody) === JSON.stringify(body);
   });
+  // Bills always read canonical recurring management state. Existing Bill
+  // fixtures without repeating rows intentionally receive an empty authority.
+  if (!route && method === 'GET' && path === '/api/recurring-needs') return { ok: true, status: 200, data: [] };
   if (!route) throw new Error('No mock for ' + method + ' ' + path + (body ? ' ' + JSON.stringify(body) : ''));
   return { ok: route.status >= 200 && route.status < 300, status: route.status, data: route.responseBody };
 }
@@ -47,6 +50,7 @@ class FakeEl {
     this.dataset = {};
     this.attributes = {};
     this.tagName = 'div';
+    this.open = false;
   }
   // ---- innerHTML getter/setter ----------------------------------------------
   // refreshTransactions / refreshBills build rows with
@@ -73,15 +77,20 @@ class FakeEl {
     while ((m = re.exec(html)) !== null) {
       const attrStr = m[1] || '';
       const text = (m[2] || '').trim();
-      const actionMatch = attrStr.match(/data-action=["'](\w+)["']/);
+      const actionMatch = attrStr.match(/data-action=["']([\w-]+)["']/);
       if (!actionMatch) continue;
       const idMatch = attrStr.match(/data-id=["']([^"']+)["']/);
+      const recurringIdMatch = attrStr.match(/data-recurring-id=["']([^"']+)["']/);
       const btn = new FakeEl('btn-' + actionMatch[1] + (idMatch ? '-' + idMatch[1] : ''));
       btn.tagName = 'button';
       btn.attributes['data-action'] = actionMatch[1];
       if (idMatch) {
         btn.attributes['data-id'] = idMatch[1];
         btn.dataset.id = idMatch[1];
+      }
+      if (recurringIdMatch) {
+        btn.attributes['data-recurring-id'] = recurringIdMatch[1];
+        btn.dataset.recurringId = recurringIdMatch[1];
       }
       btn.dataset.action = actionMatch[1];
       btn.textContent = text;
@@ -98,6 +107,8 @@ class FakeEl {
     const ev = { preventDefault: () => {}, target: this };
     return handlers[0](ev);
   }
+  showModal() { this.open = true; }
+  close() { this.open = false; }
   addEventListener(event, fn) {
     (this.eventListeners[event] = this.eventListeners[event] || []).push(fn);
   }
@@ -122,7 +133,7 @@ class FakeEl {
   // Supported: tag-only, [data-action="X"], [data-id="X"], or combinations
   // like button[data-action="del"] (the tag prefix is ignored for now).
   _matchesSelector_(el, sel) {
-    const mAction = sel.match(/\[data-action=["'](\w+)["']\]/);
+    const mAction = sel.match(/\[data-action=["']([\w-]+)["']\]/);
     if (mAction) {
       return el.attributes && el.attributes['data-action'] === mAction[1];
     }
@@ -243,7 +254,7 @@ setupFakeDom({
 });
 let capturedExpenseBody = null;
 let expenseMutationCalls5 = 0;
-mockRoute('POST', '/api/transactions', 200, { id: 100, description: 'Coffee' }, { description: 'Coffee', amount: 4.5, category: 'discretionary' });
+mockRoute('POST', '/api/transactions', 200, { id: 100, description: 'Coffee' });
 SUT._setMockFetch((m, p, b) => {
   if (p === '/api/transactions' && m === 'POST') { expenseMutationCalls5++; capturedExpenseBody = b; return mockFetch(m, p, b); }
   return mockFetch(m, p, b);
@@ -261,6 +272,7 @@ await fakeDom.get('logExpenseForm').eventListeners.submit[0]({ preventDefault: (
 assertEq(expenseMutationCalls5, 1, 'one Transaction submit produces one mutation call');
 assertEq(capturedExpenseBody && capturedExpenseBody.description, 'Coffee', 'POST body has correct description');
 assertEq(capturedExpenseBody && capturedExpenseBody.amount, 4.5, 'POST body has correct amount');
+assertEq(typeof (capturedExpenseBody && capturedExpenseBody.operation_id), 'string', 'POST body carries a durable operation id');
 assertEq(fakeDom.get('tDesc').value, '', 'description input cleared after post');
 assertEq(capturedFlash5.length, 1, 'flash called on success');
 assertEq(capturedFlash5[0].kind, 'success', 'flash kind success');
@@ -308,6 +320,29 @@ assertEq(capturedFlash7.length, 1, 'flash called on server error');
 assertEq(capturedFlash7[0].kind, 'error', 'flash kind error');
 assertEq(capturedFlash7[0].msg, 'We could not add this expense right now.', 'flash shows user-safe error message');
 assertEq(refreshTxCalled7, 0, 'refreshTransactions NOT called on error');
+
+console.log('\n7b. logExpenseForm retries a response-loss with its original operation id');
+reset();
+setupFakeDom({
+  'logExpenseForm': new FakeEl('logExpenseForm'),
+  'tDesc': (() => { const e = new FakeEl('tDesc'); e.value = 'Payroll'; return e; })(),
+  'tAmt': (() => { const e = new FakeEl('tAmt'); e.value = '1800'; return e; })(),
+  'tCat': (() => { const e = new FakeEl('tCat'); e.value = 'income'; return e; })(),
+});
+const retryBodies7b = [];
+SUT._setMockFetch((m, p, b) => {
+  if (m === 'POST' && p === '/api/transactions') {
+    retryBodies7b.push(b);
+    return { ok: retryBodies7b.length === 1 ? false : true, status: retryBodies7b.length === 1 ? 503 : 200, data: {} };
+  }
+  throw new Error('unexpected request');
+});
+SUT.setupTransactionsInit({ flash: () => {}, refreshTransactions: () => {} });
+const retrySubmit7b = fakeDom.get('logExpenseForm').eventListeners.submit[0];
+await retrySubmit7b({ preventDefault: () => {} });
+await retrySubmit7b({ preventDefault: () => {} });
+assertEq(retryBodies7b.length, 2, 'response-loss retry makes two transport attempts');
+assertEq(retryBodies7b[0].operation_id, retryBodies7b[1].operation_id, 'response-loss retry retains operation id');
 
 console.log('\n8. refreshBills happy path: GET returns array, renders rows with badges');
 reset();
@@ -360,6 +395,72 @@ await delBtn10.eventListeners.click[0]();
 assertEq(capturedFlash10.length, 1, 'flash called on bill delete');
 assertEq(capturedFlash10[0].kind, 'success', 'flash kind success');
 
+console.log('\n10b. refreshBills renders an orphaned recurring authority beside an ordinary Bill');
+reset();
+const billsList10b = new FakeEl('billsList');
+const recurringCalls10b = [];
+setupFakeDom({ 'billsList': billsList10b });
+mockRoute('GET', '/bills', 200, [{ id: 81, name: 'Water', amount: 31, due_date: '2026-09-05', is_paid: false }]);
+mockRoute('GET', '/api/recurring-needs', 200, [{ id: 71, name: 'Rent', expected_amount_cents: 120000, next_due_date: '2026-10-01', recurrence: 'monthly', is_active: true }]);
+SUT._setMockFetch((m, p, b) => { if (p === '/api/recurring-needs') recurringCalls10b.push(p); return mockFetch(m, p, b); });
+await SUT.refreshBills();
+assertEq(recurringCalls10b.length, 1, 'always requests canonical recurring authority with an ordinary Bill present');
+assertEq(billsList10b.children.length, 2, 'renders the ordinary Bill and orphaned recurring management row');
+assertEq(billsList10b.children[0].innerHTML.includes('Water'), true, 'ordinary Bill remains an explicit Bill row');
+assertEq(billsList10b.children[1].innerHTML.includes('Rent'), true, 'orphaned recurring authority renders');
+assertEq(billsList10b.children[1].innerHTML.includes('monthly'), true, 'orphaned row shows cadence');
+assertEq(billsList10b.children[1].innerHTML.includes('Active'), true, 'orphaned row shows active status');
+assertEq(billsList10b.children[1].innerHTML.includes('Manage repeat'), true, 'orphaned row remains manageable');
+assertEq(billsList10b.children[1].innerHTML.includes('Mark Paid'), false, 'recurring-only row is not mistaken for an explicit occurrence');
+
+console.log('\n10c. refreshBills does not duplicate a linked recurring Bill');
+reset();
+const billsList10c = new FakeEl('billsList');
+setupFakeDom({ 'billsList': billsList10c });
+mockRoute('GET', '/bills', 200, [{ id: 82, name: 'Rent', amount: 1200, due_date: '2026-10-01', is_paid: false, recurring_obligation_id: 72 }]);
+mockRoute('GET', '/api/recurring-needs', 200, [{ id: 72, name: 'Rent', expected_amount_cents: 120000, next_due_date: '2026-10-01', recurrence: 'monthly', is_active: true }]);
+SUT._setMockFetch(mockFetch);
+await SUT.refreshBills();
+assertEq(billsList10c.children.length, 1, 'linked Bill is rendered exactly once');
+assertEq(billsList10c.children[0].innerHTML.includes('Repeats · monthly'), true, 'linked Bill carries recurrence metadata');
+assertEq(billsList10c.children[0].innerHTML.includes('Manage repeat'), true, 'linked Bill remains manageable');
+
+console.log('\n10d. inactive orphan remains discoverable and opens Manage repeat with canonical values');
+reset();
+const billsList10d = new FakeEl('billsList');
+const recurringDialog10d = new FakeEl('recurringBillDialog');
+setupFakeDom({
+  'billsList': billsList10d, 'recurringBillDialog': recurringDialog10d,
+  'recurringBillId': new FakeEl('recurringBillId'), 'recurringBillAmount': new FakeEl('recurringBillAmount'),
+  'recurringBillDate': new FakeEl('recurringBillDate'), 'recurringBillCadence': new FakeEl('recurringBillCadence'),
+  'recurringBillActive': new FakeEl('recurringBillActive'),
+});
+mockRoute('GET', '/bills', 200, [{ id: 83, name: 'Internet', amount: 60, due_date: '2026-09-10', is_paid: false }]);
+mockRoute('GET', '/api/recurring-needs', 200, [{ id: 73, name: 'Old gym', expected_amount_cents: 4500, next_due_date: '2026-10-12', recurrence: 'monthly', is_active: false }]);
+SUT._setMockFetch(mockFetch);
+await SUT.refreshBills();
+assertEq(billsList10d.children.length, 2, 'inactive orphan is rendered beside ordinary Bill');
+assertEq(billsList10d.children[1].innerHTML.includes('Ended'), true, 'inactive row clearly says ended');
+const manage10d = billsList10d.children[1].querySelectorAll('button[data-action="manage-recurring"]')[0];
+assertEq(!!manage10d, true, 'inactive row has Manage repeat');
+await manage10d.click();
+assertEq(recurringDialog10d.open, true, 'Manage repeat opens dialog for inactive obligation');
+assertEq(fakeDom.get('recurringBillAmount').value, '45.00', 'dialog uses canonical amount');
+assertEq(fakeDom.get('recurringBillDate').value, '2026-10-12', 'dialog uses canonical next due date');
+assertEq(fakeDom.get('recurringBillCadence').value, 'monthly', 'dialog uses canonical cadence');
+assertEq(fakeDom.get('recurringBillActive').checked, false, 'dialog preserves inactive state for reactivation');
+
+console.log('\n10e. recurring authority failure is not rendered as a successful empty state');
+reset();
+const billsList10e = new FakeEl('billsList');
+setupFakeDom({ 'billsList': billsList10e });
+mockRoute('GET', '/bills', 200, [{ id: 84, name: 'Gas', amount: 40, due_date: '2026-09-12', is_paid: false }]);
+mockRoute('GET', '/api/recurring-needs', 503, { error: 'unavailable' });
+SUT._setMockFetch(mockFetch);
+await SUT.refreshBills();
+assertEq(billsList10e.children[0].innerHTML.includes('Gas'), true, 'successful explicit Bills remain visible when recurring authority fails');
+assertEq(billsList10e.children.some(row => row.textContent.includes('Repeating Bill management is unavailable')), true, 'failure is surfaced instead of treated as empty recurring state');
+
 
 console.log('\n11. addBillForm happy path: POSTs body, resets form, refreshes');
 reset();
@@ -371,7 +472,7 @@ setupFakeDom({
 });
 let capturedBillBody = null;
 let billMutationCalls11 = 0;
-mockRoute('POST', '/bills', 200, { id: 50, name: 'Rent' }, { name: 'Rent', amount: 1200, due_date: '2025-04-01' });
+mockRoute('POST', '/bills', 200, { id: 50, name: 'Rent' }, { name: 'Rent', amount: 1200, due_date: '2025-04-01', recurrence: '' });
 SUT._setMockFetch((m, p, b) => {
   if (p === '/bills' && m === 'POST') { billMutationCalls11++; capturedBillBody = b; return mockFetch(m, p, b); }
   return mockFetch(m, p, b);

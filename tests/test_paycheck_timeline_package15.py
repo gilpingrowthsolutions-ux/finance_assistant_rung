@@ -28,7 +28,7 @@ def _snapshot(feasible=20000):
     return {"complete": True, "period_income_cents": 100000, "feasible_savings_cents": feasible, "authority": "canonical_pyf_v1"}
 
 
-def _build(*, txns=None, bills=None, transfers=None, destinations=None, household=1, now=NOW, pyf=None):
+def _build(*, txns=None, bills=None, transfers=None, destinations=None, household=1, now=NOW, pyf=None, next_income=None):
     seen = []
     def scoped(rows):
         def query(hid, *bounds):
@@ -43,7 +43,7 @@ def _build(*, txns=None, bills=None, transfers=None, destinations=None, househol
         return query
     result = build_paycheck_timeline(
         household_id=household, account=_account(), now=now,
-        next_income={"known": True, "date": datetime(2026, 8, 28, tzinfo=timezone.utc), "source": "user_pay_schedule"},
+        next_income=next_income or {"known": True, "date": datetime(2026, 8, 28, tzinfo=timezone.utc), "source": "user_pay_schedule"},
         pyf_snapshot=pyf or _snapshot(), bill_query=scoped(bills or []),
         transaction_query=scoped(txns or []), transfer_query=scoped(transfers or []),
         allocation_query=lambda hid, key: [], destination_query=scoped(destinations or []),
@@ -81,18 +81,18 @@ def test_reconciled_manual_plaid_is_one_economic_event():
     result, _ = _build(txns=[linked], bills=[bill])
     matching = [row for row in result["events"] if row.get("supersedes") == "bill:9"]
     assert len(matching) == 1 and matching[0]["provenance"] == "reconciled_manual_plaid"
-    assert result["trajectory"]["components"]["settled_needs_variance_cents"] == 5000
+    assert result["factual_components"]["settled_needs_variance_cents"] == 5000
 
 
 def test_unsettled_need_is_not_favorable_and_above_forecast_is_unfavorable():
     future = Bill(id=1, household_id=1, name="Electric", amount=100, due_date=NOW + timedelta(days=2), is_paid=False)
     result, _ = _build(bills=[future], pyf=_snapshot(0))
-    assert result["trajectory"]["components"]["settled_needs_variance_cents"] == 0
-    assert result["trajectory"]["status"] == "behind"  # missing expected income, never false-ahead
+    assert result["factual_components"]["settled_needs_variance_cents"] == 0
+    assert result["income"]["is_due"] is False
     paid = Bill(id=2, household_id=1, name="Water Utility", amount=100, due_date=NOW - timedelta(days=1), is_paid=True)
     actual = ExpenseTransaction(id=2, household_id=1, description="Water Utility payment", amount=125, category="utilities", source="manual", date=NOW - timedelta(days=1))
     above, _ = _build(txns=[actual], bills=[paid], pyf=_snapshot(0))
-    assert above["trajectory"]["components"]["settled_needs_variance_cents"] == -2500
+    assert above["factual_components"]["settled_needs_variance_cents"] == -2500
 
 
 def test_pyf_shortfall_is_unfavorable_and_ledger_progress_is_canonical():
@@ -100,9 +100,36 @@ def test_pyf_shortfall_is_unfavorable_and_ledger_progress_is_canonical():
     transfer = SavingsTransfer(id=1, household_id=1, operation_id="alloc", destination_id=1, amount_cents=5000, transfer_type="pyf_allocation", created_at=NOW - timedelta(days=1))
     income = ExpenseTransaction(id=1, household_id=1, description="Paycheck", amount=1000, category="income", source="manual", date=NOW - timedelta(days=7))
     result, _ = _build(txns=[income], transfers=[transfer], destinations=[dest])
-    assert result["trajectory"]["components"]["pyf_progress_variance_cents"] == -15000
-    assert result["trajectory"]["status"] == "behind"
+    assert result["factual_components"]["pyf_progress_cents"] == 5000
     assert any(row["provenance"] == "packages_13_14_savings_ledger" for row in result["events"])
+
+
+def test_future_expected_income_is_neutral_before_its_scheduled_payday():
+    now = datetime(2026, 9, 2, 12, tzinfo=timezone.utc)
+    scheduled = datetime(2026, 9, 4, tzinfo=timezone.utc)
+    result, _ = _build(
+        now=now, pyf=_snapshot(0),
+        next_income={"known": True, "date": scheduled, "source": "user_pay_schedule"},
+    )
+    assert result["factual_components"]["confirmed_income_variance_cents"] == 0
+    forecast = next(row for row in result["events"] if row["key"] == "forecast:cycle_income")
+    assert forecast["occurred_at"] == scheduled.isoformat()
+
+
+def test_due_expected_income_reports_unconfirmed_due_amount_without_global_score():
+    scheduled = datetime(2026, 9, 4, tzinfo=timezone.utc)
+    next_income = {"known": True, "date": scheduled, "source": "user_pay_schedule"}
+    missing, _ = _build(now=scheduled, pyf=_snapshot(0), next_income=next_income)
+    assert missing["income"]["unconfirmed_due_cents"] == 100000
+
+    partial = ExpenseTransaction(
+        id=41, household_id=1, description="Partial paycheck", amount=400,
+        category="income", source="manual", date=scheduled,
+    )
+    partial_result, _ = _build(
+        now=scheduled, txns=[partial], pyf=_snapshot(0), next_income=next_income,
+    )
+    assert partial_result["income"]["unconfirmed_due_cents"] == 60000
 
 
 def test_household_scope_is_applied_to_every_authoritative_query():
@@ -120,8 +147,8 @@ def test_missing_authority_is_unavailable_without_fabricated_values():
         bill_query=lambda *_: [], transaction_query=lambda *_: [], transfer_query=lambda *_: [],
         allocation_query=lambda *_: [], destination_query=lambda *_: [],
     )
-    assert result["trajectory"]["status"] == "unavailable"
-    assert result["trajectory"]["amount_cents"] is None and result["events"] == []
+    assert result["income"]["is_due"] is False
+    assert result["events"] == []
 
 
 @pytest.fixture()
@@ -154,8 +181,8 @@ def test_endpoint_reuses_schedule_is_read_only_and_cannot_change_safe_to_spend(c
     assert first.status_code == second.status_code == 200
     payload = first.get_json()
     assert payload["cycle"]["schedule_source"] == "user_pay_schedule"
-    assert payload["trajectory"]["informational_only"] is True
-    assert payload["safe_to_spend_proof"]["trajectory_affects_safe_to_spend"] is False
+    assert "trajectory" not in payload
+    assert payload["safe_to_spend_proof"]["timeline_affects_safe_to_spend"] is False
     assert client.get("/api/budget/summary").get_json()["safe_to_spend"]["safe_to_spend_cents"] == before
     with app.app_context():
         counts_after = tuple(model.query.count() for model in (Account, Bill, ExpenseTransaction, SavingsTransfer, SavingsAllocationRun, UserSetting))

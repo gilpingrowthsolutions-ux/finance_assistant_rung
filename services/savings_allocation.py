@@ -43,8 +43,8 @@ def _destination(household_id: int, destination_id: int) -> SavingsDestination:
 
 
 def balance_cents(household_id: int, destination_id: int) -> int:
-    incoming = sum(int(r.amount_cents) for r in SavingsTransfer.query.filter_by(household_id=household_id, destination_id=destination_id).all())
-    outgoing = sum(int(r.amount_cents) for r in SavingsTransfer.query.filter_by(household_id=household_id, source_destination_id=destination_id).all())
+    incoming = sum(int(r.amount_cents) for r in SavingsTransfer.query.filter_by(household_id=household_id, destination_id=destination_id).filter(SavingsTransfer.superseded_by_transfer_id.is_(None)).all())
+    outgoing = sum(int(r.amount_cents) for r in SavingsTransfer.query.filter_by(household_id=household_id, source_destination_id=destination_id).filter(SavingsTransfer.superseded_by_transfer_id.is_(None)).all())
     return incoming - outgoing
 
 
@@ -203,7 +203,7 @@ def update_reserve(household_id: int, reserve_id: int, changes: dict[str, Any]) 
     db.session.commit()
 
 
-def transfer(household_id: int, *, operation_id: str, amount_cents: int, source_id: int | None, destination_id: int | None, transfer_type: str, purpose: str = "") -> SavingsTransfer:
+def transfer(household_id: int, *, operation_id: str, amount_cents: int, source_id: int | None, destination_id: int | None, transfer_type: str, purpose: str = "", income_pyf_protection_id: int | None = None, economic_date: date | None = None, external_direction: str | None = None, commit: bool = True) -> SavingsTransfer:
     if not operation_id or amount_cents <= 0 or (source_id is None and destination_id is None): raise SavingsError("A valid operation, amount, and source or destination are required.")
     if source_id is not None:
         _destination(household_id, source_id)
@@ -211,11 +211,14 @@ def transfer(household_id: int, *, operation_id: str, amount_cents: int, source_
     if destination_id is not None: _destination(household_id, destination_id)
     existing = SavingsTransfer.query.filter_by(household_id=household_id, operation_id=operation_id).first()
     if existing:
-        if (existing.amount_cents, existing.source_destination_id, existing.destination_id, existing.transfer_type) != (amount_cents, source_id, destination_id, transfer_type):
+        if (existing.amount_cents, existing.source_destination_id, existing.destination_id, existing.transfer_type, existing.income_pyf_protection_id) != (amount_cents, source_id, destination_id, transfer_type, income_pyf_protection_id):
             raise SavingsError("Operation ID was already used for a different transfer.")
         return existing
-    row = SavingsTransfer(household_id=household_id, operation_id=operation_id, amount_cents=amount_cents, source_destination_id=source_id, destination_id=destination_id, transfer_type=transfer_type, purpose=purpose[:200])
+    row = SavingsTransfer(household_id=household_id, operation_id=operation_id, amount_cents=amount_cents, source_destination_id=source_id, destination_id=destination_id, transfer_type=transfer_type, purpose=purpose[:200], income_pyf_protection_id=income_pyf_protection_id, economic_date=economic_date or datetime.now(timezone.utc).date(), external_direction=external_direction)
     db.session.add(row)
+    if not commit:
+        db.session.flush()
+        return row
     try: db.session.commit()
     except IntegrityError:
         db.session.rollback()
@@ -265,7 +268,7 @@ def apply_allocation(household_id: int, *, operation_id: str, cycle_key: str, pl
     try:
         db.session.add(run); db.session.flush()
         for index, item in enumerate(plan["allocations"]):
-            db.session.add(SavingsTransfer(household_id=household_id, operation_id=f"{operation_id}:{index}", destination_id=item["destination_id"], amount_cents=item["amount_cents"], transfer_type="pyf_allocation", purpose=item["reason"]))
+            db.session.add(SavingsTransfer(household_id=household_id, operation_id=f"{operation_id}:{index}", destination_id=item["destination_id"], amount_cents=item["amount_cents"], transfer_type="pyf_allocation", purpose=item["reason"], economic_date=datetime.now(timezone.utc).date()))
         db.session.commit()
     except IntegrityError:
         db.session.rollback()

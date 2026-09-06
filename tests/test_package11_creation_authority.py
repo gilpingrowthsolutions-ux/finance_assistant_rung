@@ -20,7 +20,7 @@ PRIOR_REVISION = "9f7a3d4c1e2b"
 # existing account.  Feature 5 legitimately extends the migration graph, so
 # it must assert the actual single Alembic head rather than the former Package
 # 11 checkpoint.
-HEAD_REVISION = "f5b1c7d9e2a4"
+HEAD_REVISION = "b25c9d3e7f77"
 
 
 def _run(args: list[str], *, db_path: Path) -> subprocess.CompletedProcess[str]:

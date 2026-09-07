@@ -157,8 +157,7 @@ def test_current_location_is_read_only(client):
     resp = client.get("/api/settings/current-location")
     assert resp.status_code == 200
     data = resp.get_json()
-    assert "zip_code" in data
-    assert "city_state" in data
+    assert "current_device_location" in data
     assert "selected_store" in data
     assert "location_sharing_enabled" in data
 

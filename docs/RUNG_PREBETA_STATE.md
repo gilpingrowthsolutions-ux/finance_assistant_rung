@@ -2,9 +2,9 @@
 
 ## Current / next state
 
-**CURRENT — OWNER BETA READY TO RESUME.** The P1 Overview setup-discoverability and duplicate-balance-action qualification matrix passed. Owner beta is not complete.
+**CURRENT — OWNER BETA READY FOR PHYSICAL LOCATION RECHECK.** The P1 location-truthfulness repair passed disposable automated and emulated-browser qualification. Physical device/browser permission and current-location confirmation remain owner acceptance; owner beta is not complete.
 
-**NEXT — founder/owner resumes personal beta testing.** External closed beta remains blocked until the owner beta is completed and any newly found blockers are addressed.
+**NEXT — founder/owner manually verifies Settings displays the actual current device location after restarting/revisiting the beta.** External closed beta remains blocked until owner beta is completed and any newly found blockers are addressed.
 
 ## Verified implemented
 
@@ -27,7 +27,7 @@
 
 ## Known defect
 
-- No separately confirmed current product defect is carried in this ledger.
+- No unresolved automated location-truthfulness defect is carried. Physical-device geolocation permission/location acceptance remains open.
 
 ## Unresolved
 

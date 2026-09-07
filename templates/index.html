@@ -6116,26 +6116,34 @@
             if (statusEl) statusEl.textContent = toggle.checked
               ? 'Location sharing is enabled. Rung can use your device location to discover nearby stores.'
               : 'Location sharing is off. Enable it to discover nearby supported stores.';
+            if (toggle.checked) refreshCurrentDeviceLocation();
+            else loadCurrentLocation();
           } else {
             toggle.checked = !toggle.checked;
             flash('Could not update location sharing setting.', 'error');
           }
         });
 
-        // Load current location context (read-only)
-        var locResp = await api('GET', '/api/settings/current-location');
-        if (locResp.ok && locResp.data) {
-          var loc = locResp.data;
-          var parts = [];
-          if (loc.zip_code) parts.push('ZIP: ' + escapeHtml(loc.zip_code));
-          if (loc.city_state) parts.push(escapeHtml(loc.city_state));
-          if (loc.latitude != null && loc.longitude != null) {
-            parts.push('GPS: ' + Number(loc.latitude).toFixed(4) + ', ' + Number(loc.longitude).toFixed(4));
-          }
+        function renderCurrentLocation(loc) {
+          var device = (loc || {}).current_device_location || {};
+          var location = device.location || {};
+          var lastKnown = device.last_known_location || {};
           if (currentLocEl) {
-            currentLocEl.innerHTML = parts.length
-              ? parts.map(function(p) { return '<span style="display:inline-block;padding:2px 8px;background:var(--bg-elev);border:1px solid var(--border);border-radius:999px;font-size:0.82rem;margin:2px;">' + p + '</span>'; }).join('')
-              : '<span style="color:var(--text-mute);">No location data yet. Enable Location Sharing when browser permission is available.</span>';
+            if (device.status === 'available') {
+              var parts = [];
+              if (location.zip_code) parts.push('ZIP: ' + escapeHtml(location.zip_code));
+              if (location.city_state) parts.push(escapeHtml(location.city_state));
+              if (location.latitude != null && location.longitude != null) parts.push('GPS: ' + Number(location.latitude).toFixed(4) + ', ' + Number(location.longitude).toFixed(4));
+              currentLocEl.innerHTML = '<strong style="display:block;margin-bottom:4px;">Current location</strong>' + parts.map(function(p) { return '<span style="display:inline-block;padding:2px 8px;background:var(--bg-elev);border:1px solid var(--border);border-radius:999px;font-size:0.82rem;margin:2px;">' + p + '</span>'; }).join('');
+            } else if (device.status === 'disabled') {
+              currentLocEl.innerHTML = '<span style="color:var(--text-mute);">Location sharing is off. Rung is not requesting your device location.</span>';
+            } else {
+              var last = [];
+              if (lastKnown.zip_code) last.push('ZIP: ' + escapeHtml(lastKnown.zip_code));
+              if (lastKnown.city_state) last.push(escapeHtml(lastKnown.city_state));
+              if (lastKnown.latitude != null && lastKnown.longitude != null) last.push('GPS: ' + Number(lastKnown.latitude).toFixed(4) + ', ' + Number(lastKnown.longitude).toFixed(4));
+              currentLocEl.innerHTML = '<strong style="display:block;margin-bottom:4px;">Location unavailable</strong><span style="color:var(--text-mute);">Rung couldn\'t get your current device location.</span><button type="button" class="btn is-ghost" id="settingsRetryLocation" style="margin-left:8px;">Try again</button>' + (last.length ? '<div style="margin-top:8px;"><strong style="font-size:.82rem;">Last known location</strong><div>' + last.map(function(p) { return '<span style="display:inline-block;padding:2px 8px;background:var(--bg-elev);border:1px solid var(--border);border-radius:999px;font-size:0.82rem;margin:2px;">' + p + '</span>'; }).join('') + '</div></div>' : '');
+            }
           }
           // Also update the store display from the canonical selected store
           var ss = loc.selected_store || {};
@@ -6148,6 +6156,42 @@
             }
           }
         }
+
+        async function loadCurrentLocation() {
+          var locResp = await api('GET', '/api/settings/current-location');
+          if (locResp.ok && locResp.data) {
+            renderCurrentLocation(locResp.data);
+            var retry = $('settingsRetryLocation');
+            if (retry) retry.addEventListener('click', refreshCurrentDeviceLocation);
+          }
+        }
+
+        async function refreshCurrentDeviceLocation() {
+          if (!toggle.checked) return;
+          if (!navigator.geolocation) {
+            await api('POST', '/api/location/current-device', { outcome: 'unavailable' });
+            await loadCurrentLocation();
+            return;
+          }
+          navigator.geolocation.getCurrentPosition(async function(position) {
+            var saved = await api('POST', '/api/location/current-device', {
+              outcome: 'available', latitude: position.coords.latitude, longitude: position.coords.longitude
+            });
+            if (saved.ok) {
+              await loadCurrentLocation();
+              await requestNearbyStores({ auto_detect: true, latitude: position.coords.latitude, longitude: position.coords.longitude });
+            }
+          }, async function() {
+            await api('POST', '/api/location/current-device', { outcome: 'unavailable' });
+            await loadCurrentLocation();
+          }, { timeout: 15000, maximumAge: 300000 });
+        }
+
+        await loadCurrentLocation();
+        if (toggle.checked) refreshCurrentDeviceLocation();
+        document.addEventListener('visibilitychange', function() {
+          if (document.visibilityState === 'visible' && toggle.checked) refreshCurrentDeviceLocation();
+        });
       })();
 
       async function loadUsageMeterPanel() {

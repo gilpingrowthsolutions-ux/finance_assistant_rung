@@ -119,12 +119,13 @@ class TestLocationSharing:
 # ── Current Location (read-only) ────────────────────────────────────────
 
 class TestCurrentLocation:
-    def test_returns_account_location(self, client):
+    def test_legacy_account_location_is_not_reported_as_current(self, client):
         resp = client.get("/api/settings/current-location")
         assert resp.status_code == 200
         body = resp.get_json()
-        assert body["zip_code"] == "65084"
-        assert body["city_state"] == "Eldon, MO"
+        assert "zip_code" not in body
+        location = body["current_device_location"]
+        assert location["status"] == "disabled"
 
     def test_includes_selected_store(self, client):
         resp = client.get("/api/settings/current-location")

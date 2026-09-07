@@ -367,6 +367,7 @@ HOUSEHOLD_STYLE_KEY = "shopping_style"
 SAFE_BUFFER_SETTING_KEY = "safe_to_spend_buffer_usd"
 PYF_TARGET_SETTING_KEY = "pyf_long_term_target_percent"
 LOCATION_SHARING_SETTING_KEY = "location_sharing_enabled"
+CURRENT_DEVICE_LOCATION_SETTING_KEY = "current_device_location"
 NEXT_PAYDAY_SETTING_KEY = "next_payday_date"
 REQUIRED_EXPENSE_REVIEW_SETTING_KEY = "onboarding_required_expense_review"
 REQUIRED_EXPENSE_UNANSWERED = "unanswered"
@@ -2791,6 +2792,56 @@ def _reverse_geocode_us_location(latitude: float, longitude: float) -> dict[str,
         }
     except Exception:
         return {}
+
+
+def _current_device_location_state(account: Account) -> dict[str, Any]:
+    """Return household-scoped live-location state without treating legacy data as live.
+
+    Account location fields predate device-location truthfulness.  They remain
+    compatibility data, and can only be exposed as a last-known location until
+    this browser has successfully supplied a fresh device position.
+    """
+    raw = get_setting(CURRENT_DEVICE_LOCATION_SETTING_KEY, "")
+    try:
+        state = json.loads(raw) if raw else {}
+    except (TypeError, ValueError):
+        state = {}
+    if not isinstance(state, dict):
+        state = {}
+
+    last_known = state.get("last_known")
+    if not isinstance(last_known, dict):
+        last_known = {}
+    if not last_known and any(value not in (None, "") for value in (
+        account.latitude, account.longitude, account.zip_code, account.city_state,
+    )):
+        last_known = {
+            "latitude": account.latitude,
+            "longitude": account.longitude,
+            "zip_code": account.zip_code or "",
+            "city_state": account.city_state or "",
+            "source": "legacy",
+        }
+    return {"status": str(state.get("status") or "unavailable"), "last_known": last_known}
+
+
+def _current_device_location_payload(account: Account) -> dict[str, Any]:
+    enabled = get_setting(LOCATION_SHARING_SETTING_KEY, "false") == "true"
+    if not enabled:
+        return {"status": "disabled", "location_sharing_enabled": False}
+
+    state = _current_device_location_state(account)
+    if state["status"] == "available" and state["last_known"]:
+        return {
+            "status": "available",
+            "location_sharing_enabled": True,
+            "location": state["last_known"],
+        }
+    return {
+        "status": "unavailable",
+        "location_sharing_enabled": True,
+        "last_known_location": state["last_known"] or None,
+    }
 
 
 def _store_city_from_address(address: str) -> str:
@@ -5987,23 +6038,16 @@ def location_sharing_settings():
 
 @app.route("/api/settings/current-location", methods=["GET"])
 def current_location_settings():
-    """Read-only current device-location context from persisted account state.
-
-    Returns the stored ZIP, city/state, and selected-store information so
-    Settings can display a read-only location context. Device GPS may
-    refresh nearby-store discovery context but must never silently
-    select or change the canonical shopping store.
-    """
+    """Read-only live-device context and separately scoped selected store."""
     account = _household_account()
     if not account:
         return jsonify({"error": "Account not found"}), 404
 
     selected = get_selected_store(current_household_id(), account=account)
+    device_location = _current_device_location_payload(account)
     return jsonify({
-        "zip_code": account.zip_code or "",
-        "city_state": account.city_state or "",
-        "latitude": account.latitude,
-        "longitude": account.longitude,
+        # Compatibility mirrors are deliberately no longer reported as current.
+        "current_device_location": device_location,
         "selected_store": {
             "retailer": selected.get("retailer", ""),
             "name": selected.get("name", ""),
@@ -6011,8 +6055,52 @@ def current_location_settings():
             "address": selected.get("address", ""),
             "canonical": selected.get("canonical", False),
         },
-        "location_sharing_enabled": get_setting(LOCATION_SHARING_SETTING_KEY, 'false') == 'true',
+        "location_sharing_enabled": device_location["location_sharing_enabled"],
     })
+
+
+@app.route("/api/location/current-device", methods=["POST"])
+def update_current_device_location():
+    """Record a browser-obtained device location without changing the store."""
+    account = _household_account()
+    if not account:
+        return jsonify({"error": "Account not found"}), 404
+    if get_setting(LOCATION_SHARING_SETTING_KEY, "false") != "true":
+        return jsonify({"error": "location_sharing_disabled"}), 409
+
+    data: dict[str, Any] = request.json or {}
+    outcome = str(data.get("outcome") or "").strip().lower()
+    prior = _current_device_location_state(account)
+    if outcome == "unavailable":
+        set_setting(CURRENT_DEVICE_LOCATION_SETTING_KEY, json.dumps({
+            "status": "unavailable",
+            "last_known": prior["last_known"],
+        }))
+        return jsonify({"current_device_location": _current_device_location_payload(account)})
+    if outcome != "available":
+        return jsonify({"error": "invalid_location_outcome"}), 400
+
+    try:
+        latitude = float(data.get("latitude"))
+        longitude = float(data.get("longitude"))
+    except (TypeError, ValueError):
+        return jsonify({"error": "invalid_current_location"}), 400
+    if not (-90 <= latitude <= 90) or not (-180 <= longitude <= 180):
+        return jsonify({"error": "invalid_current_location"}), 400
+
+    reverse_geo = _reverse_geocode_us_location(latitude, longitude)
+    last_known = {
+        "latitude": latitude,
+        "longitude": longitude,
+        "zip_code": _normalize_zip_code(reverse_geo.get("zip_code")),
+        "city_state": str(reverse_geo.get("city_state") or "").strip(),
+        "source": "device",
+    }
+    set_setting(CURRENT_DEVICE_LOCATION_SETTING_KEY, json.dumps({
+        "status": "available",
+        "last_known": last_known,
+    }))
+    return jsonify({"current_device_location": _current_device_location_payload(account)})
 
 
 @app.route("/api/decision/can-i-buy", methods=["POST"])

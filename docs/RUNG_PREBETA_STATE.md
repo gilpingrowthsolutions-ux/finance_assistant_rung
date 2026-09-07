@@ -2,7 +2,7 @@
 
 ## Current / next state
 
-**CURRENT — OWNER BETA IN PROGRESS.** Owner physical current-location acceptance and the Overview visual repair are complete; owner beta remains open for its remaining acceptance work.
+**CURRENT — OWNER BETA IN PROGRESS.** Owner physical current-location acceptance and the owner-approved Overview layout repair are complete; owner beta remains open for its remaining acceptance work.
 
 **NEXT — continue the remaining owner-beta acceptance.** External closed beta remains blocked until owner beta is completed and any newly found blockers are addressed.
 
@@ -19,6 +19,7 @@
 - The duplicate Overview Copilot content CTA is removed; the compact top-right CTA remains.
 - The Checking Balance row's label and update context render separately.
 - The misleading green Safe-to-Spend pseudo-gauge fragment is removed. The arch is intentionally a neutral, non-quantitative frame.
+- The Safe-to-Spend hero copy no longer overlaps the neutral frame. Overview uses one cohesive shared two-column desktop grid: This Pay Cycle aligns with Safe-to-Spend, and Last Pay Cycle aligns beneath Your money is protected. The single Overview Copilot CTA and single Overview balance action remain intact.
 
 ## Decided but not implemented
 

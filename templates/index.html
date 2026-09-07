@@ -235,13 +235,13 @@
     .overview-head-actions { display:flex; gap:9px; flex-wrap:wrap; justify-content:flex-end; }
     .overview-shell-status { margin-bottom:14px; }
     .overview-shell-status:empty { display:none; }
-    .overview-grid { display:grid; grid-template-columns:minmax(0,1.45fr) minmax(290px,.85fr); gap:16px; align-items:stretch; }
+    .overview-grid { display:grid; grid-template-columns:minmax(0,1.45fr) minmax(290px,.85fr); gap:16px; align-items:start; }
     .overview-card { background:var(--bg-elev); border:1px solid var(--border); border-radius:18px; box-shadow:var(--shadow-sm); padding:22px; }
     .overview-hero { min-height:330px; padding:28px 30px 24px; display:flex; flex-direction:column; }
     .overview-eyebrow { color:var(--accent); font-size:.7rem; font-weight:800; letter-spacing:.09em; text-transform:uppercase; }
-    .safe-gauge { width:min(330px,100%); margin:12px auto 0; position:relative; text-align:center; padding-top:38px; }
+    .safe-gauge { width:min(330px,100%); height:238px; margin:12px auto 0; position:relative; text-align:center; flex:0 0 auto; }
     .safe-gauge-arc { position:absolute; inset:0 auto auto 50%; transform:translateX(-50%); width:250px; height:125px; border:15px solid #e5ebe7; border-bottom:0; border-radius:250px 250px 0 0; overflow:hidden; }
-    .safe-gauge-copy { position:relative; padding-top:32px; }
+    .safe-gauge-copy { position:relative; padding-top:132px; }
     .safe-gauge-label { color:var(--text-dim); font-size:.82rem; font-weight:650; }
     #safeHeroAmount { font-size:clamp(2.45rem,5vw,3.55rem); font-weight:800; line-height:1; letter-spacing:-.055em; margin-top:7px; font-variant-numeric:tabular-nums; }
     #safeHeroUntil { color:var(--text); font-size:.94rem; font-weight:650; margin-top:8px; }
@@ -265,7 +265,6 @@
     .protection-context { display:block; color:var(--text-mute); font-size:.69rem; margin-top:2px; }
     .protection-value { font-size:.94rem; font-weight:750; font-variant-numeric:tabular-nums; white-space:nowrap; }
     .pyf-status { margin-top:auto; border:1px solid var(--border); background:var(--bg-sunken); }
-    .overview-secondary-grid { display:grid; grid-template-columns:minmax(0,1.2fr) minmax(260px,.8fr); gap:16px; margin-top:16px; }
     .overview-cycle-card { display:flex; align-items:center; justify-content:space-between; gap:18px; }
     .overview-cycle-card .trajectory-value { font-size:1.32rem; margin-top:3px; }
     .overview-cycle-card .panel-sub { margin:5px 0 0; line-height:1.45; }
@@ -277,7 +276,6 @@
     .overview-action.is-primary .overview-action-icon { background:rgba(255,255,255,.17); color:#fff; }
     .overview-action strong { display:block; font-size:.86rem; }
     .overview-action span:last-child { display:block; font-size:.7rem; opacity:.74; margin-top:3px; line-height:1.35; }
-    .overview-lower { margin-top:16px; display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1fr); gap:16px; align-items:start; }
     #overviewBehaviorCard { margin:0; }
     .overview-recap-card { min-height:100%; }
     .overview-setup { display:none; align-items:flex-start; justify-content:space-between; gap:16px; padding:13px 15px; border:1px solid #e6c889; background:#fff9eb; color:#725116; border-radius:14px; margin-bottom:14px; }
@@ -291,7 +289,7 @@
     .overview-balance-dialog::backdrop { background:rgba(16,33,24,.36); backdrop-filter:blur(3px); }
     .overview-balance-inner { padding:24px; }
     .overview-dialog-actions { display:flex; justify-content:flex-end; gap:8px; margin-top:18px; }
-    @media (max-width:980px) { .overview-grid, .overview-secondary-grid, .overview-lower { grid-template-columns:1fr; } .overview-hero { min-height:310px; } }
+    @media (max-width:980px) { .overview-grid { grid-template-columns:1fr; } .overview-hero { min-height:310px; } }
 
     /* UI convergence slice 2: approved Money hierarchy. */
     #transactions .page-head { align-items:center; margin-bottom:18px; }
@@ -434,8 +432,9 @@
       .overview-head-actions .btn { flex:1; }
       .overview-card { padding:18px; border-radius:16px; }
       .overview-hero { min-height:340px; padding:22px 18px 18px; }
-      .safe-gauge { margin-top:8px; padding-top:30px; }
+      .safe-gauge { height:218px; margin-top:8px; }
       .safe-gauge-arc { width:220px; height:110px; border-width:13px; }
+      .safe-gauge-copy { padding-top:116px; }
       #safeHeroAmount { font-size:2.85rem; }
       .overview-actions { grid-template-columns:1fr; }
       .overview-cycle-card { align-items:flex-start; }
@@ -1985,16 +1984,12 @@
           </div>
           <div id="pyfStatusRow" class="pyf-status" style="display:none;"><span class="pyf-dot is-missing"></span><span id="pyfStatusText"></span></div>
         </article>
-      </div>
 
-      <div class="overview-secondary-grid">
         <article id="overviewTrajectory" class="overview-card overview-cycle-card" aria-live="polite">
           <div><div class="overview-eyebrow">This pay cycle</div><div id="overviewTrajectoryValue" class="trajectory-value">Loading cycle…</div><div id="overviewTrajectoryReason" class="panel-sub">Current dates, expected income, and required obligations.</div></div>
           <button id="openPaycheckTimeline" class="btn is-tertiary" type="button">View timeline</button>
         </article>
-      </div>
 
-      <div class="overview-lower">
         <article id="overviewPaydayRecap" class="overview-card overview-recap-card" aria-live="polite">
           <div class="overview-card-head"><div><div class="overview-eyebrow">Last pay cycle</div><div id="overviewRecapValue" class="trajectory-value" style="font-size:1.12rem;">Loading recap…</div></div><button id="openPaydayRecap" class="btn is-tertiary" type="button">View recap</button></div>
           <div id="overviewRecapSummary" class="overview-card-sub">Reviewing confirmed completed-cycle activity.</div>

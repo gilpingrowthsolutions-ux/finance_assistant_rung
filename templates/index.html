@@ -241,7 +241,6 @@
     .overview-eyebrow { color:var(--accent); font-size:.7rem; font-weight:800; letter-spacing:.09em; text-transform:uppercase; }
     .safe-gauge { width:min(330px,100%); margin:12px auto 0; position:relative; text-align:center; padding-top:38px; }
     .safe-gauge-arc { position:absolute; inset:0 auto auto 50%; transform:translateX(-50%); width:250px; height:125px; border:15px solid #e5ebe7; border-bottom:0; border-radius:250px 250px 0 0; overflow:hidden; }
-    .safe-gauge-arc::before { content:""; position:absolute; inset:-15px; border:15px solid transparent; border-top-color:var(--accent); border-left-color:var(--accent); border-radius:50%; transform:rotate(-17deg); }
     .safe-gauge-copy { position:relative; padding-top:32px; }
     .safe-gauge-label { color:var(--text-dim); font-size:.82rem; font-weight:650; }
     #safeHeroAmount { font-size:clamp(2.45rem,5vw,3.55rem); font-weight:800; line-height:1; letter-spacing:-.055em; margin-top:7px; font-variant-numeric:tabular-nums; }
@@ -262,8 +261,8 @@
     button.protection-row { width:100%; border:0; background:transparent; color:inherit; text-align:left; font:inherit; cursor:pointer; border-radius:10px; }
     button.protection-row:hover, button.protection-row:focus-visible { background:var(--accent-soft); outline:none; }
     .protection-icon { width:32px; height:32px; display:grid; place-items:center; border-radius:10px; background:var(--accent-soft); color:var(--accent); font-weight:800; }
-    .protection-label { color:var(--text-dim); font-size:.78rem; }
-    .protection-context { color:var(--text-mute); font-size:.69rem; margin-top:2px; }
+    .protection-label { display:block; color:var(--text-dim); font-size:.78rem; }
+    .protection-context { display:block; color:var(--text-mute); font-size:.69rem; margin-top:2px; }
     .protection-value { font-size:.94rem; font-weight:750; font-variant-numeric:tabular-nums; white-space:nowrap; }
     .pyf-status { margin-top:auto; border:1px solid var(--border); background:var(--bg-sunken); }
     .overview-secondary-grid { display:grid; grid-template-columns:minmax(0,1.2fr) minmax(260px,.8fr); gap:16px; margin-top:16px; }
@@ -437,7 +436,6 @@
       .overview-hero { min-height:340px; padding:22px 18px 18px; }
       .safe-gauge { margin-top:8px; padding-top:30px; }
       .safe-gauge-arc { width:220px; height:110px; border-width:13px; }
-      .safe-gauge-arc::before { inset:-13px; border-width:13px; }
       #safeHeroAmount { font-size:2.85rem; }
       .overview-actions { grid-template-columns:1fr; }
       .overview-cycle-card { align-items:flex-start; }
@@ -1994,9 +1992,6 @@
           <div><div class="overview-eyebrow">This pay cycle</div><div id="overviewTrajectoryValue" class="trajectory-value">Loading cycle…</div><div id="overviewTrajectoryReason" class="panel-sub">Current dates, expected income, and required obligations.</div></div>
           <button id="openPaycheckTimeline" class="btn is-tertiary" type="button">View timeline</button>
         </article>
-        <div class="overview-actions" aria-label="Overview actions">
-          <button id="overviewCopilotCard" class="overview-action is-primary" type="button"><span class="overview-action-icon">✦</span><span><strong>Ask Copilot</strong><span>Check affordability or ask about your plan</span></span></button>
-        </div>
       </div>
 
       <div class="overview-lower">
